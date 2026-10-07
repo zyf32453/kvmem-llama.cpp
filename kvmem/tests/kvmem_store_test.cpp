@@ -50,6 +50,25 @@ static void test_register_append() {
     CHECK(s.blocks()[4].orig_pos_start == 128 * 4);
 }
 
+static void test_redundancy_aware_topk() {
+    KvMemStoreConfig cfg;
+    cfg.block_tokens = 32;
+    cfg.select_budget = 4 * 32;
+    cfg.sink_blocks = 1;
+    cfg.recent_blocks = 1;
+    cfg.redundancy_aware = true;
+    cfg.redundancy_threshold = 0.90;
+    cfg.importance_weight = 0.10;
+    KvMemStore s(cfg);
+    s.register_append(6 * 32);
+    // Block 2 is almost a duplicate and must be rejected even though its
+    // importance is highest. Sink and newest blocks remain pinned.
+    s.set_retrieval_scores({0.0, 0.8, 1.0, 0.6, 0.2, 0.0});
+    s.set_redundancy_scores({0.0, 0.1, 0.95, 0.2, 0.0, 0.0});
+    const auto selected = s.pick_topk_blocks();
+    CHECK((selected == std::vector<uint32_t>{0, 1, 4, 5}));
+}
+
 static void test_selection_diff_and_remap() {
     KvMemStoreConfig cfg; cfg.block_tokens = 128;
     KvMemStore s(cfg);
@@ -1132,6 +1151,7 @@ int main() {
     test_media_suffix_over_budget();
     test_media_groups_with_shared_boundary();
     test_register_append();
+    test_redundancy_aware_topk();
     test_selection_diff_and_remap();
     test_immutable_source_selection_uses_bounded_delta_remaps();
     test_cold_immutable_same_position_rebuilds_k();

@@ -68,6 +68,7 @@ struct KvMemBlock {
     double   attn_score = 0.0;
     double   profile_score = 0.0;    // window-local cumulative attention heat
     double   retrieval_score = 0.0;  // global retrieval score
+    double   redundancy_score = -2.0; // max cosine; -2 means not evaluated
 
     uint32_t orig_pos_end() const { return orig_pos_start + n_tokens; }
 };
@@ -241,6 +242,11 @@ struct KvMemStoreConfig {
                                      // 0 => keep no suffix blocks unconditionally
     KvMemMethod select_method = KvMemMethod::Retrieval; // --kvmem-method
     KvMemSelectPolicy select_policy = KvMemSelectPolicy::TopK;
+    // Redundancy-aware selection: reject near-duplicate middle blocks, then
+    // rank remaining candidates by importance/non-redundancy.
+    bool redundancy_aware = false;
+    double redundancy_threshold = 0.90;
+    double importance_weight = 0.10;
     KvMemRetrievalMethod retrieval_method = KvMemRetrievalMethod::MeanK;
     KvMemIndexPlacement index_placement = KvMemIndexPlacement::GPU;
     uint64_t index_staging_bytes = 64ull * 1024ull * 1024ull;
@@ -439,6 +445,8 @@ public:
     // set_attn_scores for backwards compatibility, but also preserves the
     // retrieval/profile split used by the quota selector.
     void set_retrieval_scores(const std::vector<double> &scores);
+    // Scores are max cosine similarity in [-1,1], indexed by block id.
+    void set_redundancy_scores(const std::vector<double> &scores);
 
     void set_block_tier(uint32_t block_id, KvTier tier,
                         int32_t cpu_slot = -1,
@@ -479,10 +487,6 @@ private:
     std::vector<std::pair<uint32_t, uint32_t>> media_ranges_;
 public:
     void set_media_ranges(std::vector<std::pair<uint32_t, uint32_t>> ranges) { media_ranges_ = std::move(ranges); }
-    size_t allocated_bytes() const {
-        return sizeof(*this) + blocks_.capacity()*sizeof(KvMemBlock) +
-            media_ranges_.capacity()*sizeof(std::pair<uint32_t,uint32_t>);
-    }
 private:
     KvMemStoreConfig cfg_;
     uint32_t runtime_select_budget_ = 0;

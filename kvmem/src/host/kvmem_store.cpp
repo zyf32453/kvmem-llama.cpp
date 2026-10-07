@@ -247,6 +247,13 @@ void KvMemStore::set_retrieval_scores(const std::vector<double> &scores) {
     }
 }
 
+void KvMemStore::set_redundancy_scores(const std::vector<double> &scores) {
+    const uint32_t n = block_count();
+    for (uint32_t i = 0; i < n; ++i) {
+        blocks_[i].redundancy_score = i < scores.size() ? scores[i] : -2.0;
+    }
+}
+
 void KvMemStore::set_block_tier(uint32_t block_id, KvTier tier,
                                 int32_t cpu_slot, int32_t nvme_slot) {
     if (block_id >= block_count()) return;
@@ -538,15 +545,30 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         std::vector<uint32_t> candidates;
         candidates.reserve(n - kept_count);
         for (uint32_t i = 0; i < n; ++i) {
-            if (!kept[i]) candidates.push_back(i);
+            if (kept[i]) continue;
+            if (cfg_.redundancy_aware && blocks_[i].redundancy_score >= -1.0 &&
+                blocks_[i].redundancy_score >= cfg_.redundancy_threshold) {
+                continue;
+            }
+            candidates.push_back(i);
         }
         if (candidates.empty()) return;
         const uint32_t need = std::min<uint32_t>(
             std::min<uint32_t>(quota, budget - kept_count),
             static_cast<uint32_t>(candidates.size()));
         auto better = [&](uint32_t a, uint32_t b) {
-            const double sa = score_fn(blocks_[a]);
-            const double sb = score_fn(blocks_[b]);
+            auto combined = [&](uint32_t id) {
+                const double importance = score_fn(blocks_[id]);
+                if (!cfg_.redundancy_aware || blocks_[id].redundancy_score < -1.0) return importance;
+                const double w = std::clamp(cfg_.importance_weight, 0.0, 1.0);
+                const double novelty = 1.0 - std::clamp(
+                    (blocks_[id].redundancy_score + 1.0) * 0.5, 0.0, 1.0);
+                const double useful_importance = std::clamp(
+                    (importance + 1.0) * 0.5, 0.0, 1.0);
+                return w * useful_importance + (1.0 - w) * novelty;
+            };
+            const double sa = combined(a);
+            const double sb = combined(b);
             if (sa != sb) return sa > sb;
             return a > b;
         };
@@ -596,14 +618,30 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         std::vector<uint32_t> candidates;
         candidates.reserve(n - kept_count);
         for (uint32_t i = 0; i < n; ++i) {
-            if (!kept[i]) candidates.push_back(i);
+            if (kept[i]) continue;
+            if (cfg_.redundancy_aware && blocks_[i].redundancy_score >= -1.0 &&
+                blocks_[i].redundancy_score >= cfg_.redundancy_threshold) {
+                continue;
+            }
+            candidates.push_back(i);
         }
         const uint32_t need = budget - kept_count;
         // Partial sort by attn_score desc; tie-break by recency (higher id) so
         // selection is deterministic.
         auto better = [&](uint32_t a, uint32_t b) {
-            if (blocks_[a].attn_score != blocks_[b].attn_score) {
-                return blocks_[a].attn_score > blocks_[b].attn_score;
+            auto combined = [&](uint32_t id) {
+                if (!cfg_.redundancy_aware || blocks_[id].redundancy_score < -1.0) {
+                    return blocks_[id].attn_score;
+                }
+                const double w = std::clamp(cfg_.importance_weight, 0.0, 1.0);
+                const double importance = std::clamp(
+                    (blocks_[id].attn_score + 1.0) * 0.5, 0.0, 1.0);
+                const double novelty = 1.0 - std::clamp(
+                    (blocks_[id].redundancy_score + 1.0) * 0.5, 0.0, 1.0);
+                return w * importance + (1.0 - w) * novelty;
+            };
+            if (combined(a) != combined(b)) {
+                return combined(a) > combined(b);
             }
             return a > b;
         };
