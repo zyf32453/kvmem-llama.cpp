@@ -70,6 +70,7 @@ public:
     llama_kv_cache * get_kv() { return kv_; }
     kvmem::KvMemRuntime & runtime() { return *runtime_; }
     const kvmem::KvMemRuntime & runtime() const { return *runtime_; }
+    bool multi_gpu() const;
 
     uint32_t kv_size() const { return kv_size_; }
     uint32_t block_tokens() const { return block_tokens_; }
@@ -97,6 +98,7 @@ public:
     void register_capture(struct ggml_tensor * t, int il, char which);
     void capture_on_new_graph();
     bool capture_can_reuse(uint32_t n_tokens, uint32_t n_pos, const llama_pos * pos) const;
+    uint64_t capture_stamp() const { return attention_epoch_; }
     void harvest_pending(struct ggml_backend_sched * sched);
     void harvest_flush();
     void harvest_perf_print_sum();

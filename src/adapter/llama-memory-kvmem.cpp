@@ -41,6 +41,10 @@
 
 static llama_kvmem_params g_kvmem_params = {};
 
+bool llama_memory_kvmem::multi_gpu() const {
+    return model_.n_devices() > 1;
+}
+
 struct llama_memory_kvmem::GdnReplay {
     ggml_backend_buffer_ptr descriptors;
     cudaStream_t stream = nullptr;
