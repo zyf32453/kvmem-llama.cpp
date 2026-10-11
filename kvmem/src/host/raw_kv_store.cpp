@@ -754,6 +754,14 @@ bool RawKvStore::has_k(uint32_t block_id, uint32_t il) const {
     return !lb.k.empty() || lb.k_on_nvme || lb.k_flushing;
 }
 
+bool RawKvStore::has_mean_k(uint32_t block_id, uint32_t il) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (block_id >= blocks_.size() || il >= cfg_.n_layer) {
+        return false;
+    }
+    return blocks_[block_id].layers[il].mean_tokens > 0;
+}
+
 bool RawKvStore::has_k_gpu(uint32_t block_id, uint32_t il, uint32_t n) const {
     std::lock_guard<std::mutex> lk(mu_);
     if (block_id >= blocks_.size() || il >= cfg_.n_layer) {

@@ -40,6 +40,7 @@
 #include <mutex>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 
 
@@ -476,6 +477,19 @@ static kvmem::KvMemRuntimeConfig make_runtime_cfg(
     cfg.store.select_method = kvmem_current_execution().params.method == 1
         ? kvmem::KvMemMethod::Retrieval
         : kvmem::KvMemMethod::Recency;
+    const char * redundancy_env = std::getenv("KVMEM_REDUNDANCY");
+    cfg.store.redundancy_aware = !redundancy_env ||
+        redundancy_env[0] == '\0' || std::strcmp(redundancy_env, "0") != 0;
+    auto env_score = [](const char * name, double fallback) {
+        const char * value = std::getenv(name);
+        if (!value || !value[0]) return fallback;
+        char * end = nullptr;
+        const double parsed = std::strtod(value, &end);
+        return end != value && *end == '\0' && parsed >= 0.0 && parsed <= 1.0
+            ? parsed : fallback;
+    };
+    cfg.store.redundancy_threshold = env_score("KVMEM_REDUNDANCY_THRESHOLD", 0.90);
+    cfg.store.importance_weight = env_score("KVMEM_REDUNDANCY_IMPORTANCE_WEIGHT", 0.10);
     cfg.store.sink_blocks = sink_tokens == 0
         ? 1u
         : std::max(1u, sink_tokens / block_tokens);
@@ -1027,6 +1041,10 @@ void llama_memory_kvmem::reset_turn_policy() {
     explicit_spans_ = false;
     query_frozen_ = false;
     turn_spans_ = {};
+    thinking_spans_cache_.clear();
+    thinking_scan_pos_ = 0;
+    thinking_open_begin_ = 0;
+    thinking_open_ = false;
     retrieval_pinned_ = false;
     keep_selected_ = false;
     prefill_capture_ = true;
@@ -4193,6 +4211,131 @@ void llama_memory_kvmem::score_retrieval() {
         scores[b] = nlay ? acc / nlay : 0;
     }
     store.set_retrieval_scores(scores);
+    if (!runtime_->config().store.redundancy_aware) {
+        store.set_redundancy_scores(std::vector<double>(nblk, -2.0));
+        return;
+    }
+
+    // Block redundancy for long thinking traces. Compare a compact projection
+    // of each block's per-layer mean keys, and penalize the older block when
+    // a later block repeats it. Only complete 32-token blocks inside a
+    // <think> span longer than 1024 tokens are eligible. Sink, recent, and
+    // partial blocks are left for the selector's existing pins.
+    const uint32_t token_limit = std::min<uint32_t>(
+        store.total_tokens(), static_cast<uint32_t>(row_positions_.size()));
+    if (token_limit < thinking_scan_pos_) {
+        thinking_spans_cache_.clear();
+        thinking_scan_pos_ = 0;
+        thinking_open_begin_ = 0;
+        thinking_open_ = false;
+    }
+    const llama_vocab * vocab = llama_model_get_vocab(&model_);
+    char piece[256];
+    for (uint32_t pos = thinking_scan_pos_; pos < token_limit; ++pos) {
+        const llama_token token = row_positions_[pos].token;
+        if (token == LLAMA_TOKEN_NULL) continue;
+        const int n_piece = llama_token_to_piece(vocab, token, piece,
+                                                  sizeof(piece), 0, true);
+        if (n_piece <= 0 || n_piece >= (int) sizeof(piece)) continue;
+        const std::string_view text(piece, (size_t) n_piece);
+        if (text == "<think>") {
+            thinking_open_ = true;
+            thinking_open_begin_ = pos + 1;
+        } else if (text == "</think>" && thinking_open_) {
+            if (pos > thinking_open_begin_ && pos - thinking_open_begin_ > 1024) {
+                thinking_spans_cache_.emplace_back(thinking_open_begin_, pos);
+            }
+            thinking_open_ = false;
+        }
+    }
+    thinking_scan_pos_ = token_limit;
+    auto thinking_spans = thinking_spans_cache_;
+    if (thinking_open_ && token_limit > thinking_open_begin_ &&
+        token_limit - thinking_open_begin_ > 1024) {
+        thinking_spans.emplace_back(thinking_open_begin_, token_limit);
+    }
+
+    std::vector<uint8_t> eligible(nblk, 0);
+    uint32_t eligible_blocks = 0;
+    for (uint32_t b = 0; b < nblk; ++b) {
+        const auto & block = store.blocks()[b];
+        if (block_tokens_ != 32 || block.n_tokens != 32) continue;
+        for (const auto & span : thinking_spans) {
+            if (block.orig_pos_start >= span.first &&
+                block.orig_pos_end() <= span.second) {
+                eligible[b] = 1;
+                ++eligible_blocks;
+                break;
+            }
+        }
+    }
+
+    constexpr uint32_t kRedundancyDims = 64;
+    std::vector<float> descriptors((size_t) nblk * kRedundancyDims, 0.0f);
+    std::vector<uint8_t> descriptor_valid(nblk, 0);
+    for (uint32_t b = 0; b < nblk; ++b) {
+        if (!eligible[b] || !raw_->has_block(b)) continue;
+        float * dst = descriptors.data() + (size_t) b * kRedundancyDims;
+        uint32_t layers = 0;
+        for (uint32_t il = 0; il < n_layer_; ++il) {
+            if (!raw_->has_mean_k(b, il)) continue;
+            raw_->mean_k(b, il, mk.data());
+            for (uint32_t d = 0; d < n_embd_k_; ++d) {
+                const uint32_t mixed = d * 2654435761u + il * 1013904223u;
+                const uint32_t bin = mixed % kRedundancyDims;
+                const float sign = ((d * 2246822519u + il * 3266489917u) & 0x80000000u)
+                    ? 1.0f : -1.0f;
+                dst[bin] += sign * mk[d];
+            }
+            ++layers;
+        }
+        if (layers == 0) continue;
+        float norm = 0.0f;
+        for (uint32_t d = 0; d < kRedundancyDims; ++d) norm += dst[d] * dst[d];
+        norm = std::sqrt(norm);
+        if (norm > 1e-8f) {
+            for (uint32_t d = 0; d < kRedundancyDims; ++d) dst[d] /= norm;
+            descriptor_valid[b] = 1;
+        }
+    }
+    std::vector<double> redundancy(nblk, -2.0);
+    if (!thinking_spans.empty()) {
+        for (uint32_t b = 0; b < nblk; ++b) {
+            if (!eligible[b] || !descriptor_valid[b]) continue;
+            const float * a = descriptors.data() + (size_t) b * kRedundancyDims;
+            double best = -1.0;
+            const uint32_t local_end = std::min<uint32_t>(nblk, b + 65);
+            auto compare = [&](uint32_t c) {
+                if (!eligible[c] || !descriptor_valid[c]) return;
+                const float * other = descriptors.data() + (size_t) c * kRedundancyDims;
+                double dot = 0.0;
+                for (uint32_t d = 0; d < kRedundancyDims; ++d) dot += a[d] * other[d];
+                best = std::max(best, dot);
+            };
+            for (uint32_t c = b + 1; c < local_end; ++c) compare(c);
+            // Repeated text can recur far from its first copy. Also compare
+            // against the newest blocks outside the local window.
+            const uint32_t recent_begin = nblk > 64 ? nblk - 64 : b + 1;
+            for (uint32_t c = std::max(b + 1, recent_begin); c < nblk; ++c) {
+                if (c >= local_end) compare(c);
+            }
+            redundancy[b] = best;
+        }
+    }
+    store.set_redundancy_scores(redundancy);
+    if (trace_) {
+        uint32_t rejected = 0;
+        for (uint32_t b = 0; b < nblk; ++b) {
+            rejected += redundancy[b] >= runtime_->config().store.redundancy_threshold;
+        }
+        kvmem_diag("KVMEM_REDUNDANCY enabled=%d eligible_blocks=%u thinking_spans=%zu "
+                   "rejected_candidates=%u threshold=%.3f lambda=%.3f dims=%u\n",
+                   (int) runtime_->config().store.redundancy_aware,
+                   eligible_blocks, thinking_spans.size(), rejected,
+                   runtime_->config().store.redundancy_threshold,
+                   runtime_->config().store.importance_weight,
+                   kRedundancyDims);
+    }
 }
 
 void llama_memory_kvmem::retr_perf_print() {

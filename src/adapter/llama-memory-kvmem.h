@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 struct llama_model;
@@ -435,6 +436,12 @@ private:
     int32_t query_end_ = -1;
     int32_t force_pos_ = -1;
     llama_kvmem_turn_spans turn_spans_;
+    // Closed <think> spans longer than 1024 tokens, plus the scan cursor.
+    // Invalidated with the turn because row_positions_ moves on a store swap.
+    std::vector<std::pair<uint32_t, uint32_t>> thinking_spans_cache_;
+    uint32_t thinking_scan_pos_ = 0;
+    uint32_t thinking_open_begin_ = 0;
+    bool thinking_open_ = false;
     bool explicit_spans_ = false;
     bool query_frozen_ = false;
     uint64_t attention_epoch_ = 0;

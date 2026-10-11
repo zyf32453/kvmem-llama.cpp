@@ -67,6 +67,7 @@ public:
 
     bool has_block(uint32_t block_id) const;
     bool has_k(uint32_t block_id, uint32_t il) const;
+    bool has_mean_k(uint32_t block_id, uint32_t il) const;
     bool has_k_gpu(uint32_t block_id, uint32_t il, uint32_t n = 1) const;
     bool has_v(uint32_t block_id, uint32_t il) const;
     bool has_v_gpu(uint32_t block_id, uint32_t il, uint32_t n = 1) const;

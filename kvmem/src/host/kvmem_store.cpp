@@ -22,6 +22,23 @@ uint32_t clamp_u32(uint32_t value, uint32_t lo, uint32_t hi) {
     return std::min(std::max(value, lo), hi);
 }
 
+bool redundancy_rejected(const KvMemStoreConfig & cfg, const KvMemBlock & block) {
+    return cfg.redundancy_aware && block.redundancy_score >= -1.0 &&
+        block.redundancy_score >= cfg.redundancy_threshold;
+}
+
+// Unevaluated blocks keep their retrieval score. Evaluated blocks mix
+// importance with novelty; a cosine of 1 ranks as pure duplication.
+double redundancy_rank(const KvMemStoreConfig & cfg, const KvMemBlock & block, double importance) {
+    if (!cfg.redundancy_aware || block.redundancy_score < -1.0) {
+        return importance;
+    }
+    const double weight = std::clamp(cfg.importance_weight, 0.0, 1.0);
+    const double novelty = 1.0 - std::clamp((block.redundancy_score + 1.0) * 0.5, 0.0, 1.0);
+    const double useful = std::clamp((importance + 1.0) * 0.5, 0.0, 1.0);
+    return weight * useful + (1.0 - weight) * novelty;
+}
+
 uint32_t ceil_percent(uint32_t value, uint32_t percent) {
     return static_cast<uint32_t>(
         (static_cast<uint64_t>(value) * percent + 99u) / 100u);
@@ -244,6 +261,13 @@ void KvMemStore::set_retrieval_scores(const std::vector<double> &scores) {
     for (uint32_t i = 0; i < n; ++i) {
         blocks_[i].retrieval_score = (i < scores.size()) ? scores[i] : 0.0;
         blocks_[i].attn_score = blocks_[i].retrieval_score;
+    }
+}
+
+void KvMemStore::set_redundancy_scores(const std::vector<double> &scores) {
+    const uint32_t n = block_count();
+    for (uint32_t i = 0; i < n; ++i) {
+        blocks_[i].redundancy_score = i < scores.size() ? scores[i] : -2.0;
     }
 }
 
@@ -538,15 +562,16 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         std::vector<uint32_t> candidates;
         candidates.reserve(n - kept_count);
         for (uint32_t i = 0; i < n; ++i) {
-            if (!kept[i]) candidates.push_back(i);
+            if (kept[i] || redundancy_rejected(cfg_, blocks_[i])) continue;
+            candidates.push_back(i);
         }
         if (candidates.empty()) return;
         const uint32_t need = std::min<uint32_t>(
             std::min<uint32_t>(quota, budget - kept_count),
             static_cast<uint32_t>(candidates.size()));
         auto better = [&](uint32_t a, uint32_t b) {
-            const double sa = score_fn(blocks_[a]);
-            const double sb = score_fn(blocks_[b]);
+            const double sa = redundancy_rank(cfg_, blocks_[a], score_fn(blocks_[a]));
+            const double sb = redundancy_rank(cfg_, blocks_[b], score_fn(blocks_[b]));
             if (sa != sb) return sa > sb;
             return a > b;
         };
@@ -596,15 +621,17 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         std::vector<uint32_t> candidates;
         candidates.reserve(n - kept_count);
         for (uint32_t i = 0; i < n; ++i) {
-            if (!kept[i]) candidates.push_back(i);
+            if (kept[i] || redundancy_rejected(cfg_, blocks_[i])) continue;
+            candidates.push_back(i);
         }
         const uint32_t need = budget - kept_count;
-        // Partial sort by attn_score desc; tie-break by recency (higher id) so
-        // selection is deterministic.
+        // Partial sort by the redundancy-aware rank; tie-break by recency
+        // (higher id) so selection is deterministic. With redundancy off the
+        // rank is attn_score, matching the previous order.
         auto better = [&](uint32_t a, uint32_t b) {
-            if (blocks_[a].attn_score != blocks_[b].attn_score) {
-                return blocks_[a].attn_score > blocks_[b].attn_score;
-            }
+            const double sa = redundancy_rank(cfg_, blocks_[a], blocks_[a].attn_score);
+            const double sb = redundancy_rank(cfg_, blocks_[b], blocks_[b].attn_score);
+            if (sa != sb) return sa > sb;
             return a > b;
         };
         if (need < candidates.size()) {
