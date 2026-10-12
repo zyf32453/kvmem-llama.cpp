@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -2979,6 +2980,11 @@ void llama_memory_kvmem::harvest_flush() {
     if (mtp_) {
         mtp_->harvest_flush();
     }
+    if (runtime_) {
+        // The harvest worker may have refreshed host mean-K without changing
+        // block ids. Selection must not consume scores from the old KV bytes.
+        runtime_->store().invalidate_redundancy_scores();
+    }
     harvest_perf_print_sum();
 }
 
@@ -4306,6 +4312,7 @@ void llama_memory_kvmem::score_retrieval() {
     uint32_t descriptor_attempted = 0;
     uint32_t descriptor_missing_raw = 0;
     uint32_t descriptor_missing_mean = 0;
+    uint32_t descriptor_incomplete_mean_layers = 0;
     uint32_t descriptor_zero_norm = 0;
     uint32_t descriptor_non_finite_input = 0;
     uint32_t descriptor_invalid_non_finite = 0;
@@ -4318,13 +4325,19 @@ void llama_memory_kvmem::score_retrieval() {
         ++descriptor_attempted;
         float * dst = descriptors.data() + (size_t) b * kRedundancyDims;
         uint32_t layers = 0;
+        uint32_t expected_layers = 0;
         for (uint32_t il = 0; il < n_layer_; ++il) {
-            if (!raw_->has_mean_k(b, il)) continue;
+            if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) continue;
+            ++expected_layers;
+            if (raw_->mean_k_tokens(b, il) != store.blocks()[b].n_tokens) {
+                ++descriptor_incomplete_mean_layers;
+                continue;
+            }
             raw_->mean_k(b, il, mk.data());
             kvmem::redundancy_accumulate_mean_k(mk.data(), n_embd_k_, il, dst);
             ++layers;
         }
-        if (layers == 0) {
+        if (expected_layers == 0 || layers != expected_layers) {
             ++descriptor_missing_mean;
             continue;
         }
@@ -4361,20 +4374,22 @@ void llama_memory_kvmem::score_retrieval() {
         for (uint32_t b = 0; b < nblk; ++b) {
             if (!eligible[b] || !descriptor_valid[b]) continue;
             const float * a = descriptors.data() + (size_t) b * kRedundancyDims;
-            double best = -1.0;
-            auto compare = [&](uint32_t c) {
-                if (!eligible[c] || !descriptor_valid[c]) return;
-                const float * other = descriptors.data() + (size_t) c * kRedundancyDims;
-                const double dot = kvmem::redundancy_cosine_similarity(a, other, kRedundancyDims);
-                if (redundancy_diag_enabled) {
-                    pair_scores.push_back({b, c, dot});
-                    ++block_comparisons[b];
-                }
-                best = std::max(best, dot);
-            };
-            // The next 64 blocks, plus the newest 64 outside that window.
-            kvmem::redundancy_visit_partners(b, nblk, compare);
-            redundancy[b] = best;
+            double best = -2.0;
+            uint32_t comparisons = 0;
+            const bool evaluated = kvmem::redundancy_max_later_similarity(
+                b, nblk,
+                [&](uint32_t c) { return eligible[c] && descriptor_valid[c]; },
+                [&](uint32_t c) {
+                    const float * other = descriptors.data() + (size_t) c * kRedundancyDims;
+                    const double cosine = kvmem::redundancy_cosine_similarity(
+                        a, other, kRedundancyDims);
+                    if (redundancy_diag_enabled && std::isfinite(cosine)) {
+                        pair_scores.push_back({b, c, cosine});
+                    }
+                    return cosine;
+                }, best, &comparisons);
+            if (redundancy_diag_enabled) block_comparisons[b] = comparisons;
+            if (evaluated) redundancy[b] = best;
         }
     }
     store.set_redundancy_scores(redundancy);
@@ -4391,11 +4406,13 @@ void llama_memory_kvmem::score_retrieval() {
                 block_comparisons[b] == 0 ? 1u : 0u;
         }
         kvmem::redundancy_diag(
-            "KVMEM_REDUNDANCY_DIAG stage=descriptors eligible=%u attempted=%u valid=%u "
-            "missing_raw=%u missing_mean=%u zero_norm=%u non_finite_input=%u invalid_non_finite=%u "
+            "KVMEM_REDUNDANCY_DIAG stage=descriptors eligible_blocks=%u attempted=%u valid=%u "
+            "missing_raw=%u missing_mean_blocks=%u incomplete_mean_layers=%u zero_norm=%u "
+            "non_finite_input=%u invalid_non_finite=%u "
             "sentinel_minus2=%u sentinel_minus1=%u blocks_without_partner=%u comparisons=%zu\n",
             eligible_blocks, descriptor_attempted, valid_descriptors,
-            descriptor_missing_raw, descriptor_missing_mean, descriptor_zero_norm,
+            descriptor_missing_raw, descriptor_missing_mean, descriptor_incomplete_mean_layers,
+            descriptor_zero_norm,
             descriptor_non_finite_input, descriptor_invalid_non_finite,
             sentinel_not_evaluated, sentinel_minus_one,
             eligible_without_partner, pair_scores.size());
@@ -4474,15 +4491,17 @@ void llama_memory_kvmem::score_retrieval() {
         }
         if (!have_best) {
             kvmem::redundancy_diag(
-                "KVMEM_REDUNDANCY_DIAG stage=block_best evaluated=0 min=nan max=nan mean=nan "
+                "KVMEM_REDUNDANCY_DIAG stage=block_best eligible_blocks=%u evaluated_blocks=0 "
+                "min_score=nan max_score=nan mean_score=nan "
                 "ge_threshold=0 hist_lt0=0 hist_0_025=0 hist_025_050=0 hist_050_090=0 "
-                "hist_090_100=0 hist_gt1=0\n");
+                "hist_090_100=0 hist_gt1=0\n", eligible_blocks);
         } else {
             kvmem::redundancy_diag(
-                "KVMEM_REDUNDANCY_DIAG stage=block_best evaluated=%u min=%.9f max=%.9f mean=%.9f "
+                "KVMEM_REDUNDANCY_DIAG stage=block_best eligible_blocks=%u evaluated_blocks=%u "
+                "min_score=%.9f max_score=%.9f mean_score=%.9f "
                 "ge_threshold=%u hist_lt0=%u hist_0_025=%u hist_025_050=%u hist_050_090=%u "
                 "hist_090_100=%u hist_gt1=%u\n",
-                evaluated_blocks, best_min, best_max, best_sum / evaluated_blocks,
+                eligible_blocks, evaluated_blocks, best_min, best_max, best_sum / evaluated_blocks,
                 blocks_ge_threshold, bucket_lt0, bucket_lt025, bucket_lt050,
                 bucket_lt090, bucket_le1, bucket_gt1);
         }
@@ -4522,14 +4541,28 @@ void llama_memory_kvmem::score_retrieval() {
             threshold);
     }
     if (trace_) {
-        uint32_t rejected = 0;
+        uint32_t evaluated_blocks = 0;
+        uint32_t threshold_candidates = 0;
+        double min_score = std::numeric_limits<double>::quiet_NaN();
+        double max_score = std::numeric_limits<double>::quiet_NaN();
+        double score_sum = 0.0;
         for (uint32_t b = 0; b < nblk; ++b) {
-            rejected += redundancy[b] >= runtime_->config().store.redundancy_threshold;
+            if (redundancy[b] < -1.0) continue;
+            if (evaluated_blocks == 0) min_score = max_score = redundancy[b];
+            min_score = std::min(min_score, redundancy[b]);
+            max_score = std::max(max_score, redundancy[b]);
+            score_sum += redundancy[b];
+            ++evaluated_blocks;
+            threshold_candidates += redundancy[b] >= runtime_->config().store.redundancy_threshold;
         }
-        kvmem_diag("KVMEM_REDUNDANCY enabled=%d eligible_blocks=%u thinking_spans=%zu "
-                   "rejected_candidates=%u threshold=%.3f lambda=%.3f dims=%u\n",
+        const double mean_score = evaluated_blocks
+            ? score_sum / evaluated_blocks : std::numeric_limits<double>::quiet_NaN();
+        kvmem_diag("KVMEM_REDUNDANCY enabled=%d eligible_blocks=%u evaluated_blocks=%u "
+                   "threshold_candidates=%u min_score=%.9f max_score=%.9f mean_score=%.9f "
+                   "thinking_spans=%zu threshold=%.3f lambda=%.3f dims=%u\n",
                    (int) runtime_->config().store.redundancy_aware,
-                   eligible_blocks, thinking_spans.size(), rejected,
+                   eligible_blocks, evaluated_blocks, threshold_candidates,
+                   min_score, max_score, mean_score, thinking_spans.size(),
                    runtime_->config().store.redundancy_threshold,
                    runtime_->config().store.importance_weight,
                    kRedundancyDims);
@@ -4758,7 +4791,16 @@ bool llama_memory_kvmem::set_query(const llama_kvmem_query_state & state) {
 }
 
 void llama_memory_kvmem::apply_retrieval() {
-    if (method_ != 1) { harvest_flush(); return; }
+    if (method_ != 1) {
+        harvest_flush();
+        if (kvmem::redundancy_diagnostics_enabled() && runtime_ &&
+            runtime_->config().store.redundancy_aware) {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=score enabled=1 evaluated_blocks=0 "
+                "reason=method_recency\n");
+        }
+        return;
+    }
     apply_selection(preview_retrieval());
 }
 
@@ -5402,7 +5444,10 @@ void llama_kvmem_get_tail_mean(uint32_t row, std::vector<float> & state) {
 }
 
 void llama_kvmem_set_tail_mean(uint32_t row, const std::vector<float> & state) {
-    if (auto * mem = kvmem_capture_active()) mem->raw().restore_mean_checkpoint(row, state);
+    if (auto * mem = kvmem_capture_active()) {
+        mem->raw().restore_mean_checkpoint(row, state);
+        mem->runtime().store().invalidate_redundancy_scores();
+    }
 }
 
 bool llama_kvmem_store_swap_supported(void) {
@@ -5673,6 +5718,7 @@ void llama_kvmem_store_snapshot_write(int32_t id, kvmem::SnapshotWriter & out) {
 
 void llama_kvmem_store_release_payload(int32_t id) {
     auto & s = kvmem_detached(id);
+    s.runtime->store().invalidate_redundancy_scores();
     auto raw = std::make_unique<kvmem::RawKvStore>(s.raw->config());
     auto mtp = s.mtp_raw ? std::make_unique<kvmem::RawKvStore>(s.mtp_raw->config()) : nullptr;
     s.raw = std::move(raw); s.mtp_raw = std::move(mtp); s.cold = true;
@@ -5688,6 +5734,7 @@ void llama_kvmem_store_snapshot_read(int32_t id, kvmem::SnapshotReader & in) {
     auto mtp = s.mtp_raw ? std::make_unique<kvmem::RawKvStore>(s.mtp_raw->config()) : nullptr;
     if (mtp) mtp->snapshot_read(in, s.runtime->store().block_count());
     s.raw = std::move(raw); s.mtp_raw = std::move(mtp); s.cold = false;
+    s.runtime->store().invalidate_redundancy_scores();
 }
 
 uint64_t llama_kvmem_store_capacity(uint32_t tokens) {

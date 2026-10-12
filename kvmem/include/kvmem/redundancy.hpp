@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace kvmem {
 
@@ -33,29 +34,20 @@ inline void redundancy_accumulate_mean_k(const float * mean_k,
 
 inline RedundancyDescriptorStatus redundancy_normalize_descriptor(
         float * descriptor, uint32_t dimensions = kRedundancyDescriptorDims) {
-    // Same acceptance test as the original score_retrieval() loop:
-    // `norm > 1e-8f` then divide. A non-finite norm fails that comparison and
-    // is left unchanged. An infinite norm passes it, matching the previous
-    // inlined arithmetic.
     float norm = 0.0f;
-    bool non_finite = false;
     for (uint32_t d = 0; d < dimensions; ++d) {
-        if (!std::isfinite(descriptor[d])) {
-            non_finite = true;
-        }
+        if (!std::isfinite(descriptor[d])) return RedundancyDescriptorStatus::NonFinite;
         norm += descriptor[d] * descriptor[d];
     }
+    if (!std::isfinite(norm)) return RedundancyDescriptorStatus::NonFinite;
     norm = std::sqrt(norm);
-    if (norm > 1e-8f) {
-        for (uint32_t d = 0; d < dimensions; ++d) {
-            descriptor[d] /= norm;
-        }
-        return RedundancyDescriptorStatus::Valid;
+    if (!std::isfinite(norm)) return RedundancyDescriptorStatus::NonFinite;
+    if (norm <= 1e-8f) return RedundancyDescriptorStatus::ZeroNorm;
+    for (uint32_t d = 0; d < dimensions; ++d) {
+        descriptor[d] /= norm;
+        if (!std::isfinite(descriptor[d])) return RedundancyDescriptorStatus::NonFinite;
     }
-    if (non_finite || !std::isfinite(norm)) {
-        return RedundancyDescriptorStatus::NonFinite;
-    }
-    return RedundancyDescriptorStatus::ZeroNorm;
+    return RedundancyDescriptorStatus::Valid;
 }
 
 inline double redundancy_cosine_similarity(const float * a,
@@ -63,9 +55,13 @@ inline double redundancy_cosine_similarity(const float * a,
                                            uint32_t dimensions = kRedundancyDescriptorDims) {
     double dot = 0.0;
     for (uint32_t d = 0; d < dimensions; ++d) {
+        if (!std::isfinite(a[d]) || !std::isfinite(b[d])) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
         dot += a[d] * b[d];
     }
-    return dot;
+    if (!std::isfinite(dot)) return std::numeric_limits<double>::quiet_NaN();
+    return std::clamp(dot, -1.0, 1.0);
 }
 
 // Later partners used by score_retrieval(): the next 64 blocks, plus the
@@ -82,6 +78,31 @@ inline void redundancy_visit_partners(uint32_t block, uint32_t block_count, Visi
             visit(partner);
         }
     }
+}
+
+// Return false when no finite similarity was computed. The caller must keep
+// the unevaluated sentinel in that case; -1 is reserved for a real cosine of
+// opposite descriptors.
+template <typename IsComparable, typename Similarity>
+inline bool redundancy_max_later_similarity(uint32_t block,
+                                            uint32_t block_count,
+                                            const IsComparable & is_comparable,
+                                            const Similarity & similarity,
+                                            double & max_similarity,
+                                            uint32_t * comparison_count = nullptr) {
+    double best = -1.0;
+    uint32_t count = 0;
+    redundancy_visit_partners(block, block_count, [&](uint32_t partner) {
+        if (!is_comparable(partner)) return;
+        const double value = similarity(partner);
+        if (!std::isfinite(value)) return;
+        best = std::max(best, value);
+        ++count;
+    });
+    if (comparison_count) *comparison_count = count;
+    if (count == 0) return false;
+    max_similarity = best;
+    return true;
 }
 
 } // namespace kvmem

@@ -61,10 +61,9 @@ static void test_redundancy_descriptor_math() {
     std::vector<float> infinite_descriptor(kvmem::kRedundancyDescriptorDims, 0.0f);
     infinite_descriptor[1] = 3.0f;
     infinite_descriptor[4] = std::numeric_limits<float>::infinity();
-    // An infinite norm passes the original `norm > 1e-8f` test and is divided.
     CHECK(kvmem::redundancy_normalize_descriptor(infinite_descriptor.data()) ==
-          kvmem::RedundancyDescriptorStatus::Valid);
-    CHECK(infinite_descriptor[1] == 0.0f);
+          kvmem::RedundancyDescriptorStatus::NonFinite);
+    CHECK(infinite_descriptor[1] == 3.0f);
 
     const float mean_k[] = {0.25f, -1.0f, 2.5f, 0.75f};
     std::vector<float> projected_a(kvmem::kRedundancyDescriptorDims, 0.0f);
@@ -76,6 +75,112 @@ static void test_redundancy_descriptor_math() {
     CHECK(kvmem::redundancy_normalize_descriptor(projected_b.data()) ==
           kvmem::RedundancyDescriptorStatus::Valid);
     CHECK(std::abs(kvmem::redundancy_cosine_similarity(projected_a.data(), projected_b.data()) - 1.0) < 1e-6);
+
+    std::vector<float> opposite_k = {-0.25f, 1.0f, -2.5f, -0.75f};
+    std::vector<float> projected_opposite(kvmem::kRedundancyDescriptorDims, 0.0f);
+    kvmem::redundancy_accumulate_mean_k(opposite_k.data(), 4, 3, projected_opposite.data());
+    CHECK(kvmem::redundancy_normalize_descriptor(projected_opposite.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(std::abs(kvmem::redundancy_cosine_similarity(projected_a.data(), projected_opposite.data()) + 1.0) < 1e-6);
+}
+
+static void test_redundancy_score_requires_a_comparison() {
+    const uint32_t dims = kvmem::kRedundancyDescriptorDims;
+    std::vector<float> descriptors(3 * dims, 0.0f);
+    descriptors[0] = 1.0f;
+    descriptors[dims] = -1.0f;
+    descriptors[2 * dims] = 1.0f;
+    for (uint32_t block = 0; block < 3; ++block) {
+        CHECK(kvmem::redundancy_normalize_descriptor(
+                  descriptors.data() + static_cast<size_t>(block) * dims) ==
+              kvmem::RedundancyDescriptorStatus::Valid);
+    }
+    const auto is_comparable = [](uint32_t) { return true; };
+    const auto cosine = [&](uint32_t partner, uint32_t block) {
+        return kvmem::redundancy_cosine_similarity(
+            descriptors.data() + static_cast<size_t>(block) * dims,
+            descriptors.data() + static_cast<size_t>(partner) * dims);
+    };
+
+    double score = -2.0;
+    uint32_t comparisons = 99;
+    CHECK(!kvmem::redundancy_max_later_similarity(
+        0, 0, is_comparable, [&](uint32_t p) { return cosine(p, 0); }, score, &comparisons));
+    CHECK(comparisons == 0 && score == -2.0);
+    CHECK(!kvmem::redundancy_max_later_similarity(
+        0, 1, is_comparable, [&](uint32_t p) { return cosine(p, 0); }, score, &comparisons));
+    CHECK(comparisons == 0 && score == -2.0);
+
+    // A real opposite pair has a valid cosine of -1; the final block has no
+    // later partner and must remain unevaluated (-2).
+    CHECK(kvmem::redundancy_max_later_similarity(
+        0, 2, is_comparable, [&](uint32_t p) { return cosine(p, 0); }, score, &comparisons));
+    CHECK(comparisons == 1 && score == -1.0);
+    score = -2.0;
+    CHECK(!kvmem::redundancy_max_later_similarity(
+        2, 3, is_comparable, [&](uint32_t p) { return cosine(p, 2); }, score, &comparisons));
+    CHECK(comparisons == 0 && score == -2.0);
+
+    // A later exact duplicate wins the max even when another partner differs.
+    CHECK(kvmem::redundancy_max_later_similarity(
+        0, 3, is_comparable, [&](uint32_t p) { return cosine(p, 0); }, score, &comparisons));
+    CHECK(comparisons == 2 && score == 1.0);
+    // Incomplete or otherwise invalid partner descriptors are not compared.
+    score = -2.0;
+    CHECK(!kvmem::redundancy_max_later_similarity(
+        0, 3, [](uint32_t) { return false; }, [&](uint32_t p) { return cosine(p, 0); }, score, &comparisons));
+    CHECK(comparisons == 0);
+    CHECK(score == -2.0);
+}
+
+static void test_redundancy_scores_follow_block_lifecycle() {
+    KvMemStoreConfig cfg;
+    cfg.block_tokens = 32;
+    cfg.select_budget = 32;
+    cfg.redundancy_aware = true;
+    cfg.redundancy_threshold = 0.90;
+    cfg.sink_blocks = 0;
+    cfg.recent_blocks = 0;
+    KvMemStore store(cfg);
+    store.register_append(3 * 32 + 10);
+    store.set_retrieval_scores({0.0, 1.0, 0.0, 0.0});
+    store.set_redundancy_scores({-2.0, 0.95, -2.0, -2.0});
+    const auto before_append = store.pick_topk_blocks();
+    CHECK(!std::binary_search(before_append.begin(), before_append.end(), 1u));
+
+    store.set_block_tier(1, KvTier::CPU, 7);
+    store.set_block_tier(1, KvTier::GPU);
+    const auto restored = store.pick_topk_blocks();
+    CHECK(!std::binary_search(restored.begin(), restored.end(), 1u)); // tier restore keeps score valid
+
+    store.register_append(1); // invalidates max-to-later scores in O(1)
+    const auto after_append = store.pick_topk_blocks();
+    CHECK(std::binary_search(after_append.begin(), after_append.end(), 1u));
+
+    const auto dropped = store.truncate_to(70);
+    CHECK(dropped.size() == 1);
+    CHECK(store.block_count() == 3);
+    CHECK(store.blocks()[2].n_tokens == 6);
+    const auto after_truncate = store.pick_topk_blocks();
+    CHECK(std::binary_search(after_truncate.begin(), after_truncate.end(), 1u));
+    store.register_append(26); // complete the shortened block without reviving old scores
+    CHECK(store.block_count() == 3 && store.blocks()[2].n_tokens == 32);
+    CHECK(store.blocks()[2].block_id == 2);
+    const auto after_refill = store.pick_topk_blocks();
+    CHECK(std::binary_search(after_refill.begin(), after_refill.end(), 1u));
+
+    store.set_redundancy_scores({-2.0, 0.95, -2.0});
+    store.truncate_to(64); // remove and later reuse block id 2
+    CHECK(store.block_count() == 2);
+    const auto after_reindex = store.pick_topk_blocks();
+    CHECK(std::binary_search(after_reindex.begin(), after_reindex.end(), 1u));
+    store.register_append(32);
+    CHECK(store.block_count() == 3 && store.blocks()[2].block_id == 2);
+
+    store.set_redundancy_scores({-2.0, std::numeric_limits<double>::quiet_NaN(),
+                                 std::numeric_limits<double>::infinity()});
+    const auto invalid_scores = store.pick_topk_blocks();
+    CHECK(std::binary_search(invalid_scores.begin(), invalid_scores.end(), 1u));
 }
 
 static std::vector<uint32_t> redundancy_partners(uint32_t block, uint32_t block_count) {
@@ -1353,6 +1458,8 @@ static void test_media_suffix_over_budget() {
 
 int main() {
     test_redundancy_descriptor_math();
+    test_redundancy_score_requires_a_comparison();
+    test_redundancy_scores_follow_block_lifecycle();
     test_redundancy_partner_window();
     test_redundancy_threshold_boundary();
     test_redundancy_committed_duplicate_case();

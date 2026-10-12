@@ -448,6 +448,9 @@ public:
     // Max cosine similarity in [-1, 1], indexed by block id. -2 marks a block
     // the redundancy pass did not evaluate.
     void set_redundancy_scores(const std::vector<double> &scores);
+    // Mean-K restoration/capture may change descriptors without changing the
+    // block table. Invalidate in O(1); selection treats all scores as unknown.
+    void invalidate_redundancy_scores() { redundancy_scores_current_ = false; }
 
     void set_block_tier(uint32_t block_id, KvTier tier,
                         int32_t cpu_slot = -1,
@@ -497,6 +500,9 @@ private:
     uint32_t runtime_select_budget_ = 0;
     std::vector<KvMemBlock> blocks_;
     uint32_t total_tokens_ = 0;  // total appended context length
+    // Scores are a snapshot of the current block table and its later partners.
+    // Invalidated in O(1) on append/truncate and refreshed by set_redundancy_scores.
+    bool redundancy_scores_current_ = false;
 };
 
 } // namespace kvmem

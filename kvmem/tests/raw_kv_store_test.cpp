@@ -93,6 +93,31 @@ static void test_sum_only(uint32_t block_tokens) {
     CHECK(raw.bytes_k() == 0 && !raw.has_block(0));
 }
 
+static void test_mean_k_token_counts() {
+    kvmem::RawKvStoreConfig cfg;
+    cfg.n_layer = 2;
+    cfg.n_embd_k = 3;
+    cfg.n_embd_v = 3;
+    cfg.block_tokens = 4;
+    kvmem::RawKvStore raw(cfg);
+    const float keys[] = {
+        1, 2, 3,  4, 5, 6,  7, 8, 9,  10, 11, 12,
+        13, 14, 15,
+    };
+    raw.write_layer_mean_k(0, 3, 0, keys);
+    CHECK(raw.mean_k_tokens(0, 0) == 3);
+    CHECK(raw.mean_k_tokens(0, 1) == 0);
+    raw.write_layer_mean_k(3, 1, 0, keys + 9);
+    CHECK(raw.mean_k_tokens(0, 0) == 4);
+    CHECK(raw.mean_k_tokens(1, 0) == 0);
+    raw.write_layer_mean_k(4, 1, 0, keys + 12);
+    CHECK(raw.mean_k_tokens(1, 0) == 1);
+    raw.truncate_to(2);
+    // Mean-only sums cannot reconstruct a shortened non-F16 suffix.
+    CHECK(raw.mean_k_tokens(0, 0) == 0);
+    CHECK(raw.mean_k_tokens(1, 0) == 0);
+}
+
 // A host-store swap moves whole mirrors between owners, so two mirrors built
 // from the same config must share nothing: the same block ids hold independent
 // bytes, ownership travels with the object, and a clear on one leaves the other
@@ -187,6 +212,7 @@ static void test_store_bytes() {
 }
 
 int main() {
+    test_mean_k_token_counts();
     test_sum_only(32);
     test_sum_only(128);
     test_sibling_stores_are_independent();
