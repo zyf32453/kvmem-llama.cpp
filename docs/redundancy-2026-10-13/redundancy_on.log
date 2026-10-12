@@ -1,0 +1,11 @@
+# Source: lines quoted in the 2026-10-12 experiment brief.
+# This is not a new capture. The mentor-machine process did not have
+# KVMEM_REDUNDANCY_DIAG, so cosine histograms were not recorded.
+# Full stderr from that process is not present on this workstation.
+
+KVMEM_REDUNDANCY enabled=1 eligible_blocks=50 thinking_spans=1 rejected_candidates=0 threshold=0.900 lambda=0.100 dims=64
+KVMEM_REDUNDANCY enabled=1 eligible_blocks=50 thinking_spans=1 rejected_candidates=0 threshold=0.500 lambda=0.100 dims=64
+KVMEM_TRACE selected 0 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52
+
+# Reported alongside those lines: prompt_tokens=1687, path=query_replay,
+# context=4096, budget=1024, gen_reserve=1536, block_tokens=32, method=retrieval.

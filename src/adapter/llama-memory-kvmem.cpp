@@ -2,6 +2,8 @@
 #include "llama-memory-kvmem.h"
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-memory-kvmem-mtp.h"
+#include "kvmem/redundancy.hpp"
+#include "kvmem/redundancy_diag.hpp"
 
 #include "llama-kvmem-batch.h"
 #include "llama-kvmem-capture.h"
@@ -4167,6 +4169,7 @@ void llama_memory_kvmem::copy_gpu_block_from_host(uint32_t block_id, int32_t gpu
 void llama_memory_kvmem::score_retrieval() {
     auto & store = runtime_->store();
     const uint32_t nblk = store.block_count();
+    const bool redundancy_diag_enabled = kvmem::redundancy_diagnostics_enabled();
     std::vector<double> scores(nblk, 0.0);
     std::vector<float> mk(n_embd_k_, 0.0f);
     const uint32_t g = n_head_kv_ == 0 ? 1 : n_head_ / n_head_kv_;
@@ -4213,6 +4216,11 @@ void llama_memory_kvmem::score_retrieval() {
     store.set_retrieval_scores(scores);
     if (!runtime_->config().store.redundancy_aware) {
         store.set_redundancy_scores(std::vector<double>(nblk, -2.0));
+        if (redundancy_diag_enabled) {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=score enabled=0 eligible_blocks=0 "
+                "descriptors=0 comparisons=0 reason=disabled\n");
+        }
         return;
     }
 
@@ -4270,59 +4278,249 @@ void llama_memory_kvmem::score_retrieval() {
         }
     }
 
-    constexpr uint32_t kRedundancyDims = 64;
+    if (redundancy_diag_enabled) {
+        kvmem::redundancy_diag(
+            "KVMEM_REDUNDANCY_DIAG stage=spans count=%zu eligible_blocks=%u blocks=%u token_limit=%u\n",
+            thinking_spans.size(), eligible_blocks, nblk, token_limit);
+        for (size_t i = 0; i < thinking_spans.size(); ++i) {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG span=%zu tokens=[%u,%u) length=%u\n",
+                i, thinking_spans[i].first, thinking_spans[i].second,
+                thinking_spans[i].second - thinking_spans[i].first);
+        }
+        std::string ids;
+        for (uint32_t b = 0; b < nblk; ++b) {
+            if (!eligible[b]) continue;
+            const auto & block = store.blocks()[b];
+            char item[80];
+            std::snprintf(item, sizeof(item), "%s%u:[%u,%u)", ids.empty() ? "" : ",",
+                          b, block.orig_pos_start, block.orig_pos_end());
+            ids += item;
+        }
+        kvmem::redundancy_diag("KVMEM_REDUNDANCY_DIAG eligible=%s\n", ids.c_str());
+    }
+
+    const uint32_t kRedundancyDims = kvmem::kRedundancyDescriptorDims;
     std::vector<float> descriptors((size_t) nblk * kRedundancyDims, 0.0f);
     std::vector<uint8_t> descriptor_valid(nblk, 0);
+    uint32_t descriptor_attempted = 0;
+    uint32_t descriptor_missing_raw = 0;
+    uint32_t descriptor_missing_mean = 0;
+    uint32_t descriptor_zero_norm = 0;
+    uint32_t descriptor_non_finite_input = 0;
+    uint32_t descriptor_invalid_non_finite = 0;
     for (uint32_t b = 0; b < nblk; ++b) {
-        if (!eligible[b] || !raw_->has_block(b)) continue;
+        if (!eligible[b]) continue;
+        if (!raw_->has_block(b)) {
+            ++descriptor_missing_raw;
+            continue;
+        }
+        ++descriptor_attempted;
         float * dst = descriptors.data() + (size_t) b * kRedundancyDims;
         uint32_t layers = 0;
         for (uint32_t il = 0; il < n_layer_; ++il) {
             if (!raw_->has_mean_k(b, il)) continue;
             raw_->mean_k(b, il, mk.data());
-            for (uint32_t d = 0; d < n_embd_k_; ++d) {
-                const uint32_t mixed = d * 2654435761u + il * 1013904223u;
-                const uint32_t bin = mixed % kRedundancyDims;
-                const float sign = ((d * 2246822519u + il * 3266489917u) & 0x80000000u)
-                    ? 1.0f : -1.0f;
-                dst[bin] += sign * mk[d];
-            }
+            kvmem::redundancy_accumulate_mean_k(mk.data(), n_embd_k_, il, dst);
             ++layers;
         }
-        if (layers == 0) continue;
-        float norm = 0.0f;
-        for (uint32_t d = 0; d < kRedundancyDims; ++d) norm += dst[d] * dst[d];
-        norm = std::sqrt(norm);
-        if (norm > 1e-8f) {
-            for (uint32_t d = 0; d < kRedundancyDims; ++d) dst[d] /= norm;
+        if (layers == 0) {
+            ++descriptor_missing_mean;
+            continue;
+        }
+        bool saw_non_finite = false;
+        for (uint32_t d = 0; d < kRedundancyDims; ++d) {
+            if (!std::isfinite(dst[d])) {
+                saw_non_finite = true;
+                break;
+            }
+        }
+        const auto descriptor_status =
+            kvmem::redundancy_normalize_descriptor(dst, kRedundancyDims);
+        if (saw_non_finite) {
+            ++descriptor_non_finite_input;
+        }
+        if (descriptor_status == kvmem::RedundancyDescriptorStatus::Valid) {
             descriptor_valid[b] = 1;
+        } else if (descriptor_status == kvmem::RedundancyDescriptorStatus::ZeroNorm) {
+            ++descriptor_zero_norm;
+        } else {
+            ++descriptor_invalid_non_finite;
         }
     }
     std::vector<double> redundancy(nblk, -2.0);
+    struct RedundancyPair {
+        uint32_t first;
+        uint32_t second;
+        double cosine;
+    };
+    std::vector<RedundancyPair> pair_scores;
+    std::vector<uint32_t> block_comparisons;
+    if (redundancy_diag_enabled) block_comparisons.resize(nblk, 0);
     if (!thinking_spans.empty()) {
         for (uint32_t b = 0; b < nblk; ++b) {
             if (!eligible[b] || !descriptor_valid[b]) continue;
             const float * a = descriptors.data() + (size_t) b * kRedundancyDims;
             double best = -1.0;
-            const uint32_t local_end = std::min<uint32_t>(nblk, b + 65);
             auto compare = [&](uint32_t c) {
                 if (!eligible[c] || !descriptor_valid[c]) return;
                 const float * other = descriptors.data() + (size_t) c * kRedundancyDims;
-                double dot = 0.0;
-                for (uint32_t d = 0; d < kRedundancyDims; ++d) dot += a[d] * other[d];
+                const double dot = kvmem::redundancy_cosine_similarity(a, other, kRedundancyDims);
+                if (redundancy_diag_enabled) {
+                    pair_scores.push_back({b, c, dot});
+                    ++block_comparisons[b];
+                }
                 best = std::max(best, dot);
             };
-            for (uint32_t c = b + 1; c < local_end; ++c) compare(c);
-            // Repeated text can recur far from its first copy. Also compare
-            // against the newest blocks outside the local window.
-            const uint32_t recent_begin = nblk > 64 ? nblk - 64 : b + 1;
-            for (uint32_t c = std::max(b + 1, recent_begin); c < nblk; ++c) {
-                if (c >= local_end) compare(c);
-            }
+            // The next 64 blocks, plus the newest 64 outside that window.
+            kvmem::redundancy_visit_partners(b, nblk, compare);
             redundancy[b] = best;
         }
     }
     store.set_redundancy_scores(redundancy);
+    if (redundancy_diag_enabled) {
+        uint32_t valid_descriptors = 0;
+        uint32_t sentinel_not_evaluated = 0;
+        uint32_t sentinel_minus_one = 0;
+        uint32_t eligible_without_partner = 0;
+        for (uint32_t b = 0; b < nblk; ++b) {
+            valid_descriptors += descriptor_valid[b] ? 1u : 0u;
+            sentinel_not_evaluated += redundancy[b] == -2.0 ? 1u : 0u;
+            sentinel_minus_one += redundancy[b] == -1.0 ? 1u : 0u;
+            eligible_without_partner += eligible[b] && descriptor_valid[b] &&
+                block_comparisons[b] == 0 ? 1u : 0u;
+        }
+        kvmem::redundancy_diag(
+            "KVMEM_REDUNDANCY_DIAG stage=descriptors eligible=%u attempted=%u valid=%u "
+            "missing_raw=%u missing_mean=%u zero_norm=%u non_finite_input=%u invalid_non_finite=%u "
+            "sentinel_minus2=%u sentinel_minus1=%u blocks_without_partner=%u comparisons=%zu\n",
+            eligible_blocks, descriptor_attempted, valid_descriptors,
+            descriptor_missing_raw, descriptor_missing_mean, descriptor_zero_norm,
+            descriptor_non_finite_input, descriptor_invalid_non_finite,
+            sentinel_not_evaluated, sentinel_minus_one,
+            eligible_without_partner, pair_scores.size());
+
+        if (pair_scores.empty()) {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=cosine count=0 min=nan max=nan "
+                "mean=nan p50=nan p90=nan p95=nan p99=nan\n");
+        } else {
+            std::vector<RedundancyPair> ordered = pair_scores;
+            std::sort(ordered.begin(), ordered.end(), [](const auto & lhs, const auto & rhs) {
+                return lhs.cosine < rhs.cosine;
+            });
+            double sum = 0.0;
+            for (const auto & pair : ordered) sum += pair.cosine;
+            const size_t last = ordered.size() - 1;
+            auto percentile = [&](size_t numerator) {
+                return ordered[(last * numerator + 50) / 100].cosine;
+            };
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=cosine count=%zu min=%.9f max=%.9f "
+                "mean=%.9f p50=%.9f p90=%.9f p95=%.9f p99=%.9f\n",
+                ordered.size(), ordered.front().cosine, ordered.back().cosine,
+                sum / ordered.size(), percentile(50), percentile(90),
+                percentile(95), percentile(99));
+
+            std::sort(pair_scores.begin(), pair_scores.end(), [](const auto & lhs, const auto & rhs) {
+                if (lhs.cosine != rhs.cosine) return lhs.cosine > rhs.cosine;
+                if (lhs.first != rhs.first) return lhs.first < rhs.first;
+                return lhs.second < rhs.second;
+            });
+            const size_t top_count = std::min<size_t>(10, pair_scores.size());
+            for (size_t i = 0; i < top_count; ++i) {
+                const auto & pair = pair_scores[i];
+                const auto & first = store.blocks()[pair.first];
+                const auto & second = store.blocks()[pair.second];
+                kvmem::redundancy_diag(
+                    "KVMEM_REDUNDANCY_DIAG pair_rank=%zu blocks=%u,%u "
+                    "tokens=[%u,%u),[%u,%u) cosine=%.9f\n",
+                    i + 1, pair.first, pair.second,
+                    first.orig_pos_start, first.orig_pos_end(),
+                    second.orig_pos_start, second.orig_pos_end(), pair.cosine);
+            }
+        }
+        const double threshold = runtime_->config().store.redundancy_threshold;
+        uint32_t blocks_ge_threshold = 0;
+        uint32_t evaluated_blocks = 0;
+        uint32_t bucket_lt0 = 0, bucket_lt025 = 0, bucket_lt050 = 0;
+        uint32_t bucket_lt090 = 0, bucket_le1 = 0, bucket_gt1 = 0;
+        double best_sum = 0.0;
+        double best_min = 0.0;
+        double best_max = 0.0;
+        bool have_best = false;
+        std::vector<std::pair<double, uint32_t>> best_scores;
+        for (uint32_t b = 0; b < nblk; ++b) {
+            if (redundancy[b] < -1.0) continue;
+            ++evaluated_blocks;
+            best_sum += redundancy[b];
+            if (!have_best || redundancy[b] < best_min) best_min = redundancy[b];
+            if (!have_best || redundancy[b] > best_max) best_max = redundancy[b];
+            have_best = true;
+            if (redundancy[b] >= threshold) ++blocks_ge_threshold;
+            if (redundancy[b] < 0.0) ++bucket_lt0;
+            else if (redundancy[b] < 0.25) ++bucket_lt025;
+            else if (redundancy[b] < 0.50) ++bucket_lt050;
+            else if (redundancy[b] < 0.90) ++bucket_lt090;
+            else if (redundancy[b] <= 1.0) ++bucket_le1;
+            else ++bucket_gt1;
+            best_scores.push_back({redundancy[b], b});
+        }
+        const char * reason = "max_block_score_below_threshold";
+        if (pair_scores.empty()) {
+            reason = "no_similarity_comparisons";
+        } else if (have_best && best_max >= threshold) {
+            reason = "candidates_meet_threshold";
+        }
+        if (!have_best) {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=block_best evaluated=0 min=nan max=nan mean=nan "
+                "ge_threshold=0 hist_lt0=0 hist_0_025=0 hist_025_050=0 hist_050_090=0 "
+                "hist_090_100=0 hist_gt1=0\n");
+        } else {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=block_best evaluated=%u min=%.9f max=%.9f mean=%.9f "
+                "ge_threshold=%u hist_lt0=%u hist_0_025=%u hist_025_050=%u hist_050_090=%u "
+                "hist_090_100=%u hist_gt1=%u\n",
+                evaluated_blocks, best_min, best_max, best_sum / evaluated_blocks,
+                blocks_ge_threshold, bucket_lt0, bucket_lt025, bucket_lt050,
+                bucket_lt090, bucket_le1, bucket_gt1);
+        }
+        std::sort(best_scores.begin(), best_scores.end(), [](const auto & lhs, const auto & rhs) {
+            if (lhs.first != rhs.first) return lhs.first > rhs.first;
+            return lhs.second < rhs.second;
+        });
+        const size_t best_count = std::min<size_t>(10, best_scores.size());
+        for (size_t i = 0; i < best_count; ++i) {
+            const uint32_t id = best_scores[i].second;
+            const auto & block = store.blocks()[id];
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG block_best_rank=%zu block=%u tokens=[%u,%u) "
+                "score=%.9f comparisons=%u\n",
+                i + 1, id, block.orig_pos_start, block.orig_pos_end(),
+                best_scores[i].first, block_comparisons[id]);
+        }
+        if (pair_scores.empty() && !have_best) {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=reject_reason comparisons=0 max_pair_cosine=nan "
+                "max_block_score=nan blocks_ge_threshold=%u threshold=%.6f reason=%s\n",
+                blocks_ge_threshold, threshold, reason);
+        } else if (pair_scores.empty()) {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=reject_reason comparisons=0 max_pair_cosine=nan "
+                "max_block_score=%.9f blocks_ge_threshold=%u threshold=%.6f reason=%s\n",
+                best_max, blocks_ge_threshold, threshold, reason);
+        } else {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_DIAG stage=reject_reason comparisons=%zu max_pair_cosine=%.9f "
+                "max_block_score=%.9f blocks_ge_threshold=%u threshold=%.6f reason=%s\n",
+                pair_scores.size(), pair_scores.front().cosine, best_max,
+                blocks_ge_threshold, threshold, reason);
+        }
+        kvmem::redundancy_diag(
+            "KVMEM_REDUNDANCY_DIAG stage=threshold value=%.6f\n",
+            threshold);
+    }
     if (trace_) {
         uint32_t rejected = 0;
         for (uint32_t b = 0; b < nblk; ++b) {

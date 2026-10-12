@@ -5,10 +5,12 @@
 // cumulative-attention top-k selection (sink/recent preservation + budget).
 
 #include "kvmem/kvmem_store.hpp"
+#include "kvmem/redundancy.hpp"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -21,6 +23,124 @@ static int g_fail = 0;
         ++g_fail;                                                          \
     }                                                                      \
 } while (0)
+
+static void test_redundancy_descriptor_math() {
+    std::vector<float> same_a(kvmem::kRedundancyDescriptorDims, 0.0f);
+    std::vector<float> same_b(kvmem::kRedundancyDescriptorDims, 0.0f);
+    same_a[0] = same_b[0] = 3.0f;
+    same_a[7] = same_b[7] = -4.0f;
+    CHECK(kvmem::redundancy_normalize_descriptor(same_a.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(kvmem::redundancy_normalize_descriptor(same_b.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(std::abs(kvmem::redundancy_cosine_similarity(same_a.data(), same_b.data()) - 1.0) < 1e-6);
+
+    std::vector<float> orthogonal_a(kvmem::kRedundancyDescriptorDims, 0.0f);
+    std::vector<float> orthogonal_b(kvmem::kRedundancyDescriptorDims, 0.0f);
+    orthogonal_a[1] = 1.0f;
+    orthogonal_b[2] = 1.0f;
+    CHECK(kvmem::redundancy_normalize_descriptor(orthogonal_a.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(kvmem::redundancy_normalize_descriptor(orthogonal_b.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(std::abs(kvmem::redundancy_cosine_similarity(orthogonal_a.data(), orthogonal_b.data())) < 1e-6);
+
+    std::vector<float> opposite(kvmem::kRedundancyDescriptorDims, 0.0f);
+    opposite[1] = -5.0f;
+    CHECK(kvmem::redundancy_normalize_descriptor(opposite.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(std::abs(kvmem::redundancy_cosine_similarity(orthogonal_a.data(), opposite.data()) + 1.0) < 1e-6);
+
+    std::vector<float> zero(kvmem::kRedundancyDescriptorDims, 0.0f);
+    CHECK(kvmem::redundancy_normalize_descriptor(zero.data()) ==
+          kvmem::RedundancyDescriptorStatus::ZeroNorm);
+    std::vector<float> nan_descriptor(kvmem::kRedundancyDescriptorDims, 0.0f);
+    nan_descriptor[3] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(kvmem::redundancy_normalize_descriptor(nan_descriptor.data()) ==
+          kvmem::RedundancyDescriptorStatus::NonFinite);
+    std::vector<float> infinite_descriptor(kvmem::kRedundancyDescriptorDims, 0.0f);
+    infinite_descriptor[1] = 3.0f;
+    infinite_descriptor[4] = std::numeric_limits<float>::infinity();
+    // An infinite norm passes the original `norm > 1e-8f` test and is divided.
+    CHECK(kvmem::redundancy_normalize_descriptor(infinite_descriptor.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(infinite_descriptor[1] == 0.0f);
+
+    const float mean_k[] = {0.25f, -1.0f, 2.5f, 0.75f};
+    std::vector<float> projected_a(kvmem::kRedundancyDescriptorDims, 0.0f);
+    std::vector<float> projected_b(kvmem::kRedundancyDescriptorDims, 0.0f);
+    kvmem::redundancy_accumulate_mean_k(mean_k, 4, 3, projected_a.data());
+    kvmem::redundancy_accumulate_mean_k(mean_k, 4, 3, projected_b.data());
+    CHECK(kvmem::redundancy_normalize_descriptor(projected_a.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(kvmem::redundancy_normalize_descriptor(projected_b.data()) ==
+          kvmem::RedundancyDescriptorStatus::Valid);
+    CHECK(std::abs(kvmem::redundancy_cosine_similarity(projected_a.data(), projected_b.data()) - 1.0) < 1e-6);
+}
+
+static std::vector<uint32_t> redundancy_partners(uint32_t block, uint32_t block_count) {
+    std::vector<uint32_t> partners;
+    kvmem::redundancy_visit_partners(block, block_count, [&](uint32_t partner) {
+        partners.push_back(partner);
+    });
+    return partners;
+}
+
+static void test_redundancy_partner_window() {
+    // The reported 1687-token prompt is 53 blocks. The 64-block window then
+    // covers every later block, so a missing rejection is not a window miss.
+    const auto short_history = redundancy_partners(0, 53);
+    CHECK(short_history.size() == 52);
+    CHECK(short_history.front() == 1 && short_history.back() == 52);
+    CHECK(redundancy_partners(52, 53).empty());
+    const auto early = redundancy_partners(2, 53);
+    CHECK(std::find(early.begin(), early.end(), 51) != early.end());
+
+    const auto long_history = redundancy_partners(0, 200);
+    CHECK(std::find(long_history.begin(), long_history.end(), 64) != long_history.end());
+    CHECK(std::find(long_history.begin(), long_history.end(), 100) == long_history.end());
+    CHECK(std::find(long_history.begin(), long_history.end(), 136) != long_history.end());
+    CHECK(long_history.back() == 199);
+    CHECK(long_history.size() == 128);
+}
+
+static void test_redundancy_threshold_boundary() {
+    auto selected_with = [](double score) {
+        KvMemStoreConfig cfg;
+        cfg.block_tokens = 32;
+        cfg.select_budget = 4 * 32;
+        cfg.sink_blocks = 1;
+        cfg.recent_blocks = 1;
+        cfg.redundancy_aware = true;
+        cfg.redundancy_threshold = 0.50;
+        cfg.importance_weight = 0.10;
+        KvMemStore store(cfg);
+        store.register_append(6 * 32);
+        store.set_retrieval_scores({0.0, 1.0, 0.2, 0.2, 0.2, 0.0});
+        store.set_redundancy_scores({-2.0, score, -2.0, -2.0, -2.0, -2.0});
+        return store.pick_topk_blocks();
+    };
+    const auto below = selected_with(0.49);
+    const auto at_threshold = selected_with(0.50);
+    CHECK(std::binary_search(below.begin(), below.end(), 1u));
+    CHECK(!std::binary_search(at_threshold.begin(), at_threshold.end(), 1u));
+}
+
+static void test_redundancy_committed_duplicate_case() {
+    KvMemStoreConfig cfg;
+    cfg.block_tokens = 32;
+    cfg.select_budget = 4 * 32;
+    cfg.sink_blocks = 1;
+    cfg.recent_blocks = 1;
+    cfg.redundancy_aware = true;
+    cfg.redundancy_threshold = 0.90;
+    cfg.importance_weight = 0.10;
+    KvMemStore store(cfg);
+    store.register_append(6 * 32);
+    store.set_retrieval_scores({0.0, 0.8, 1.0, 0.6, 0.2, 0.0});
+    store.set_redundancy_scores({0.0, 0.1, 0.95, 0.2, 0.0, 0.0});
+    CHECK((store.pick_topk_blocks() == std::vector<uint32_t>{0, 1, 4, 5}));
+}
 
 static void test_register_append() {
     KvMemStoreConfig cfg; cfg.block_tokens = 128;
@@ -64,9 +184,93 @@ static void test_redundancy_aware_topk() {
     // Block 2 is almost a duplicate of a later block and must be rejected
     // even though its importance is highest. Sink and newest stay pinned.
     s.set_retrieval_scores({0.0, 0.8, 1.0, 0.6, 0.2, 0.0});
-    s.set_redundancy_scores({0.0, 0.1, 0.95, 0.2, 0.0, 0.0});
+    s.set_redundancy_scores({0.95, 0.1, 0.95, 0.2, 0.95, 0.95});
     const auto selected = s.pick_topk_blocks();
-    CHECK((selected == std::vector<uint32_t>{0, 1, 4, 5}));
+    CHECK((selected == std::vector<uint32_t>{0, 1, 3, 5}));
+    // Even when their redundancy score exceeds the threshold, the sink and
+    // newest recent blocks remain protected by the existing selector policy.
+}
+
+static void test_redundancy_mandatory_protection() {
+    KvMemStoreConfig cfg;
+    cfg.block_tokens = 32;
+    cfg.select_budget = 3 * 32;
+    cfg.sink_blocks = 0;
+    cfg.recent_blocks = 1;
+    cfg.redundancy_aware = true;
+    cfg.redundancy_threshold = 0.90;
+    KvMemStore s(cfg);
+    s.register_append(6 * 32);
+    s.set_retrieval_scores({0.1, 0.2, 0.3, 0.4, 0.5, 0.0});
+    s.set_redundancy_scores({0.0, 0.0, 0.99, 0.0, 0.0, 0.99});
+    const auto selected = s.pick_topk_blocks({2});
+    CHECK(selected.size() == 3);
+    CHECK(std::binary_search(selected.begin(), selected.end(), 2));
+    CHECK(std::binary_search(selected.begin(), selected.end(), 5));
+}
+
+static void test_redundancy_budget_bypass_and_on_off_difference() {
+    KvMemStoreConfig full_cfg;
+    full_cfg.block_tokens = 32;
+    full_cfg.select_budget = 6 * 32;
+    full_cfg.redundancy_aware = true;
+    full_cfg.redundancy_threshold = 0.90;
+    KvMemStore full(full_cfg);
+    full.register_append(6 * 32);
+    full.set_redundancy_scores({0.99, 0.99, 0.99, 0.99, 0.99, 0.99});
+    CHECK((full.pick_topk_blocks() == std::vector<uint32_t>{0, 1, 2, 3, 4, 5}));
+
+    KvMemStoreConfig on_cfg;
+    on_cfg.block_tokens = 32;
+    on_cfg.select_budget = 4 * 32;
+    on_cfg.sink_blocks = 1;
+    on_cfg.recent_blocks = 1;
+    on_cfg.redundancy_aware = true;
+    on_cfg.redundancy_threshold = 0.90;
+    KvMemStore on(on_cfg);
+    on.register_append(6 * 32);
+    on.set_retrieval_scores({0.0, 0.9, 0.8, 0.7, 0.6, 0.0});
+    on.set_redundancy_scores({0.0, 0.95, 0.0, 0.0, 0.0, 0.0});
+
+    KvMemStoreConfig off_cfg = on_cfg;
+    off_cfg.redundancy_aware = false;
+    KvMemStore off(off_cfg);
+    off.register_append(6 * 32);
+    off.set_retrieval_scores({0.0, 0.9, 0.8, 0.7, 0.6, 0.0});
+    off.set_redundancy_scores({0.0, 0.95, 0.0, 0.0, 0.0, 0.0});
+
+    const auto on_selected = on.pick_topk_blocks();
+    const auto off_selected = off.pick_topk_blocks();
+    CHECK((on_selected == std::vector<uint32_t>{0, 2, 3, 5}));
+    CHECK((off_selected == std::vector<uint32_t>{0, 1, 2, 5}));
+}
+
+static void test_redundancy_novelty_ranking_without_hard_reject() {
+    KvMemStoreConfig on_cfg;
+    on_cfg.block_tokens = 32;
+    on_cfg.select_budget = 4 * 32;
+    on_cfg.sink_blocks = 1;
+    on_cfg.recent_blocks = 1;
+    on_cfg.redundancy_aware = true;
+    on_cfg.redundancy_threshold = 0.90;
+    on_cfg.importance_weight = 0.10;
+    KvMemStore on(on_cfg);
+    on.register_append(6 * 32);
+    on.set_retrieval_scores({0.0, 1.0, 0.8, 0.7, 0.6, 0.0});
+    on.set_redundancy_scores({0.0, 0.80, 0.0, 0.0, 0.0, 0.0});
+
+    KvMemStoreConfig off_cfg = on_cfg;
+    off_cfg.redundancy_aware = false;
+    KvMemStore off(off_cfg);
+    off.register_append(6 * 32);
+    off.set_retrieval_scores({0.0, 1.0, 0.8, 0.7, 0.6, 0.0});
+    off.set_redundancy_scores({0.0, 0.80, 0.0, 0.0, 0.0, 0.0});
+
+    const auto on_selected = on.pick_topk_blocks();
+    const auto off_selected = off.pick_topk_blocks();
+    CHECK((on_selected == std::vector<uint32_t>{0, 2, 3, 5}));
+    CHECK((off_selected == std::vector<uint32_t>{0, 1, 2, 5}));
+    CHECK(0.80 < on_cfg.redundancy_threshold); // ranking effect, not hard reject
 }
 
 static void test_selection_diff_and_remap() {
@@ -1148,10 +1352,17 @@ static void test_media_suffix_over_budget() {
 }
 
 int main() {
+    test_redundancy_descriptor_math();
+    test_redundancy_partner_window();
+    test_redundancy_threshold_boundary();
+    test_redundancy_committed_duplicate_case();
     test_media_suffix_over_budget();
     test_media_groups_with_shared_boundary();
     test_register_append();
     test_redundancy_aware_topk();
+    test_redundancy_mandatory_protection();
+    test_redundancy_budget_bypass_and_on_off_difference();
+    test_redundancy_novelty_ranking_without_hard_reject();
     test_selection_diff_and_remap();
     test_immutable_source_selection_uses_bounded_delta_remaps();
     test_cold_immutable_same_position_rebuilds_k();

@@ -1,0 +1,9 @@
+# KVMEM_REDUNDANCY=0 was not run from this workstation.
+# The only local WSL distribution is docker-desktop. /home/yifan/kvmem-llama.cpp
+# and the CUDA llama-kvmem-server are not available here.
+# No OFF selection list is invented below.
+#
+# When that run is captured, it must use the same probe body, context, budget,
+# block size, and model as redundancy_on.log. The comparable line is
+# KVMEM_TRACE selected. With diagnostics enabled, disabled mode instead prints:
+# KVMEM_REDUNDANCY_DIAG stage=score enabled=0 ... reason=disabled

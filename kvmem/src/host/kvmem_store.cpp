@@ -1,4 +1,5 @@
 #include "kvmem/kvmem_store.hpp"
+#include "kvmem/redundancy_diag.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -379,7 +380,27 @@ std::vector<uint32_t> KvMemStore::pick_prefill_pressure_blocks(const std::vector
 }
 
 std::vector<uint32_t> KvMemStore::pick_topk_blocks(const std::vector<uint32_t> & mandatory) const {
-    return constrain_media(pick_topk_ungrouped(mandatory), mandatory, budget_blocks(), false);
+    if (!kvmem::redundancy_diagnostics_enabled()) {
+        return constrain_media(pick_topk_ungrouped(mandatory), mandatory, budget_blocks(), false);
+    }
+    auto selected = pick_topk_ungrouped(mandatory);
+    auto constrained = constrain_media(selected, mandatory, budget_blocks(), false);
+    if (kvmem::redundancy_diagnostics_enabled() && constrained != selected) {
+        auto ids = [](const std::vector<uint32_t> & values) {
+            std::string result;
+            for (uint32_t id : values) {
+                if (!result.empty()) result += ',';
+                result += std::to_string(id);
+            }
+            return result;
+        };
+        const std::string before = ids(selected);
+        const std::string after = ids(constrained);
+        kvmem::redundancy_diag(
+            "KVMEM_REDUNDANCY_SELECT stage=media_constraint before=%s after=%s\n",
+            before.c_str(), after.c_str());
+    }
+    return constrained;
 }
 
 std::vector<uint32_t> KvMemStore::constrain_media(std::vector<uint32_t> selected,
@@ -507,13 +528,49 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         const std::vector<uint32_t> &mandatory_blocks) const {
     const uint32_t n = block_count();
     std::vector<uint32_t> selected;
-    if (n == 0) return selected;
+    const bool redundancy_diag = kvmem::redundancy_diagnostics_enabled();
+    if (n == 0) {
+        if (redundancy_diag) {
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_SELECT stage=bypass reason=no_blocks budget=%u selected=\n",
+                budget_blocks());
+        }
+        return selected;
+    }
 
     const uint32_t budget = budget_blocks();
     if (budget == 0 || n <= budget) {
         // Everything fits: select all in order.
         selected.reserve(n);
         for (uint32_t i = 0; i < n; ++i) selected.push_back(i);
+        if (redundancy_diag) {
+            std::string selected_ids;
+            std::string rejected_ids;
+            uint32_t selected_count = 0;
+            uint32_t rejected_count = 0;
+            for (uint32_t i = 0; i < n; ++i) {
+                if (selected_count < 256) {
+                    if (!selected_ids.empty()) selected_ids += ',';
+                    selected_ids += std::to_string(i);
+                }
+                ++selected_count;
+                if (redundancy_rejected(cfg_, blocks_[i])) {
+                    if (rejected_count < 256) {
+                        if (!rejected_ids.empty()) rejected_ids += ',';
+                        rejected_ids += std::to_string(i);
+                    }
+                    ++rejected_count;
+                }
+            }
+            if (selected_count > 256) selected_ids += ",...";
+            if (rejected_count > 256) rejected_ids += ",...";
+            kvmem::redundancy_diag(
+                "KVMEM_REDUNDANCY_SELECT stage=bypass reason=budget_sufficient enabled=%d "
+                "blocks=%u budget=%u selected_count=%u hard_reject_would_apply=%u "
+                "hard_reject_ids=%s selected=%s\n",
+                (int) cfg_.redundancy_aware, n, budget, selected_count, rejected_count,
+                rejected_ids.c_str(), selected_ids.c_str());
+        }
         return selected;
     }
 
@@ -525,11 +582,21 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
     const uint32_t recent = std::min(cfg_.recent_blocks, n);
 
     std::vector<bool> kept(n, false);
+    std::vector<uint8_t> protected_by;
+    std::vector<uint8_t> mandatory_requested;
+    if (redundancy_diag) {
+        protected_by.resize(n, 0);
+        mandatory_requested.resize(n, 0);
+    }
     uint32_t kept_count = 0;
     auto keep = [&](uint32_t id) {
         if (id < n && !kept[id]) { kept[id] = true; ++kept_count; }
     };
-    for (uint32_t i = 0; i < sink && kept_count < budget; ++i) keep(i);
+    auto keep_protected = [&](uint32_t id, uint8_t reason) {
+        if (redundancy_diag && id < n) protected_by[id] |= reason;
+        keep(id);
+    };
+    for (uint32_t i = 0; i < sink && kept_count < budget; ++i) keep_protected(i, 1u);
     uint32_t mand_kept = 0;
     uint32_t mand_unique = 0;
     {
@@ -537,13 +604,14 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         for (uint32_t id : mandatory_blocks) {
             if (id < n && !seen[id]) {
                 seen[id] = 1;
+                if (redundancy_diag) mandatory_requested[id] = 1;
                 ++mand_unique;
             }
         }
     }
     for (size_t i = mandatory_blocks.size(); i > 0 && kept_count < budget; --i) {
         const uint32_t before = kept_count;
-        keep(mandatory_blocks[i - 1]);
+        keep_protected(mandatory_blocks[i - 1], 2u);
         if (kept_count > before) {
             ++mand_kept;
         }
@@ -554,8 +622,94 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
                      mand_kept, mand_unique - mand_kept, budget);
     }
     for (uint32_t i = 0; i < recent && kept_count < budget; ++i) {
-        keep(n - 1 - i);
+        keep_protected(n - 1 - i, 4u);
     }
+
+    if (redundancy_diag) {
+        uint32_t pinned_count = 0;
+        uint32_t hard_rejected_count = 0;
+        uint32_t eligible_count = 0;
+        uint32_t evaluated_count = 0;
+        uint32_t mandatory_trimmed = 0;
+        std::string hard_rejected_ids;
+        std::string evaluated_states;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (kept[i]) ++pinned_count;
+            const bool rejected = !kept[i] && redundancy_rejected(cfg_, blocks_[i]);
+            const bool candidate = !kept[i] && !rejected;
+            hard_rejected_count += rejected ? 1u : 0u;
+            eligible_count += candidate ? 1u : 0u;
+            mandatory_trimmed += mandatory_requested[i] && !kept[i] ? 1u : 0u;
+            evaluated_count += blocks_[i].redundancy_score >= -1.0 ? 1u : 0u;
+            if (rejected && hard_rejected_count <= 256) {
+                if (!hard_rejected_ids.empty()) hard_rejected_ids += ',';
+                hard_rejected_ids += std::to_string(i);
+            }
+            if ((blocks_[i].redundancy_score >= -1.0 || mandatory_requested[i]) &&
+                evaluated_states.size() < 12000) {
+                if (!evaluated_states.empty()) evaluated_states += ';';
+                evaluated_states += std::to_string(i);
+                evaluated_states += ":pin=";
+                if (protected_by[i] & 1u) evaluated_states += 's';
+                if (protected_by[i] & 2u) evaluated_states += 'm';
+                if (protected_by[i] & 4u) evaluated_states += 'r';
+                if (protected_by[i] == 0) evaluated_states += '-';
+                evaluated_states += mandatory_requested[i] ? ":mand" : "";
+                evaluated_states += rejected ? ":hard_reject" : (candidate ? ":candidate" : ":protected");
+                evaluated_states += ":red=" + std::to_string(blocks_[i].redundancy_score);
+                evaluated_states += ":attn=" + std::to_string(blocks_[i].attn_score);
+            }
+        }
+        if (hard_rejected_count > 256) hard_rejected_ids += ",...";
+        kvmem::redundancy_diag(
+            "KVMEM_REDUNDANCY_SELECT stage=before_topk enabled=%d blocks=%u budget=%u "
+            "protected=%u eligible_candidates=%u hard_rejected=%u evaluated=%u "
+            "mandatory_requested=%u mandatory_trimmed=%u hard_reject_ids=%s states=%s\n",
+            (int) cfg_.redundancy_aware, n, budget, pinned_count, eligible_count,
+            hard_rejected_count, evaluated_count, mand_unique, mandatory_trimmed,
+            hard_rejected_ids.c_str(), evaluated_states.c_str());
+    }
+
+    auto report_selection = [&](const char * policy) {
+        if (!redundancy_diag) return;
+        uint32_t selected_count = 0;
+        uint32_t hard_rejected_count = 0;
+        uint32_t budget_excluded_count = 0;
+        uint32_t protected_redundant_count = 0;
+        std::string selected_ids;
+        std::string hard_rejected_ids;
+        std::string budget_excluded_ids;
+        auto append_id = [](std::string & ids, uint32_t id, uint32_t count) {
+            if (count >= 256) return;
+            if (!ids.empty()) ids += ',';
+            ids += std::to_string(id);
+        };
+        for (uint32_t i = 0; i < n; ++i) {
+            if (kept[i]) {
+                append_id(selected_ids, i, selected_count);
+                ++selected_count;
+                if (protected_by[i] != 0 && redundancy_rejected(cfg_, blocks_[i])) {
+                    ++protected_redundant_count;
+                }
+            } else if (redundancy_rejected(cfg_, blocks_[i])) {
+                append_id(hard_rejected_ids, i, hard_rejected_count);
+                ++hard_rejected_count;
+            } else {
+                append_id(budget_excluded_ids, i, budget_excluded_count);
+                ++budget_excluded_count;
+            }
+        }
+        if (selected_count > 256) selected_ids += ",...";
+        if (hard_rejected_count > 256) hard_rejected_ids += ",...";
+        if (budget_excluded_count > 256) budget_excluded_ids += ",...";
+        kvmem::redundancy_diag(
+            "KVMEM_REDUNDANCY_SELECT stage=after_topk policy=%s blocks=%u budget=%u "
+            "selected_count=%u selected=%s hard_rejected_count=%u hard_rejected=%s "
+            "budget_excluded_count=%u budget_excluded=%s protected_redundant=%u\n",
+            policy, n, budget, selected_count, selected_ids.c_str(),
+            hard_rejected_count, hard_rejected_ids.c_str(),
+            budget_excluded_count, budget_excluded_ids.c_str(), protected_redundant_count);
+    };
 
     auto take_top = [&](uint32_t quota, auto score_fn) {
         if (kept_count >= budget || quota == 0) return;
@@ -613,6 +767,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         for (uint32_t i = 0; i < n; ++i) {
             if (kept[i]) selected.push_back(i);
         }
+        report_selection("quota");
         return selected;
     }
 
@@ -646,6 +801,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
     for (uint32_t i = 0; i < n; ++i) {
         if (kept[i]) selected.push_back(i);
     }
+    report_selection("topk");
     return selected;
 }
 
