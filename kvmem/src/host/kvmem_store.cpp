@@ -10,6 +10,68 @@
 
 namespace kvmem {
 
+void KvMemStore::attach_gc(std::shared_ptr<KvMemGc> gc) {
+    if (gc && block_count() != 0) {
+        throw std::logic_error("KVMem GC must be attached before appending blocks");
+    }
+    gc_ = std::move(gc);
+    if (gc_) gc_->set_recent_blocks(cfg_.recent_blocks);
+    gc_view_ = gc_ ? gc_->read_view() : nullptr;
+}
+
+void KvMemStore::gc_begin_step() {
+    if (!gc_) return;
+    gc_->begin_step();
+    gc_view_ = gc_->read_view();
+}
+
+bool KvMemStore::is_live(uint32_t id) const {
+    return id < block_count() && (!gc_ || (gc_view_ && gc_->is_live(id, gc_view_)));
+}
+
+std::shared_ptr<KvMemGc::Lease> KvMemStore::gc_checkpoint_lease() const {
+    if (!gc_) return {};
+    std::vector<uint32_t> ids;
+    for (const auto &b : blocks_) {
+        if (b.in_working_set || b.tier == KvTier::GPU) ids.push_back(b.block_id);
+    }
+    return gc_->pin(ids);
+}
+
+uint32_t KvMemStore::gc_missing_required_prefix_block(uint32_t begin,
+        uint32_t end, uint32_t prefix_end) const {
+    if (!gc_ || cfg_.block_tokens == 0) return UINT32_MAX;
+    end = std::min(end, prefix_end);
+    if (end <= begin) return UINT32_MAX;
+    const uint32_t last = std::min(block_count(), (end - 1) / cfg_.block_tokens + 1);
+    for (uint32_t id = begin / cfg_.block_tokens; id < last; ++id) {
+        if (!is_live(id)) return id;
+    }
+    return UINT32_MAX;
+}
+
+void KvMemStore::gc_validate_mandatory(const std::vector<uint32_t> &ids) const {
+    if (!gc_) return;
+    for (uint32_t id : ids) {
+        if (id < block_count() && !is_live(id)) {
+            throw std::runtime_error("KVMem GC: requested historical block was deleted");
+        }
+    }
+}
+
+void KvMemStore::gc_sync_block(uint32_t id) {
+    if (!gc_) return;
+    const auto &b = blocks_[id];
+    const uint32_t mask = KvMemGc::Sealed | KvMemGc::Gpu | KvMemGc::Io |
+        KvMemGc::ValueBacked | KvMemGc::CpuCached;
+    const uint32_t flags = (b.n_tokens == cfg_.block_tokens ? KvMemGc::Sealed : 0u) |
+        (b.tier == KvTier::GPU ? KvMemGc::Gpu : 0u) |
+        (b.in_flight ? KvMemGc::Io : 0u) |
+        (b.ssd_clean && b.nvme_slot >= 0 ? KvMemGc::ValueBacked : 0u) |
+        (b.cpu_slot >= 0 ? KvMemGc::CpuCached : 0u);
+    gc_->update_flags(id, mask, flags);
+}
+
 namespace {
 
 uint32_t ceil_div_u32(uint32_t value, uint32_t divisor) {
@@ -179,6 +241,12 @@ int32_t KvMemStore::block_id_containing(uint32_t pos) const {
 void KvMemStore::register_append(uint32_t n_new_tokens) {
     if (n_new_tokens == 0) return;
     const uint32_t bt = cfg_.block_tokens;
+    if (gc_) {
+        if (bt == 0 ||
+            (static_cast<uint64_t>(total_tokens_) + n_new_tokens + bt - 1) / bt > gc_->capacity()) {
+            throw std::out_of_range("KVMem GC block capacity exceeded");
+        }
+    }
 
     // Extend the trailing partial block first, then spill into new blocks.
     uint32_t remaining = n_new_tokens;
@@ -190,6 +258,7 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
             last.n_tokens += take;
             remaining -= take;
             total_tokens_ += take;
+            gc_sync_block(last.block_id);
         }
     }
     while (remaining > 0) {
@@ -199,6 +268,12 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
         b.n_tokens = std::min(bt, remaining);
         b.baked_pos = static_cast<int64_t>(b.orig_pos_start);  // baked at true pos after prefill
         blocks_.push_back(b);
+        if (gc_) {
+            gc_->register_block(b.block_id, b.n_tokens == bt);
+            if (b.block_id < cfg_.sink_blocks) {
+                gc_->update_flags(b.block_id, KvMemGc::Anchor, KvMemGc::Anchor);
+            }
+        }
         total_tokens_ += b.n_tokens;
         remaining -= b.n_tokens;
     }
@@ -215,12 +290,14 @@ std::vector<KvMemDroppedBlock> KvMemStore::truncate_to(uint32_t token_pos) {
         total_tokens_ -= b.n_tokens;
         blocks_.pop_back();
     }
+    if (gc_) gc_->forget_tail(block_count());
     if (!blocks_.empty()) {
         KvMemBlock &last = blocks_.back();
         if (last.orig_pos_end() > token_pos) {
             const uint32_t keep = token_pos - last.orig_pos_start;
             total_tokens_ -= (last.n_tokens - keep);
             last.n_tokens = keep;
+            gc_sync_block(last.block_id);
         }
     }
     return dropped;
@@ -262,6 +339,7 @@ void KvMemStore::set_block_tier(uint32_t block_id, KvTier tier,
             b.cpu_slot = cpu_slot;
             if (nvme_slot >= 0) b.nvme_slot = nvme_slot;
         }
+        gc_sync_block(block_id);
         return;
     }
     if (tier == KvTier::GPU) {
@@ -274,6 +352,7 @@ void KvMemStore::set_block_tier(uint32_t block_id, KvTier tier,
         b.nvme_slot = nvme_slot;
         b.ssd_clean = tier == KvTier::SSD && nvme_slot >= 0;
     }
+    gc_sync_block(block_id);
 }
 
 void KvMemStore::set_block_gpu_slot(uint32_t block_id, int32_t gpu_slot) {
@@ -284,6 +363,7 @@ void KvMemStore::set_block_gpu_slot(uint32_t block_id, int32_t gpu_slot) {
 void KvMemStore::set_block_cpu_copy(uint32_t block_id, int32_t cpu_slot) {
     if (block_id >= block_count()) return;
     blocks_[block_id].cpu_slot = cpu_slot;
+    gc_sync_block(block_id);
 }
 
 void KvMemStore::set_block_ssd_backing(uint32_t block_id, int32_t nvme_slot,
@@ -292,11 +372,13 @@ void KvMemStore::set_block_ssd_backing(uint32_t block_id, int32_t nvme_slot,
     KvMemBlock &b = blocks_[block_id];
     b.nvme_slot = nvme_slot;
     b.ssd_clean = clean && nvme_slot >= 0;
+    gc_sync_block(block_id);
 }
 
 void KvMemStore::set_block_io_in_flight(uint32_t block_id, bool in_flight) {
     if (block_id >= block_count()) return;
     blocks_[block_id].in_flight = in_flight;
+    gc_sync_block(block_id);
 }
 
 void KvMemStore::set_block_baked_pos(uint32_t block_id, int64_t baked_pos) {
@@ -351,10 +433,12 @@ bool KvMemStore::prefill_needs_offload(uint32_t resident_tokens,
 }
 
 std::vector<uint32_t> KvMemStore::pick_prefill_pressure_blocks(const std::vector<uint32_t> & mandatory) const {
+    gc_validate_mandatory(mandatory);
     return constrain_media(pick_prefill_ungrouped(mandatory), mandatory, prefill_budget_blocks(), true);
 }
 
 std::vector<uint32_t> KvMemStore::pick_topk_blocks(const std::vector<uint32_t> & mandatory) const {
+    gc_validate_mandatory(mandatory);
     return constrain_media(pick_topk_ungrouped(mandatory), mandatory, budget_blocks(), false);
 }
 
@@ -379,6 +463,12 @@ std::vector<uint32_t> KvMemStore::constrain_media(std::vector<uint32_t> selected
     uint32_t count = 0;
     auto keep = [&](uint32_t id, bool required) {
         if (id >= n) return;
+        for (uint32_t i = lo[id]; i < hi[id]; ++i) {
+            if (!is_live(i)) {
+                if (required) throw std::runtime_error("KVMem GC: required media group contains deleted block");
+                return;
+            }
+        }
         uint32_t need = 0;
         for (uint32_t i = lo[id]; i < hi[id]; ++i) need += !kept[i];
         if (count + need > budget) {
@@ -405,7 +495,7 @@ std::vector<uint32_t> KvMemStore::constrain_media(std::vector<uint32_t> selected
     std::sort(selected.begin(), selected.end(), better);
     for (auto id : selected) keep(id, false);
     std::vector<uint32_t> rest;
-    for (uint32_t i = 0; i < n; ++i) if (!kept[i]) rest.push_back(i);
+    for (uint32_t i = 0; i < n; ++i) if (!kept[i] && is_live(i)) rest.push_back(i);
     std::sort(rest.begin(), rest.end(), better);
     for (auto id : rest) keep(id, false);
     selected.clear();
@@ -426,7 +516,7 @@ std::vector<uint32_t> KvMemStore::pick_prefill_ungrouped(
     const uint32_t budget = prefill_budget_blocks();
     if (budget == 0 || n <= budget) {
         selected.reserve(n);
-        for (uint32_t i = 0; i < n; ++i) selected.push_back(i);
+        for (uint32_t i = 0; i < n; ++i) if (is_live(i)) selected.push_back(i);
         return selected;
     }
 
@@ -434,7 +524,7 @@ std::vector<uint32_t> KvMemStore::pick_prefill_ungrouped(
     std::vector<uint8_t> kept(n, 0);
     uint32_t kept_count = 0;
     auto keep = [&](uint32_t id) {
-        if (id < n && !kept[id]) {
+        if (id < n && is_live(id) && !kept[id]) {
             kept[id] = 1;
             ++kept_count;
         }
@@ -489,7 +579,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
     if (budget == 0 || n <= budget) {
         // Everything fits: select all in order.
         selected.reserve(n);
-        for (uint32_t i = 0; i < n; ++i) selected.push_back(i);
+        for (uint32_t i = 0; i < n; ++i) if (is_live(i)) selected.push_back(i);
         return selected;
     }
 
@@ -503,7 +593,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
     std::vector<bool> kept(n, false);
     uint32_t kept_count = 0;
     auto keep = [&](uint32_t id) {
-        if (id < n && !kept[id]) { kept[id] = true; ++kept_count; }
+        if (id < n && is_live(id) && !kept[id]) { kept[id] = true; ++kept_count; }
     };
     for (uint32_t i = 0; i < sink && kept_count < budget; ++i) keep(i);
     uint32_t mand_kept = 0;
@@ -538,7 +628,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         std::vector<uint32_t> candidates;
         candidates.reserve(n - kept_count);
         for (uint32_t i = 0; i < n; ++i) {
-            if (!kept[i]) candidates.push_back(i);
+            if (!kept[i] && is_live(i)) candidates.push_back(i);
         }
         if (candidates.empty()) return;
         const uint32_t need = std::min<uint32_t>(
@@ -596,7 +686,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         std::vector<uint32_t> candidates;
         candidates.reserve(n - kept_count);
         for (uint32_t i = 0; i < n; ++i) {
-            if (!kept[i]) candidates.push_back(i);
+            if (!kept[i] && is_live(i)) candidates.push_back(i);
         }
         const uint32_t need = budget - kept_count;
         // Partial sort by attn_score desc; tie-break by recency (higher id) so
@@ -633,18 +723,19 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
         throw std::runtime_error(
             "KVMem semantic group spans/scores size mismatch");
     }
+    gc_validate_mandatory(mandatory_blocks);
 
     const uint32_t budget = budget_blocks();
     if (budget == 0 || n <= budget) {
         selected.reserve(n);
-        for (uint32_t id = 0; id < n; ++id) selected.push_back(id);
+        for (uint32_t id = 0; id < n; ++id) if (is_live(id)) selected.push_back(id);
         return selected;
     }
 
     std::vector<uint8_t> kept(n, 0);
     uint32_t kept_count = 0;
     auto keep = [&](uint32_t id) {
-        if (id < n && !kept[id]) {
+        if (id < n && is_live(id) && !kept[id]) {
             kept[id] = 1;
             ++kept_count;
         }
@@ -717,6 +808,11 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
     uint32_t selected_groups = 0;
     uint32_t skipped_for_budget = 0;
     for (const Candidate &candidate : candidates) {
+        bool live_group = true;
+        for (uint32_t id = candidate.first; id <= candidate.last; ++id) {
+            live_group = live_group && is_live(id);
+        }
+        if (!live_group) continue;
         uint32_t new_blocks = 0;
         for (uint32_t id = candidate.first; id <= candidate.last; ++id) {
             new_blocks += kept[id] ? 0u : 1u;
@@ -768,7 +864,12 @@ KvMemPlan KvMemStore::set_selection(std::vector<uint32_t> selected_ids,
                        [&](uint32_t id) { return id >= block_count(); }),
         selected_ids.end());
 
+    gc_validate_mandatory(selected_ids);
+
     KvMemPlan plan;
+    // Hold both windows while building the plan; transfer ownership only after
+    // planning succeeds so an exception cannot unpin the current window.
+    auto next_gc_lease = gc_ ? gc_->pin(selected_ids) : nullptr;
 
     std::vector<bool> now_selected(block_count(), false);
     for (uint32_t id : selected_ids) now_selected[id] = true;
@@ -878,10 +979,16 @@ KvMemPlan KvMemStore::set_selection(std::vector<uint32_t> selected_ids,
         window_pos += b.n_tokens;
     }
     plan.total_window_tokens = window_pos;
+    if (gc_) {
+        plan.gc_previous_window = std::move(gc_working_lease_);
+        gc_working_lease_ = std::move(next_gc_lease);
+        gc_->set_active(gc_working_lease_);
+    }
     return plan;
 }
 
 bool KvMemStore::commit_resident_selection(const std::vector<uint32_t> & selected_ids) {
+    gc_validate_mandatory(selected_ids);
     std::vector<uint32_t> resident;
     for (const auto & b : blocks_) {
         if (b.gpu_slot >= 0 && b.n_tokens) {
@@ -891,12 +998,20 @@ bool KvMemStore::commit_resident_selection(const std::vector<uint32_t> & selecte
     }
     if (resident != selected_ids) return false;
     for (auto & b : blocks_) b.in_working_set = b.gpu_slot >= 0 && b.n_tokens > 0;
+    if (gc_) {
+        gc_working_lease_ = gc_->pin(selected_ids);
+        gc_->set_active(gc_working_lease_);
+    }
     return true;
 }
 
 void KvMemStore::clear_working_set() {
     for (auto &b : blocks_) {
         b.in_working_set = false;
+    }
+    if (gc_) {
+        gc_->set_active({});
+        gc_working_lease_.reset();
     }
 }
 

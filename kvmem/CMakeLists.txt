@@ -9,6 +9,7 @@ if (WIN32 AND KVMEM_ENABLE_NVME)
 endif()
 
 add_library(kvmem
+    src/host/kvmem_gc.cpp
     src/host/kvmem_store.cpp
     src/host/kvmem_runtime.cpp
     src/host/raw_kv_store.cpp
@@ -40,6 +41,7 @@ endfunction()
 
 kvmem_add_test(backend_rebind_test)
 kvmem_add_test(kvmem_store_test)
+kvmem_add_test(kvmem_gc_test)
 kvmem_add_test(pinned_kv_tier_test)
 if (WIN32)
     # nvme_kv_tier_test and kvmem_runtime_test drive real files through the POSIX

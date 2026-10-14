@@ -23,8 +23,10 @@
 // same selected block IDs); the per-layer dimension is reserved for later.
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+#include "kvmem/kvmem_gc.hpp"
 
 namespace kvmem {
 
@@ -121,6 +123,8 @@ struct KvMemPlan {
     uint32_t gpu_reused_blocks = 0;
     uint32_t retained_position_stable = 0;
     uint32_t retained_position_moved = 0;
+    // Keep the prior window pinned until its stage-out has completed.
+    std::shared_ptr<KvMemGc::Lease> gc_previous_window;
 };
 
 // Which signal ranks the middle (non-sink/recent) blocks each reselection.
@@ -335,6 +339,16 @@ public:
     uint32_t total_tokens() const { return total_tokens_; }
     const std::vector<KvMemBlock> &blocks() const { return blocks_; }
 
+    // Optional historical-block GC. The owner must stop the worker before
+    // destroying the physical backing store captured by its release callback.
+    void attach_gc(std::shared_ptr<KvMemGc> gc);
+    void gc_begin_step();
+    void gc_end_step() { gc_view_.reset(); }
+    bool is_live(uint32_t id) const;
+    std::shared_ptr<KvMemGc::Lease> gc_checkpoint_lease() const;
+    uint32_t gc_missing_required_prefix_block(uint32_t begin, uint32_t end,
+                                               uint32_t prefix_end) const;
+
     // Block that owns original token position `pos`, or -1 if none.
     int32_t block_id_containing(uint32_t pos) const;
 
@@ -472,6 +486,8 @@ public:
     void clear_working_set();
 
 private:
+    void gc_sync_block(uint32_t id);
+    void gc_validate_mandatory(const std::vector<uint32_t> &ids) const;
     std::vector<uint32_t> constrain_media(std::vector<uint32_t> selected,
         const std::vector<uint32_t> & mandatory, uint32_t budget, bool recency) const;
     std::vector<uint32_t> pick_topk_ungrouped(const std::vector<uint32_t> & mandatory) const;
@@ -488,6 +504,9 @@ private:
     uint32_t runtime_select_budget_ = 0;
     std::vector<KvMemBlock> blocks_;
     uint32_t total_tokens_ = 0;  // total appended context length
+    std::shared_ptr<KvMemGc> gc_;
+    std::shared_ptr<const KvMemGc::View> gc_view_;
+    std::shared_ptr<KvMemGc::Lease> gc_working_lease_;
 };
 
 } // namespace kvmem
