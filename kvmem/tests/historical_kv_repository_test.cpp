@@ -1,0 +1,269 @@
+#include "kvmem/historical_kv_repository.hpp"
+
+#include <atomic>
+#include <iostream>
+#include <stdexcept>
+#include <thread>
+
+using namespace kvmem;
+
+static void check(bool ok, const char * message) {
+    if (!ok) throw std::runtime_error(message);
+}
+
+static HistoricalKvRepository::ReleaseCallback successful_release(
+    std::atomic<unsigned> & count) {
+    return [&count](const HistoricalKvHandle &) {
+        count.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
+}
+
+static void test_retire_closes_new_entry_but_keeps_old_reader() {
+    HistoricalKvRepository repo(1, 19);
+    std::atomic<unsigned> releases{0};
+    auto writer = repo.begin_write(42, 512, 31, 1, 4096, successful_release(releases));
+    check(writer.has_value(), "initial slot reservation failed");
+    const auto handle = writer->handle();
+    check(repo.publish_write(*writer), "writer failed to publish Live");
+    auto old_execution = repo.acquire_new(handle);
+    check(old_execution.has_value(), "old execution did not get a lease");
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "retire with live references failed");
+    check(!repo.acquire_new(handle), "retired block granted new execution");
+    check(repo.mark_executed(*old_execution, 5),
+          "previously admitted execution could not report its use after retirement");
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::AlreadyRetired,
+          "duplicate retire changed an already retired block");
+    writer->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred,
+          "resource freed while an old execution still held its lease");
+    check(repo.ready_count() == 0 && releases.load() == 0,
+          "retired slot became ready before physical release");
+    check(!repo.begin_write(43, 543, 5, 2, 64, successful_release(releases)),
+          "full repository accepted another block");
+    old_execution->reset();
+    const auto foreground_thread = std::this_thread::get_id();
+    std::thread::id callback_thread;
+    // The release callback runs only when the worker calls try_reclaim.
+    std::thread worker([&] {
+        callback_thread = std::this_thread::get_id();
+        check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+              "worker failed to reclaim quiescent block");
+    });
+    worker.join();
+    check(callback_thread != foreground_thread && releases.load() == 1,
+          "release callback did not run exactly once on the reclaimer");
+    check(repo.ready_count() == 1, "reclaimed slot was not returned to Ready");
+
+    auto next = repo.begin_write(43, 543, 5, 2, 64, successful_release(releases));
+    check(next && next->handle().slot == handle.slot &&
+          next->handle().generation == handle.generation + 1,
+          "Ready slot did not get a new generation");
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Stale,
+          "stale handle retired a reused slot");
+    check(!repo.acquire_new(handle), "stale handle acquired a reused slot");
+    check(repo.publish_write(*next), "new generation was damaged by stale handle");
+    next->reset();
+}
+
+static void test_writing_retire_cannot_resurrect() {
+    HistoricalKvRepository repo(2, 7);
+    std::atomic<unsigned> releases{0};
+    auto writer = repo.begin_write(1, 0, 1, 1, 128, successful_release(releases));
+    check(writer.has_value(), "writer reservation failed");
+    const auto handle = writer->handle();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "Writing block could not retire");
+    check(!repo.publish_write(*writer), "late writer resurrected retired history");
+    writer->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "retired writer was not released");
+
+    auto second = repo.begin_write(2, 1, 1, 2, 128, successful_release(releases));
+    check(second && repo.publish_write(*second), "publish-before-retire interleaving failed");
+    const auto second_handle = second->handle();
+    check(repo.retire(second_handle) == HistoricalKvRepository::RetireResult::Committed,
+          "Live block could not retire");
+    second->reset();
+    check(repo.try_reclaim(second_handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "published block was not released");
+    check(releases.load() == 2, "wrong number of release callbacks");
+}
+
+static void test_failed_release_stays_closed_and_retries() {
+    HistoricalKvRepository repo(1);
+    std::atomic<unsigned> attempts{0};
+    auto writer = repo.begin_write(9, 300, 8, 4, 256,
+        [&attempts](const HistoricalKvHandle &) {
+            const unsigned n = attempts.fetch_add(1) + 1;
+            if (n == 2) throw std::runtime_error("transient allocator failure");
+            return n >= 3;
+        });
+    check(writer && repo.publish_write(*writer), "writer setup failed");
+    const auto handle = writer->handle();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "retirement failed");
+    writer->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Retry,
+          "failed callback was treated as complete");
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Retry,
+          "throwing callback was treated as complete");
+    check(repo.ready_count() == 0 && !repo.inspect(handle) && !repo.acquire_new(handle),
+          "partially released block became visible");
+    const auto releasing = repo.snapshot();
+    check(releasing.size() == 1 && releasing[0].life == HistoricalKvLife::Releasing &&
+          releasing[0].handle.generation == handle.generation,
+          "snapshot lost a failed release ticket");
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::AlreadyRetired,
+          "matching Releasing generation was not recognized as retired");
+    check(!repo.begin_write(10, 0, 1, 5, 16,
+          [](const HistoricalKvHandle &) { return true; }),
+          "Releasing slot was reused before callback completed");
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "third release attempt failed");
+    check(attempts.load() == 3 && repo.ready_count() == 1,
+          "callback retry/Ready accounting incorrect");
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Stale,
+          "completed release was repeated");
+}
+
+static void test_snapshot_and_last_use() {
+    HistoricalKvRepository repo(1, 55);
+    auto writer = repo.begin_write(44, 713, 3, 10, 120,
+        [](const HistoricalKvHandle &) { return true; });
+    check(writer && repo.publish_write(*writer), "snapshot setup failed");
+    const auto handle = writer->handle();
+    auto scorer = repo.acquire_read(handle);
+    auto prefetch = repo.acquire_transfer(handle);
+    check(scorer && prefetch && !repo.mark_executed(*scorer, 99) &&
+          !repo.mark_executed(*prefetch, 99),
+          "score/prefetch leases incorrectly counted as execution");
+    check(!repo.inspect(handle)->active && repo.inspect(handle)->last_use_seq == 10,
+          "read/transfer changed active or LRU recency");
+    auto execution = repo.acquire_new(handle);
+    check(execution && repo.inspect(handle)->active,
+          "execution lease was not visible as active");
+    check(repo.mark_executed(handle, 20) && repo.mark_executed(handle, 12),
+          "execution mark failed");
+    auto observed = repo.inspect(handle);
+    check(observed && observed->logical_id == 44 && observed->original_begin == 713 &&
+          observed->valid_tokens == 3 && observed->birth_seq == 10 &&
+          observed->last_use_seq == 20 &&
+          observed->payload_bytes == 120 && observed->life == HistoricalKvLife::Live,
+          "guarded metadata was not copied correctly");
+    const auto scan = repo.snapshot();
+    check(scan.size() == 1 && scan[0].handle.generation == handle.generation,
+          "bounded snapshot did not include exact generation");
+    check(repo.snapshot_range(0, 1).size() == 1 &&
+          repo.snapshot_range(1, 1).empty() && repo.ready_count_range(0, 1) == 0,
+          "bounded range scan did not honor slot limits");
+    execution->reset();
+    check(!repo.inspect(handle)->active && repo.inspect(handle)->last_use_seq == 20,
+          "dropping execution did not clear active while read leases remained");
+    scorer->reset();
+    prefetch->reset();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "snapshot block retirement failed");
+    check(!repo.mark_executed(handle, 30), "retired block accepted a new execution mark");
+    writer->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "snapshot block release failed");
+}
+
+static void test_default_incarnation_is_unique() {
+    HistoricalKvRepository first(1);
+    HistoricalKvRepository second(1);
+    check(first.incarnation() != second.incarnation(),
+          "default repositories share an incarnation");
+    auto one = first.begin_write(1, 0, 1, 1, 16,
+        [](const HistoricalKvHandle &) { return true; });
+    auto two = second.begin_write(2, 0, 1, 1, 16,
+        [](const HistoricalKvHandle &) { return true; });
+    check(one && two && first.publish_write(*one) && second.publish_write(*two),
+          "cross-repository setup failed");
+    check(!second.acquire_new(one->handle()) &&
+          second.retire(one->handle()) == HistoricalKvRepository::RetireResult::Stale &&
+          second.try_reclaim(one->handle()) == HistoricalKvRepository::ReclaimResult::Stale,
+          "handle from another repository modified this incarnation");
+    check(second.acquire_new(two->handle()).has_value(),
+          "cross-repository stale handle damaged the valid block");
+}
+
+static void test_bounded_observation_counts_each_slot_once() {
+    HistoricalKvRepository repo(4, 91);
+    const auto release_now = [](const HistoricalKvHandle &) { return true; };
+    auto live = repo.begin_write(1, 0, 2, 1, 16, release_now);
+    auto retired = repo.begin_write(2, 2, 2, 2, 16, release_now);
+    unsigned attempts = 0;
+    auto releasing = repo.begin_write(3, 4, 2, 3, 16,
+        [&attempts](const HistoricalKvHandle &) { return ++attempts > 1; });
+    check(live && retired && releasing && repo.publish_write(*live) &&
+          repo.publish_write(*retired) && repo.publish_write(*releasing),
+          "range observation setup failed");
+    const auto retired_handle = retired->handle();
+    const auto releasing_handle = releasing->handle();
+    live->reset();
+    releasing->reset();
+    check(repo.retire(retired_handle) == HistoricalKvRepository::RetireResult::Committed &&
+          repo.retire(releasing_handle) == HistoricalKvRepository::RetireResult::Committed &&
+          repo.try_reclaim(releasing_handle) == HistoricalKvRepository::ReclaimResult::Retry,
+          "mixed state setup failed");
+
+    const auto whole = repo.observe_range(0, 4);
+    check(whole.ready == 1 && whole.pending == 2 && whole.blocks.size() == 3 &&
+          whole.blocks[0].handle.slot == 0 && whole.blocks[0].life == HistoricalKvLife::Live &&
+          whole.blocks[1].handle.slot == 1 && whole.blocks[1].life == HistoricalKvLife::Retired &&
+          whole.blocks[2].handle.slot == 2 && whole.blocks[2].life == HistoricalKvLife::Releasing,
+          "one-pass range observation lost order or double-counted a slot");
+    const auto middle = repo.observe_range(1, 2);
+    check(middle.ready == 0 && middle.pending == 2 && middle.blocks.size() == 2,
+          "bounded middle range counted an outside slot");
+    const auto tail = repo.observe_range(3, 100);
+    check(tail.ready == 1 && tail.pending == 0 && tail.blocks.empty(),
+          "bounded tail range failed to clamp at capacity");
+    check(repo.snapshot_range(1, 2).size() == 2 && repo.ready_count_range(3, 1) == 1,
+          "legacy range APIs changed behavior");
+
+    retired->reset();
+    check(repo.try_reclaim(retired_handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          repo.try_reclaim(releasing_handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "range observation cleanup failed");
+    const auto after = repo.observe_range(0, 4);
+    check(after.ready == 3 && after.pending == 0 && after.blocks.size() == 1,
+          "range pressure counts did not follow completed release");
+}
+
+static void test_close_blocks_new_work_but_old_lease_can_finish() {
+    HistoricalKvRepository repo(1);
+    auto writer = repo.begin_write(1, 0, 1, 1, 8,
+        [](const HistoricalKvHandle &) { return true; });
+    check(writer && repo.publish_write(*writer), "close setup failed");
+    const auto handle = writer->handle();
+    auto old = repo.acquire_new(handle);
+    check(old.has_value(), "old lease missing before close");
+    repo.close();
+    check(!repo.acquire_new(handle), "closed repository granted a new lease");
+    check(!repo.begin_write(2, 1, 1, 2, 8,
+          [](const HistoricalKvHandle &) { return true; }),
+          "closed repository accepted a new writer");
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "close prevented retirement of existing work");
+    writer->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred,
+          "close freed old lease before it completed");
+    old->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "close prevented draining existing work");
+}
+
+int main() {
+    test_retire_closes_new_entry_but_keeps_old_reader();
+    test_writing_retire_cannot_resurrect();
+    test_failed_release_stays_closed_and_retries();
+    test_snapshot_and_last_use();
+    test_default_incarnation_is_unique();
+    test_bounded_observation_counts_each_slot_once();
+    test_close_blocks_new_work_but_old_lease_can_finish();
+    std::cout << "historical KV repository checks passed\n";
+}
