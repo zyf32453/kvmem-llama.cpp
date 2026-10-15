@@ -67,6 +67,9 @@ bool HistoricalKvRawStore::reserve(
         !valid_tokens || valid_tokens > config_.max_tokens_per_slot ||
         original_begin > std::numeric_limits<uint64_t>::max() - valid_tokens)
         return false;
+    const auto meta = writer.metadata();
+    if (!meta || meta->original_begin != original_begin ||
+        meta->valid_tokens != valid_tokens) return false;
 
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);

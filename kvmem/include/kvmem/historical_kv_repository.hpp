@@ -45,6 +45,7 @@ public:
         HistoricalKvHandle handle() const { return handle_; }
         LeaseKind kind() const { return kind_; }
         bool is_writer() const { return kind_ == LeaseKind::Writer; }
+        std::optional<HistoricalKvBlockMeta> metadata() const;
         void reset() noexcept;
 
     private:
@@ -64,7 +65,7 @@ public:
     HistoricalKvRepository(const HistoricalKvRepository &) = delete;
     HistoricalKvRepository & operator=(const HistoricalKvRepository &) = delete;
 
-    // The caller receives the sole writer lease. An internal Reserved phase
+    // The caller receives the sole writer lease. An internal Reserving phase
     // protects metadata publication before Writing becomes visible.
     std::optional<Lease> begin_write(uint64_t logical_id, uint64_t original_begin,
                                      uint32_t valid_tokens, uint64_t birth_seq,
@@ -96,6 +97,8 @@ public:
     uint32_t ready_count_range(uint32_t first, uint32_t count) const;
     uint32_t capacity() const;
     uint64_t incarnation() const;
+    // Stops calls which begin after close; an already admitted writer may
+    // finish under its existing lease.
     void close() noexcept;
     bool closed() const;
 

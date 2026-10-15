@@ -149,6 +149,14 @@ HistoricalKvRepository::Lease & HistoricalKvRepository::Lease::operator=(Lease &
     return *this;
 }
 
+std::optional<HistoricalKvBlockMeta> HistoricalKvRepository::Lease::metadata() const {
+    if (!shared_ || handle_.slot >= shared_->capacity ||
+        !shared_->matches(handle_.slot, handle_)) return std::nullopt;
+    const auto control = shared_->slots[handle_.slot].control.load(std::memory_order_acquire);
+    if (!(kReadable & phase_bit(phase_of(control)))) return std::nullopt;
+    return shared_->copy_meta(handle_.slot, control);
+}
+
 void HistoricalKvRepository::Lease::reset() noexcept {
     if (shared_) {
         if (counted_exec_)
@@ -209,10 +217,9 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_write
         slot.generation.store(handle.generation, std::memory_order_release);
         slot.control.store(code(Phase::Writing, 1), std::memory_order_release);
         Lease writer(shared, handle, LeaseKind::Writer);
-        if (shared->closing.load(std::memory_order_acquire)) {
-            (void) retire(handle);
-            return std::nullopt;
-        }
+        // A write admitted before close may complete with its writer lease.
+        // Returning nullopt here would orphan a Writing slot if a bounded
+        // retire CAS happened to return Retry during the close race.
         return writer;
     }
     return std::nullopt;

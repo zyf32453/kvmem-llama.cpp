@@ -48,6 +48,9 @@ static void test_exact_generation_ram_reclamation() {
     const HistoricalKvHandle old = writer->handle();
     check(!store->reserve(*writer, old, UINT64_MAX, 3),
           "overflowing original token span was accepted");
+    check(!store->reserve(*writer, old, 714, 3) &&
+          !store->reserve(*writer, old, 713, 2),
+          "RAM payload accepted a span different from its repository record");
     check(store->reserve(*writer, old, 713, 3), "could not reserve RAM payload");
     const uint64_t old_bytes = store->allocated_payload_bytes();
     check(old_bytes >= old_min_bytes,
