@@ -41,8 +41,8 @@ public:
     KvMemStore &store() { return store_; }
     const KvMemStore &store() const { return store_; }
     const KvMemPlan &last_plan() const { return last_plan_; }
-    // Opt-in identity bridge. No production read/selection path consults it
-    // yet; callers must separately coordinate retirement and active leases.
+    // Opt-in identity bridge for selection and individual CPU reads/transfers.
+    // Callers must separately coordinate retirement and GPU execution leases.
     const HistoricalKvShadowDirectory &historical_shadow_directory() const {
         return historical_shadow_directory_;
     }

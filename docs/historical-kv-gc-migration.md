@@ -24,7 +24,11 @@
 
 `KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。它只允许把完整的现有 `KvMemBlock` 与同一仓库的精确 writer/handle/span 绑定，供将来异步任务在提交时捕获原代数；绑定失败不会消耗 writer。通过 runtime 追加/截断时，若会改变已绑定跨度就先拒绝，避免密集 block ID 被悄悄复用。目录绑定长期持有 writer lease，因此退休后若不解除绑定并等待异步 writer 退出，后台释放会一直延后。解绑仅把目录状态改为 `Retired` 并放掉目录 writer；仓库确认同代物理释放后，目录才可改为 `Reclaimed`。两个状态都保留关闭墓碑，`find()` 不返回可用绑定；只有运行时实际截断并移走旧密集块后，才删除墓碑并允许编号重用。该状态机避免“payload 已释放而旧块尚在目录”时把它误认为未托管块。
 
-宿主 `KvMemStore` 的现有选块入口现可查询这个目录：仓库刚提交退休、尚未由前台解绑时，下一轮 top-k、prefill pressure、显式选块和必需前缀检查已把该代看作不可选；解绑后及确认回收后的墓碑也继续阻止重新选中。此检查只是**选块预过滤**，不会取得覆盖 GPU 执行的 ExecLease，也不阻止尚未接入目录的 adapter 快捷路径直接访问 Raw；目录尚未由生产适配器绑定或启动后台删除。`runtime.store()` 暴露的直接修改入口目前可绕过追加/截断预检，生产接线前必须收口。仓库/worker、异步 writer 与 Raw 存储还需统一销毁顺序，不能让后台释放回调捕获先于其销毁的裸 `RawKvStore` 指针。
+宿主 `KvMemStore` 的现有选块入口现可查询这个目录：仓库刚提交退休、尚未由前台解绑时，下一轮 top-k、prefill pressure、显式选块和必需前缀检查已把该代看作不可选；解绑后及确认回收后的墓碑也继续阻止重新选中。此检查只是**选块预过滤**，不会取得覆盖 GPU 执行的 ExecLease，也不阻止尚未接入目录的 adapter 快捷路径直接访问 Raw；目录尚未由生产适配器绑定或启动后台删除。追加/截断预检现已下沉到 `KvMemStore`，直接调用 `runtime.store().truncate_to()` 也不能绕过原代数的保护；确认释放后，实际删除密集块时才清除墓碑。截断结果的容量在修改块表前预约，避免返回列表分配失败造成块表已删、墓碑未更新。生产操作仍应走 runtime，由它排空预取并清理 tier 槽位；store 的直接方法只处理元数据。仓库/worker、异步 writer 与 Raw 存储还需统一销毁顺序，不能让后台释放回调捕获先于其销毁的裸 `RawKvStore` 指针。
+
+目录增加逐块 `acquire_read` / `acquire_transfer`：未托管块走原路径；已绑定块必须通过仓库对精确 handle 的原子许可申请；Writing、退休、回收完成及关闭仓库均不授予新许可，失败不能回退为位置式读取。生产 `score_retrieval` 已在 `has_block` 前取得 ReadLease，持有到该块所有层的 Mean-K 打分结束；`write_block_to_gpu` 已在检查 Raw 前取得 TransferLease，已托管块暂走同步 H2D，确保搬运完成后才释放许可。目录默认仍为空，因此这两个入口保留原运行行为。其他读取、缓存搬运、GPU 快捷执行、checkpoint/MTP 入口尚未全部接线，不能据此开启生产 GC。
+
+新增测试把目录许可、管理器和真实 RawKvStore 串联：退休立即拒绝新读与新搬运，旧 Mean-K 读取和旧 packed K/V 拷贝可以完成；分别释放 ReadLease 和 TransferLease，只有最后一个许可退出后才看到两层 CPU payload 容量下降。另有用例覆盖未发布/关闭仓库拒绝访问、移动后的许可对象失效、回收墓碑不回退 legacy，以及直接 store 截断的状态不变与编号重用。当前本地相关 11 项 CTest 已通过，远程和 CUDA 验证仍待本轮执行。
 
 **此桥接尚未接入真实模型推理。** 现有 `KvMemStore` 和 `RawKvStore` 的生产读取仍依赖 `pos / block_tokens` 的密集位置；检索选择、GPU stage、异步传输、checkpoint、session 和 MTP 路径未统一持有逐块许可。封存时 `truncate`、`clear` 和 snapshot 也会拒绝操作，NVMe、短尾块及共享位置块不受支持。由此不能打开生产删除开关，也不能把单测中的释放字节数当作实际模型运行的内存收益。下一步需要把生产目录与所有读写路径迁到稳定句柄，补足这几条路径的 lease 和恢复语义，再做远程模型验收。
 

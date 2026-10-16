@@ -4047,6 +4047,10 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
     if (block_id >= store.block_count()) {
         return;
     }
+    auto transfer = runtime_->historical_shadow_directory().acquire_transfer(block_id);
+    if (!transfer) {
+        throw std::runtime_error("KVMem historical block is unavailable for stage-in");
+    }
     const kvmem::KvMemBlock & blk = store.blocks()[block_id];
     if (blk.gpu_slot < 0 || !raw_->has_block(block_id)) {
         return;
@@ -4074,7 +4078,10 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
             return;
         }
         uint8_t * dst = base ? base + static_cast<size_t>(cell0) * row : nullptr;
-        if (dst && kvmem_stagein_enqueue_v(host, nbytes, dst, sacc)) {
+        // Until batched stage-in owns its leases, managed blocks use the
+        // synchronous H2D path. The transfer lease covers every layer through
+        // device copy completion, including exceptions and fallback paths.
+        if (!transfer.lease && dst && kvmem_stagein_enqueue_v(host, nbytes, dst, sacc)) {
             return;
         }
         const int64_t t_set = ggml_time_us();
@@ -4198,6 +4205,10 @@ void llama_memory_kvmem::score_retrieval() {
     std::vector<float> mk(n_embd_k_, 0.0f);
     const uint32_t g = n_head_kv_ == 0 ? 1 : n_head_ / n_head_kv_;
     for (uint32_t b = 0; b < nblk; ++b) {
+        auto read = runtime_->historical_shadow_directory().acquire_read(b);
+        if (!read) {
+            continue;
+        }
         if (!raw_->has_block(b)) {
             continue;
         }

@@ -344,10 +344,10 @@ public:
     // Optional historical-block GC. The owner must stop the worker before
     // destroying the physical backing store captured by its release callback.
     void attach_gc(std::shared_ptr<KvMemGc> gc);
-    // Runtime-owned, opt-in historical identity filter. The directory must
-    // outlive all selection calls on this store; this is not an ExecLease.
+    // Runtime-owned, opt-in identity filter and span-mutation guard. The
+    // directory must outlive store operations; this is not an ExecLease.
     void attach_historical_shadow_directory(
-        const HistoricalKvShadowDirectory * directory) noexcept {
+        HistoricalKvShadowDirectory * directory) noexcept {
         historical_shadow_directory_ = directory;
     }
     void gc_begin_step();
@@ -509,7 +509,7 @@ public:
     }
 private:
     KvMemStoreConfig cfg_;
-    const HistoricalKvShadowDirectory * historical_shadow_directory_ = nullptr;
+    HistoricalKvShadowDirectory * historical_shadow_directory_ = nullptr;
     uint32_t runtime_select_budget_ = 0;
     std::vector<KvMemBlock> blocks_;
     uint32_t total_tokens_ = 0;  // total appended context length

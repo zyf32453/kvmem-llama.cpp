@@ -90,6 +90,32 @@ bool HistoricalKvShadowDirectory::allows_new_selection(uint32_t block_id) const 
          meta->life == HistoricalKvLife::Live);
 }
 
+HistoricalKvShadowDirectory::Access
+HistoricalKvShadowDirectory::acquire_read(uint32_t block_id) const {
+    return acquire(block_id, HistoricalKvRepository::LeaseKind::Read);
+}
+
+HistoricalKvShadowDirectory::Access
+HistoricalKvShadowDirectory::acquire_transfer(uint32_t block_id) const {
+    return acquire(block_id, HistoricalKvRepository::LeaseKind::Transfer);
+}
+
+HistoricalKvShadowDirectory::Access HistoricalKvShadowDirectory::acquire(
+        uint32_t block_id, HistoricalKvRepository::LeaseKind kind) const {
+    const auto it = entries_.find(block_id);
+    if (it == entries_.end()) return {Access::Status::Unmanaged, {}};
+    const auto & entry = it->second;
+    if (entry.state != State::Bound || !entry.repository ||
+        entry.repository->repository_id() != entry.repository_id) return {};
+    // Do not inspect then read: retirement can commit between those actions.
+    // The repository admits the lease atomically against the exact handle.
+    auto lease = kind == HistoricalKvRepository::LeaseKind::Read
+        ? entry.repository->acquire_read(entry.binding.handle)
+        : entry.repository->acquire_transfer(entry.binding.handle);
+    if (!lease) return {};
+    return {Access::Status::Acquired, std::move(*lease)};
+}
+
 bool HistoricalKvShadowDirectory::unbind_retired(uint32_t block_id) {
     const auto it = entries_.find(block_id);
     if (it == entries_.end() || it->second.state != State::Bound) return false;

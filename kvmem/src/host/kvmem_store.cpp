@@ -246,6 +246,8 @@ int32_t KvMemStore::block_id_containing(uint32_t pos) const {
 }
 
 void KvMemStore::register_append(uint32_t n_new_tokens) {
+    if (historical_shadow_directory_)
+        historical_shadow_directory_->validate_append(*this, n_new_tokens);
     if (n_new_tokens == 0) return;
     const uint32_t bt = cfg_.block_tokens;
     if (gc_) {
@@ -287,8 +289,15 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
 }
 
 std::vector<KvMemDroppedBlock> KvMemStore::truncate_to(uint32_t token_pos) {
+    if (historical_shadow_directory_)
+        historical_shadow_directory_->validate_truncate(*this, token_pos);
     std::vector<KvMemDroppedBlock> dropped;
     if (token_pos >= total_tokens_) return dropped;
+    // Allocate before changing the dense table. An allocation failure must
+    // not leave its historical identity directory describing removed blocks.
+    const auto first_dropped = std::lower_bound(blocks_.begin(), blocks_.end(), token_pos,
+        [](const KvMemBlock & block, uint32_t pos) { return block.orig_pos_start < pos; });
+    dropped.reserve(static_cast<size_t>(blocks_.end() - first_dropped));
     // Pop fully-past blocks from the back, then shrink the trailing partial one.
     while (!blocks_.empty() && blocks_.back().orig_pos_start >= token_pos) {
         const KvMemBlock &b = blocks_.back();
@@ -307,6 +316,8 @@ std::vector<KvMemDroppedBlock> KvMemStore::truncate_to(uint32_t token_pos) {
             gc_sync_block(last.block_id);
         }
     }
+    if (historical_shadow_directory_)
+        historical_shadow_directory_->prune_dropped(*this);
     return dropped;
 }
 

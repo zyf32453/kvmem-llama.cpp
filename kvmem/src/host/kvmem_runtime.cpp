@@ -89,16 +89,16 @@ void KvMemRuntime::trace_tier(const char *tag, uint32_t block_id, int32_t slot) 
 }
 
 void KvMemRuntime::register_append(uint32_t n_tokens) {
-    historical_shadow_directory_.validate_append(store_, n_tokens);
     store_.register_append(n_tokens);
 }
 
 std::vector<KvMemDroppedBlock> KvMemRuntime::truncate_to(uint32_t token_pos) {
+    // Reject before touching prefetch state. The store also validates direct
+    // callers and prunes identities only after its dense blocks are removed.
     historical_shadow_directory_.validate_truncate(store_, token_pos);
     wait_prefetch();
     prefetch_buf_.clear();
     auto dropped = store_.truncate_to(token_pos);
-    historical_shadow_directory_.prune_dropped(store_);
     for (const auto &d : dropped) {
         if (cpu_tier_ && d.cpu_slot >= 0) {
             cpu_tier_->release_block(d.block_id);

@@ -382,6 +382,102 @@ static void test_retirement_closes_new_host_selection_before_unbind() {
           HistoricalKvShadowDirectory::State::Unmanaged);
 }
 
+static void test_direct_store_mutations_cannot_bypass_identity_guards() {
+    auto repo = std::make_shared<HistoricalKvRepository>(1, 88);
+    KvMemRuntime runtime(config());
+    runtime.register_append(12);
+    auto writer = repo->begin_write(1, 4, 4, 1, 8,
+        [](const HistoricalKvHandle &) { return true; });
+    CHECK(writer.has_value());
+    if (!writer) return;
+    const auto handle = writer->handle();
+    CHECK(runtime.bind_historical_full_block(1, repo, handle, *writer));
+
+    auto & store = runtime.store();
+    store.register_append(4);
+    CHECK(store.total_tokens() == 16 && store.block_count() == 4);
+    CHECK(throws_logic([&] { store.truncate_to(6); }));
+    CHECK(throws_logic([&] { store.truncate_to(4); }));
+    CHECK(store.total_tokens() == 16 && store.block_count() == 4 &&
+          runtime.historical_shadow_directory().observe(1).state ==
+              HistoricalKvShadowDirectory::State::Bound);
+
+    CHECK(repo->retire(handle) == HistoricalKvRepository::RetireResult::Committed);
+    CHECK(runtime.unbind_retired_historical_block(1));
+    CHECK(throws_logic([&] { store.truncate_to(0); }));
+    CHECK(store.total_tokens() == 16 && store.block_count() == 4);
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(runtime.confirm_reclaimed_historical_block(1));
+    CHECK(throws_logic([&] { store.truncate_to(6); }));
+    CHECK(store.total_tokens() == 16 && store.block_count() == 4);
+
+    const auto dropped = store.truncate_to(4);
+    CHECK(dropped.size() == 3 && dropped[0].block_id == 3 &&
+          dropped[2].block_id == 1 && store.total_tokens() == 4 &&
+          runtime.historical_shadow_directory().size() == 0);
+    store.register_append(4);
+    auto replacement = repo->begin_write(1, 4, 4, 2, 8,
+        [](const HistoricalKvHandle &) { return true; });
+    CHECK(replacement.has_value());
+    if (!replacement) return;
+    CHECK(replacement->handle().generation > handle.generation);
+    const auto next = replacement->handle();
+    CHECK(runtime.bind_historical_full_block(1, repo, next, *replacement));
+    CHECK(repo->retire(next) == HistoricalKvRepository::RetireResult::Committed);
+    CHECK(runtime.unbind_retired_historical_block(1));
+    CHECK(repo->try_reclaim(next) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(runtime.confirm_reclaimed_historical_block(1));
+    runtime.truncate_to(0);
+}
+
+static void test_read_admission_requires_live_exact_generation() {
+    using Status = HistoricalKvShadowDirectory::Access::Status;
+    auto repo = std::make_shared<HistoricalKvRepository>(1, 89);
+    KvMemRuntime runtime(config());
+    runtime.register_append(8);
+    const auto & directory = runtime.historical_shadow_directory();
+    auto legacy = directory.acquire_read(1);
+    CHECK(legacy && legacy.status == Status::Unmanaged && !legacy.lease);
+    auto legacy_transfer = directory.acquire_transfer(1);
+    CHECK(legacy_transfer && legacy_transfer.status == Status::Unmanaged &&
+          !legacy_transfer.lease);
+
+    auto writer = repo->begin_write(0, 0, 4, 1, 8,
+        [](const HistoricalKvHandle &) { return true; });
+    CHECK(writer.has_value());
+    if (!writer) return;
+    const auto handle = writer->handle();
+    CHECK(runtime.bind_historical_full_block(0, repo, handle, *writer));
+    CHECK(!directory.acquire_read(0) && !directory.acquire_transfer(0));
+    CHECK(repo->publish_write(directory.find(0)->writer_context->writer()));
+    auto read = directory.acquire_read(0);
+    auto transfer = directory.acquire_transfer(0);
+    CHECK(read && read.status == Status::Acquired && read.lease &&
+          read.lease.kind() == HistoricalKvRepository::LeaseKind::Read &&
+          read.lease.repository_id() == repo->repository_id() &&
+          read.lease.handle().generation == handle.generation);
+    CHECK(transfer && transfer.lease &&
+          transfer.lease.kind() == HistoricalKvRepository::LeaseKind::Transfer);
+    auto moved_read = std::move(read);
+    CHECK(!read && moved_read);
+    repo->close();
+    CHECK(!directory.acquire_read(0) && !directory.acquire_transfer(0));
+    CHECK(repo->retire(handle) == HistoricalKvRepository::RetireResult::Committed);
+    CHECK(!directory.acquire_read(0) && !directory.acquire_transfer(0));
+    CHECK(runtime.unbind_retired_historical_block(0));
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred);
+    moved_read.lease.reset();
+    CHECK(!moved_read);
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred);
+    transfer.lease.reset();
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(runtime.confirm_reclaimed_historical_block(0));
+    CHECK(!directory.acquire_read(0) && !directory.acquire_transfer(0));
+    runtime.truncate_to(0);
+    runtime.register_append(4);
+    CHECK(directory.acquire_read(0).status == Status::Unmanaged);
+}
+
 int main() {
     test_full_block_binding_and_runtime_owner_move();
     test_truncate_then_reuse_dense_id();
@@ -390,6 +486,8 @@ int main() {
     test_wrong_expected_generation_keeps_writer();
     test_tombstone_survives_deferred_and_releasing_retry();
     test_retirement_closes_new_host_selection_before_unbind();
+    test_direct_store_mutations_cannot_bypass_identity_guards();
+    test_read_admission_requires_live_exact_generation();
     if (failures != 0) {
         std::printf("FAILED: %d check(s)\n", failures);
         return 1;

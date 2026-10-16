@@ -13,11 +13,12 @@ namespace kvmem {
 class KvMemStore;
 
 // An opt-in, per-runtime identity bridge for the gradual migration away from
-// dense block IDs. This does not change selection, admit execution, retire a
-// block, or release storage. A lookup is never a substitute for acquire_new.
+// dense block IDs. Selection filters and read/transfer admission consult the
+// exact repository generation. This does not admit GPU execution, retire a
+// block, or release storage. A lookup is never a substitute for a lease.
 // The owner must keep a release callback's storage target alive separately.
-// Span mutation must go through KvMemRuntime: direct KvMemStore mutation
-// bypasses these guards and is unsupported while bindings exist.
+// Directory operations are serialized by the foreground owner. Only the
+// repository may be retired/reclaimed concurrently by its background worker.
 class HistoricalKvShadowDirectory {
 public:
     enum class State { Unmanaged, Bound, Retired, Reclaimed };
@@ -59,6 +60,17 @@ public:
         uint32_t valid_tokens = 0;
     };
 
+    struct Access {
+        enum class Status { Unmanaged, Acquired, Denied };
+        Status status = Status::Denied;
+        HistoricalKvRepository::Lease lease;
+
+        explicit operator bool() const {
+            return status == Status::Unmanaged ||
+                   (status == Status::Acquired && static_cast<bool>(lease));
+        }
+    };
+
     // On success moves writer into a shared context. On failure leaves writer
     // with the caller, including on allocation failure. One repository owns
     // this directory for the lifetime of its runtime, even when it is empty.
@@ -75,6 +87,12 @@ public:
     // so a retirement is visible even before the owner unbinds its writer.
     // It does not grant an execution or transfer lease.
     bool allows_new_selection(uint32_t block_id) const;
+    // Unmanaged blocks keep their legacy path. Managed blocks require an
+    // atomic lease admission; Writing, retired, reclaimed and closed owners
+    // are denied. Retain Access until all CPU reads / transfers finish.
+    // A failed managed admission must never fall back to a legacy read.
+    Access acquire_read(uint32_t block_id) const;
+    Access acquire_transfer(uint32_t block_id) const;
 
     // This does NOT call retire. A separately coordinated owner must first
     // retire the exact generation and ensure all production reads are gated.
@@ -86,11 +104,11 @@ public:
     // until the runtime actually drops the dense block on truncate.
     bool confirm_reclaimed(uint32_t block_id);
 
-    // Called before runtime mutations. A bound or retired block may not be
+    // Called before store mutations. A bound or retired block may not be
     // extended, shrunk, dropped, or reused before confirmed reclamation.
     void validate_append(const KvMemStore & store, uint32_t n_tokens) const;
     void validate_truncate(const KvMemStore & store, uint32_t token_pos) const;
-    // Called by KvMemRuntime after a successful truncate. Only tombstones
+    // Called by KvMemStore after a successful truncate. Only tombstones
     // whose old dense blocks no longer exist may be removed.
     void prune_dropped(const KvMemStore & store);
 
@@ -98,6 +116,7 @@ public:
     size_t allocated_bytes() const noexcept;
 
 private:
+    Access acquire(uint32_t block_id, HistoricalKvRepository::LeaseKind kind) const;
     bool tail_span_matches(const KvMemStore & store) const;
 
     struct Entry {
