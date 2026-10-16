@@ -10,7 +10,11 @@
 
 在早期 `KvMemGc` 移植之外，已增加按 `(slot, generation)` 管理块生命周期的 `HistoricalKvRepository`、独立的 `HistoricalKvGc` 管理器和 `HistoricalKvPolicy` 接口。LRU 是一个可替换策略，管理器负责扫描、退休、等待已有 lease、重试及触发物理释放。`HistoricalKvRawStore` 提供按句柄存储的独立验证实现；`HistoricalKvActiveSet` 为每次操作重新取得执行许可，跳过已退休的可选块，必选块缺失时撤销整次申请，并只在实际执行结束后记录最近使用时间。
 
-真实 `RawKvStore` 现有一个**受限桥接接口**：只有完整、对齐、所有层 K/V 均已连续写入、无 NVMe 的 RAM 块可以由仓库 writer 封存。仓库将该句柄退休、所有旧 lease 退出并进入 `Releasing` 后，后台回调可逐层移走 K、V、mean 的向量，在存储锁外销毁，并返回实际释放的 payload 容量。接口验证仓库身份和代数，禁止封存后的旧位置写入。测试已覆盖旧读者阻止释放、两层数据释放、同槽新代数、跨仓库同值句柄、增量写入空洞以及管理器到真实 RAM 存储的回收闭环。
+真实 `RawKvStore` 现有一个**受限桥接接口**：只有完整、对齐、所有必需层 K/V 均已连续写入、无 NVMe 的 RAM 块可以由仓库 writer 封存。仓库将该句柄退休、所有旧 lease 退出并进入 `Releasing` 后，后台回调可逐层移走 K、V、mean 的向量，在存储锁外销毁，并返回实际释放的 payload 容量。接口验证仓库身份和代数，禁止封存后的旧位置写入。测试已覆盖旧读者阻止释放、两层数据释放、同槽新代数、跨仓库同值句柄、增量写入空洞以及管理器到真实 RAM 存储的回收闭环。
+
+适配器现将模型真正拥有注意力 KV 的物理层号传给 `RawKvStore`。受限封存只要求这些层 K/V 写满，同时要求非注意力层保持空白；检索模式还要求这些层的 Mean-K 连续写满。未显式给层号的旧调用仍要求全部配置层写满。这样混合架构中没有 KV 的层不会让完整块永远无法封存。新增用例验证稀疏层的封存与物理释放、缺失 Mean-K、非注意力层意外写入和无效层号列表。生产封存仍未启用：当前位置式写入和 snapshot/truncate 路径尚不能在已封存块上安全运行。
+
+这里计量的物理释放仅是 `RawKvStore` 的 K/V/mean 权威 payload。`PinnedKvTier` 可能仍缓存该块的 GPU 格式副本，且其 CPU arena 预先分配；生产删除还需在所有 transfer lease 结束后同步失效对应缓存槽。槽位可复用、payload 容量下降和进程 RSS 下降是三个不同指标，不应混为一次“CPU 内存释放”。
 
 独立的按句柄 `HistoricalKvRawStore` 也将读写许可和元数据观察绑定到仓库身份，物理释放要求仓库进入 `Releasing`。这防止调用方绕过退休与旧 lease 清空阶段直接释放，也防止两个仓库使用相同外部 incarnation/slot/generation 时互相读取、写入或回收数据。
 
@@ -18,11 +22,13 @@
 
 对真实采集路径的审查发现，Mean-K、packed K 和 packed V 会由不同的调用或异步任务分别到达。按句柄存储因此增加 `write_mean_k_slice`、`write_packed_k_slice` 和 `write_packed_v_slice`：每个分量独立记录连续前缀，顺序可以不同；所有必需分量和所有配置层写满以前，整层读取与 `publish_complete` 均拒绝。原 `write_slice` 仍在同一 slot 锁下验证并一次提交全部分量，不会因后一分量错误而留下半次写入。测试覆盖错序完成、缺分量/缺层、洞与重复、非对齐短 span、退休后旧 writer 完成、旧 reader 阻止回收，以及跨仓库同值句柄。
 
-`KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。它只允许把完整的现有 `KvMemBlock` 与同一仓库的精确 writer/handle/span 绑定，供将来异步任务在提交时捕获原代数；绑定失败不会消耗 writer。通过 runtime 追加/截断时，若会改变已绑定跨度就先拒绝，避免密集 block ID 被悄悄复用；只有外部已明确退休该代时才能解除绑定。这个目录**不参与当前选块、执行许可、退休或物理释放**，也尚未由适配器使用。`runtime.store()` 暴露的直接修改入口目前可绕过此预检，生产接线前必须收口。仓库/worker、异步 writer 与 Raw 存储还需统一销毁顺序，不能让后台释放回调捕获先于其销毁的裸 `RawKvStore` 指针。
+`KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。它只允许把完整的现有 `KvMemBlock` 与同一仓库的精确 writer/handle/span 绑定，供将来异步任务在提交时捕获原代数；绑定失败不会消耗 writer。通过 runtime 追加/截断时，若会改变已绑定跨度就先拒绝，避免密集 block ID 被悄悄复用；只有外部已明确退休该代时才能解除绑定。目录绑定长期持有 writer lease，因此退休后若不解除绑定并等待异步 writer 退出，后台释放会一直延后。这个目录**不参与当前选块、执行许可、退休或物理释放**，也尚未由适配器使用。`runtime.store()` 暴露的直接修改入口目前可绕过此预检，生产接线前必须收口。仓库/worker、异步 writer 与 Raw 存储还需统一销毁顺序，不能让后台释放回调捕获先于其销毁的裸 `RawKvStore` 指针。
 
 **此桥接尚未接入真实模型推理。** 现有 `KvMemStore` 和 `RawKvStore` 的生产读取仍依赖 `pos / block_tokens` 的密集位置；检索选择、GPU stage、异步传输、checkpoint、session 和 MTP 路径未统一持有逐块许可。封存时 `truncate`、`clear` 和 snapshot 也会拒绝操作，NVMe、短尾块及共享位置块不受支持。由此不能打开生产删除开关，也不能把单测中的释放字节数当作实际模型运行的内存收益。下一步需要把生产目录与所有读写路径迁到稳定句柄，补足这几条路径的 lease 和恢复语义，再做远程模型验收。
 
 生产接线的首个受限配置应是单会话、单 lane、文本、RAM 权威存储、MTP 关闭且所需注意力层与 packed V 均明确可用。会话对象需携带 `block_id → (handle, original span)`，异步 harvest job 必须在提交时捕获 exact handle 和 writer lease；完成时不能按 `pos` 查询可能已经复用的块。当前 stage-out 可能从 offset 0 重写增长中的 partial block，接线时要只提交未写的后缀。`valid_tokens` 在预约时固定，因此尾块增长/退休切换、非对齐新 span、请求级容量预约也还需要设计和验证。`score_retrieval` 在选块前读取 Mean-K，须先取得 Read 许可；stage-in/prefetch、同 query、全驻留、keep-selected 及压力换块都要取得新的执行或搬运许可，旧许可保留到 GPU/异步 D2H 真正完成。
+
+实际接线还要拒绝没有注意力层的配置，并保证 Mean-K 每段只提交一次：连续前缀证明覆盖范围，不能识别重复累加。`Writing` 块尚未封存，不能被生产删除策略选中。退休后需保留目录墓碑，禁止按“找不到绑定”退回旧位置读取；现有 `KvMemStore::is_live` 仅连接旧 `KvMemGc`，尚不会自动过滤新仓库退休块。`seq_rm`、清空、截断、回放和快照要在修改 GPU/Raw 前完成统一退休与异步排空；退休的 GPU 块再次 stage-out 时也不能重写已释放的 Raw 位置。
 
 ### 本阶段验收记录
 

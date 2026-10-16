@@ -950,6 +950,13 @@ llama_memory_kvmem::llama_memory_kvmem(
     rcfg.n_embd_k = n_embd_k_;
     rcfg.n_embd_v = n_embd_v_;
     rcfg.block_tokens = block_tokens_;
+    rcfg.historical_gc_require_mean_k = method_ == 1;
+    rcfg.historical_gc_attention_layers.clear();
+    for (uint32_t il = 0; il < n_layer_; ++il) {
+        if (kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+            rcfg.historical_gc_attention_layers.push_back(il);
+        }
+    }
     if (ggml_is_quantized(type_k_)) {
         rcfg.k_row_bytes = ggml_row_size(type_k_, n_embd_k_);
     }

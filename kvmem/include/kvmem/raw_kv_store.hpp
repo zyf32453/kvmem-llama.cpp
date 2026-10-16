@@ -34,6 +34,11 @@ struct RawKvStoreConfig {
     uint64_t k_row_bytes = 0;      // 0 = FP16 (n_embd_k * 2); else opaque K row
     uint64_t k_gpu_row_bytes = 0;  // 0 = no packed GPU K; else bytes per token row
     uint64_t v_gpu_row_bytes = 0;  // 0 = no packed GPU V; else bytes per token row
+    // Physical model layer IDs that actually own attention KV. Empty keeps
+    // the legacy all-layers seal requirement. Must be sorted and unique.
+    std::vector<uint32_t> historical_gc_attention_layers;
+    // Retrieval requires Mean-K for each attention layer before publication.
+    bool historical_gc_require_mean_k = false;
     uint64_t nvme_bytes = 0;
     std::string nvme_dir;
     std::string nvme_file = "kvmem_raw_k.bin";
@@ -116,8 +121,10 @@ public:
     void restore_mean_checkpoint(uint32_t token_pos, const std::vector<float> & state);
 
     // Restricted legacy-store bridge for a repository-owned, full positional
-    // block. Every configured layer must have full K/V payload (mean-only K
-    // is accepted only when packed K is not configured). The writer must have
+    // block. Every configured attention layer must have full K/V payload
+    // (mean-only K is accepted only when packed K is not configured), while
+    // non-attention layers must remain empty. If configured, Mean-K must also
+    // cover the whole block. The writer must have
     // finished all incremental writes before seal.
     // Only RAM stores are accepted: async NVMe jobs have no generation identity
     // in this legacy format. Partial/nonaligned blocks and shared positional

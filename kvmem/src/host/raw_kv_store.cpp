@@ -116,6 +116,12 @@ void advance_written_prefix(uint32_t & prefix, uint32_t off, uint32_t take) {
 } // namespace
 
 RawKvStore::RawKvStore(RawKvStoreConfig cfg) : cfg_(std::move(cfg)) {
+    const auto & attention = cfg_.historical_gc_attention_layers;
+    if (!std::is_sorted(attention.begin(), attention.end()) ||
+        std::adjacent_find(attention.begin(), attention.end()) != attention.end() ||
+        (!attention.empty() && attention.back() >= cfg_.n_layer)) {
+        throw std::invalid_argument("historical GC attention layers must be sorted, unique, and in range");
+    }
 #if !KVMEM_ENABLE_NVME
     if (cfg_.nvme_bytes) throw std::runtime_error("NVMe offload is disabled in this build");
 #endif
@@ -817,7 +823,23 @@ bool RawKvStore::seal_for_historical_gc(
                available >= static_cast<size_t>(row_bytes) * cfg_.block_tokens;
     };
     bool populated = false;
-    for (const auto & layer : block.layers) {
+    size_t attention_index = 0;
+    for (uint32_t il = 0; il < cfg_.n_layer; ++il) {
+        const auto & layer = block.layers[il];
+        const bool required = cfg_.historical_gc_attention_layers.empty() ||
+            (attention_index < cfg_.historical_gc_attention_layers.size() &&
+             cfg_.historical_gc_attention_layers[attention_index] == il);
+        if (!required) {
+            if (layer.n_tokens || layer.k_gpu_tokens || layer.v_gpu_tokens ||
+                layer.mean_tokens || layer.k_prefix_tokens || layer.v_prefix_tokens ||
+                layer.k_gpu_prefix_tokens || layer.v_gpu_prefix_tokens ||
+                layer.mean_prefix_tokens || layer.k_on_nvme || layer.v_on_nvme ||
+                layer.k_flushing || layer.v_flushing || !layer.k.empty() ||
+                !layer.v.empty() || !layer.k_gpu.empty() ||
+                !layer.v_gpu.empty() || !layer.k_sum.empty()) return false;
+            continue;
+        }
+        if (!cfg_.historical_gc_attention_layers.empty()) ++attention_index;
         if (layer.k_on_nvme || layer.v_on_nvme ||
             layer.k_flushing || layer.v_flushing ||
             layer.n_tokens != cfg_.block_tokens ||
@@ -844,7 +866,11 @@ bool RawKvStore::seal_for_historical_gc(
             : (cfg_.n_embd_v == 0 ||
                (layer.v_prefix_tokens == cfg_.block_tokens &&
                 layer.v.size() >= uint64_t(cfg_.block_tokens) * cfg_.n_embd_v));
-        if (!k_ready || !v_ready) return false;
+        const bool mean_ready = !cfg_.historical_gc_require_mean_k ||
+            (layer.mean_tokens == cfg_.block_tokens &&
+             layer.mean_prefix_tokens == cfg_.block_tokens &&
+             layer.k_sum.size() == cfg_.n_embd_k);
+        if (!k_ready || !v_ready || !mean_ready) return false;
         const bool has_data = !layer.k.empty() || !layer.v.empty() ||
                               !layer.k_gpu.empty() || !layer.v_gpu.empty() ||
                               !layer.k_sum.empty();
@@ -1425,7 +1451,9 @@ void RawKvStore::clear() {
 
 size_t RawKvStore::allocated_bytes() const {
     std::lock_guard<std::mutex> lk(mu_);
-    size_t bytes = sizeof(*this) + blocks_.capacity() * sizeof(BlockRaw);
+    size_t bytes = sizeof(*this) +
+        cfg_.historical_gc_attention_layers.capacity() * sizeof(uint32_t) +
+        blocks_.capacity() * sizeof(BlockRaw);
     for (const auto & b : blocks_) {
         bytes += b.layers.capacity() * sizeof(LayerBlk);
         for (const auto & l : b.layers) {
@@ -1438,7 +1466,9 @@ size_t RawKvStore::allocated_bytes() const {
 
 uint64_t RawKvStore::capacity_bytes(uint32_t tokens, uint32_t populated_layers) const {
     const uint64_t blocks = (uint64_t(tokens) + cfg_.block_tokens - 1) / cfg_.block_tokens + 1;
-    return sizeof(*this) + blocks * (2*sizeof(BlockRaw) + cfg_.n_layer*sizeof(LayerBlk) +
+    return sizeof(*this) +
+        cfg_.historical_gc_attention_layers.capacity() * sizeof(uint32_t) +
+        blocks * (2*sizeof(BlockRaw) + cfg_.n_layer*sizeof(LayerBlk) +
         std::min(populated_layers, cfg_.n_layer) * (cfg_.n_embd_k*sizeof(float) + uint64_t(cfg_.block_tokens) *
          (cfg_.k_gpu_row_bytes + cfg_.v_gpu_row_bytes)));
 }

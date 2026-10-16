@@ -318,11 +318,85 @@ static void test_repository_identity_is_not_just_incarnation() {
           !raw.has_block(0), "owner did not reclaim its own RAM");
 }
 
+static void test_sparse_attention_layers_seal_and_release() {
+    RawKvStoreConfig config;
+    config.n_layer = 3;
+    config.n_embd_k = 2;
+    config.block_tokens = 4;
+    config.k_gpu_row_bytes = 3;
+    config.v_gpu_row_bytes = 3;
+    config.historical_gc_attention_layers = {0, 2};
+    config.historical_gc_require_mean_k = true;
+    auto raw = std::make_shared<RawKvStore>(config);
+    HistoricalKvRepository repo(1, 96);
+    RawKvStore::HistoricalGcReleaseResult released;
+    auto writer = repo.begin_write(600, 0, 4, 1, 80,
+        [&](const HistoricalKvHandle & handle) {
+            released = raw->release_for_historical_gc(repo, handle, 0);
+            return released.code == RawKvStore::HistoricalGcReleaseCode::Released;
+        });
+    check(writer.has_value(), "sparse attention writer was not reserved");
+    const HistoricalKvHandle handle = writer->handle();
+    const uint8_t data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const float mean[] = {2.0f, 4.0f};
+    for (uint32_t il : {0u, 2u}) {
+        raw->write_layer_k_gpu(0, 4, il, data);
+        raw->write_layer_v_gpu(0, 4, il, data);
+    }
+    check(!raw->seal_for_historical_gc(repo, *writer, handle, 0, 0, 4),
+          "retrieval block without Mean-K was sealed");
+    raw->clear();
+    const auto write_attention = [&] {
+        for (uint32_t il : {0u, 2u}) {
+            raw->write_layer_k_gpu(0, 4, il, data);
+            raw->write_layer_v_gpu(0, 4, il, data);
+            raw->write_layer_mean_sum(0, 4, il, mean);
+        }
+    };
+    write_attention();
+    raw->write_layer_k_gpu(0, 4, 1, data);
+    check(!raw->seal_for_historical_gc(repo, *writer, handle, 0, 0, 4),
+          "sparse seal accepted payload in a non-attention layer");
+    raw->clear();
+    write_attention();
+    check(raw->seal_for_historical_gc(repo, *writer, handle, 0, 0, 4) &&
+          repo.publish_write(*writer),
+          "sparse attention block was not sealed and published");
+    const size_t before = raw->allocated_bytes();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "sparse attention block did not retire");
+    writer->reset();
+    HistoricalKvRepository::ReclaimResult result =
+        HistoricalKvRepository::ReclaimResult::Retry;
+    std::thread worker([&] { result = repo.try_reclaim(handle); });
+    worker.join();
+    check(result == HistoricalKvRepository::ReclaimResult::Complete &&
+          released.code == RawKvStore::HistoricalGcReleaseCode::Released &&
+          released.physical_payload_bytes > 0 && !raw->has_block(0) &&
+          before - raw->allocated_bytes() == released.physical_payload_bytes,
+          "sparse attention block did not release its RAM payload");
+}
+
+static void test_attention_layer_list_validation() {
+    RawKvStoreConfig config;
+    config.n_layer = 3;
+    for (const std::vector<uint32_t> invalid :
+         {std::vector<uint32_t>{2, 0}, {0, 0}, {0, 3}}) {
+        config.historical_gc_attention_layers = invalid;
+        bool rejected = false;
+        try { RawKvStore raw(config); }
+        catch (const std::invalid_argument &) { rejected = true; }
+        check(rejected, "invalid historical GC attention layer list was accepted");
+    }
+}
+
 int main() {
     test_real_raw_store_callback_releases_exact_generation();
     test_retired_incremental_writer_can_seal_then_release();
     test_seal_rejects_repository_span_mismatch();
     test_tail_only_write_cannot_claim_complete_block();
     test_repository_identity_is_not_just_incarnation();
+    test_sparse_attention_layers_seal_and_release();
+    test_attention_layer_list_validation();
     std::cout << "raw historical GC release checks passed\n";
 }
