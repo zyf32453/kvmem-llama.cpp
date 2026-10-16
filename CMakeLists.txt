@@ -328,6 +328,15 @@ if (KVMEM_BUILD_LLAMA)
         endif()
         add_test(NAME kvmem-mtp-kv-test COMMAND kvmem-mtp-kv-test)
         set_tests_properties(kvmem-mtp-kv-test PROPERTIES SKIP_RETURN_CODE 77)
+
+        # Uses internal adapter entry points and a user-supplied GGUF. It
+        # verifies CPU history access with actual GPU KV buffers, without
+        # enabling the production GC worker or running a model download.
+        add_executable(kvmem-historical-access-test tests/historical-access-test.cpp)
+        target_include_directories(kvmem-historical-access-test PRIVATE src/adapter llama.cpp/src)
+        target_link_libraries(kvmem-historical-access-test PRIVATE llama kvmem Threads::Threads)
+        add_test(NAME kvmem-historical-access-test COMMAND kvmem-historical-access-test)
+        set_tests_properties(kvmem-historical-access-test PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)

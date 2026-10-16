@@ -28,7 +28,11 @@
 
 目录增加逐块 `acquire_read` / `acquire_transfer`：未托管块走原路径；已绑定块必须通过仓库对精确 handle 的原子许可申请；Writing、退休、回收完成及关闭仓库均不授予新许可，失败不能回退为位置式读取。生产 `score_retrieval` 已在 `has_block` 前取得 ReadLease，持有到该块所有层的 Mean-K 打分结束；`write_block_to_gpu` 已在检查 Raw 前取得 TransferLease，已托管块暂走同步 H2D，确保搬运完成后才释放许可。目录默认仍为空，因此这两个入口保留原运行行为。其他读取、缓存搬运、GPU 快捷执行、checkpoint/MTP 入口尚未全部接线，不能据此开启生产 GC。
 
-新增测试把目录许可、管理器和真实 RawKvStore 串联：退休立即拒绝新读与新搬运，旧 Mean-K 读取和旧 packed K/V 拷贝可以完成；分别释放 ReadLease 和 TransferLease，只有最后一个许可退出后才看到两层 CPU payload 容量下降。另有用例覆盖未发布/关闭仓库拒绝访问、移动后的许可对象失效、回收墓碑不回退 legacy，以及直接 store 截断的状态不变与编号重用。当前本地相关 11 项 CTest 已通过，远程和 CUDA 验证仍待本轮执行。
+新增测试把目录许可、管理器和真实 RawKvStore 串联：退休立即拒绝新读与新搬运，旧 Mean-K 读取和旧 packed K/V 拷贝可以完成；分别释放 ReadLease 和 TransferLease，只有最后一个许可退出后才看到两层 CPU payload 容量下降。另有用例覆盖未发布/关闭仓库拒绝访问、移动后的许可对象失效、回收墓碑不回退 legacy，以及直接 store 截断的状态不变与编号重用。提交 `94b2301` 已通过本地相关 11 项 CTest、远程 Linux 全部 20 项宿主 CTest，以及目录、真实 Raw 桥接、仓库和 RAM 释放共 4 项 ASan/UBSan；CUDA CLI/server 编译通过。
+
+新增 `tests/historical-access-test.cpp`，以 `build-cuda/bin/kvmem-historical-access-test /path/to/model.gguf` 手动执行，无模型参数时 CTest 明确跳过。它加载用户提供的 GGUF 建立真实模型的 GPU KV 布局，向 Raw 写入已知的 K/V 字节及 Mean-K，并手动绑定一个完整块，直接调用生产 `score_retrieval` 和 `write_block_to_gpu`。在远程单张 CUDA GPU 上已通过 48 个注意力层的逐字节检查：Live 块可完成同步 stage-in；退休后、前台尚未解绑时，打分已跳过它、stage-in 已拒绝它；旧读者保留期间后台回收延后，退出后释放 **3,244,032 字节** Raw payload，另一个未托管块仍在，GPU 字节与槽号均未变化。该数值是受控 fixture 的 CPU payload 容量差，不是进程 RSS 降幅；K/V 是测试填入的已知数据，尚不代表正常推理的异步生产、选块、执行和后台 GC 已形成完整闭环。
+
+同版 CUDA CLI 另用既定 recency 配置完成 356-token 提示词与 8-token 生成，日志记录 9 次 `stage_out_cpu`；这项回归仍只验证原有 GPU→CPU 溢出流程。远程所有改动和测试均位于 `/tmp` 隔离副本，原 `/home/yifan/kvmem-llama.cpp` 工作树状态未变。
 
 **此桥接尚未接入真实模型推理。** 现有 `KvMemStore` 和 `RawKvStore` 的生产读取仍依赖 `pos / block_tokens` 的密集位置；检索选择、GPU stage、异步传输、checkpoint、session 和 MTP 路径未统一持有逐块许可。封存时 `truncate`、`clear` 和 snapshot 也会拒绝操作，NVMe、短尾块及共享位置块不受支持。由此不能打开生产删除开关，也不能把单测中的释放字节数当作实际模型运行的内存收益。下一步需要把生产目录与所有读写路径迁到稳定句柄，补足这几条路径的 lease 和恢复语义，再做远程模型验收。
 
