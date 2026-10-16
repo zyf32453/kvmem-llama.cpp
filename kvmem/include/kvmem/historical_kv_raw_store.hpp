@@ -24,6 +24,9 @@ struct HistoricalKvRawStoreConfig {
     size_t packed_k_bytes_per_token = 0;
     size_t packed_v_bytes_per_token = 0;
     size_t mean_k_elements = 0; // F32 sum length per layer; 0 disables it.
+    // Physical attention layer IDs. Empty preserves the all-layers default.
+    // Non-attention layers have no payload and do not block publication.
+    std::vector<uint32_t> attention_layers;
 };
 
 class HistoricalKvRawStore {
@@ -43,6 +46,12 @@ public:
         std::vector<uint8_t> packed_v;
         std::vector<float> mean_k_sum;
         uint32_t mean_tokens = 0;
+    };
+
+    struct WriteProgress {
+        uint32_t packed_k_tokens = 0;
+        uint32_t packed_v_tokens = 0;
+        uint32_t mean_k_tokens = 0;
     };
 
     enum class ReleaseCode { Released, AlreadyReleased, Absent, Busy, Stale };
@@ -102,6 +111,11 @@ public:
                             HistoricalKvHandle handle, uint32_t layer,
                             uint32_t token_offset, uint32_t token_count,
                             const std::vector<float> & mean_k_sum);
+    // Captured producers use these independent prefixes to submit only the
+    // missing suffix. Observing progress never grants a new writer lease.
+    std::optional<WriteProgress> write_progress(
+        const HistoricalKvRepository::Lease & writer,
+        HistoricalKvHandle handle, uint32_t layer) const;
     // Publish only when every layer has its full reserved span. The slot lock
     // serializes this transition with write_slice/write_layer in this store.
     // A strategy may still retire the writer; then publication fails.
@@ -111,6 +125,11 @@ public:
     std::optional<LayerSnapshot> read_layer(
         const HistoricalKvRepository::Lease & reader,
         HistoricalKvHandle handle, uint32_t layer) const;
+    // Scoring copies only the normalized mean, never the large packed K/V
+    // vectors. The admitted reader must cover the entire call.
+    bool copy_mean_k(const HistoricalKvRepository::Lease & reader,
+                     HistoricalKvHandle handle, uint32_t layer,
+                     float * output, size_t elements) const;
     // Repository identity is required even for metadata observations: an
     // external incarnation can be deliberately reused by another owner.
     std::optional<BlockInfo> inspect(const HistoricalKvRepository & repository,
@@ -158,6 +177,7 @@ private:
     };
 
     static bool same(HistoricalKvHandle a, HistoricalKvHandle b) noexcept;
+    bool required_layer(uint32_t layer) const noexcept;
     void mark_layer_complete(Block & block, Layer & layer) const noexcept;
     HistoricalKvRawStoreConfig config_;
     std::vector<std::unique_ptr<Slot>> slots_;

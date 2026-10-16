@@ -1,6 +1,7 @@
 #include "kvmem/historical_kv_shadow_directory.hpp"
 
 #include "kvmem/kvmem_store.hpp"
+#include "kvmem/historical_kv_raw_store.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -26,7 +27,8 @@ bool HistoricalKvShadowDirectory::bind_full_block(
         const KvMemStore & store, uint32_t block_id,
         std::shared_ptr<HistoricalKvRepository> repository,
         HistoricalKvHandle handle,
-        HistoricalKvRepository::Lease & writer) {
+        HistoricalKvRepository::Lease & writer,
+        std::shared_ptr<HistoricalKvRawStore> storage) {
     if (!repository || repository->closed() || !writer ||
         !repository->owns_writer(writer) ||
         !same_handle(handle, writer.handle()) ||
@@ -45,10 +47,15 @@ bool HistoricalKvShadowDirectory::bind_full_block(
         meta->valid_tokens != block.n_tokens ||
         (meta->life != HistoricalKvLife::Writing &&
          meta->life != HistoricalKvLife::Live)) return false;
+    if (storage) {
+        const auto payload = storage->inspect(*repository, handle);
+        if (!payload || payload->original_begin != block.orig_pos_start ||
+            payload->valid_tokens != block.n_tokens) return false;
+    }
 
     // Allocate every potentially throwing object before moving the sole
     // writer. Failed binding must not silently abandon a Writing generation.
-    auto context = std::shared_ptr<WriterContext>(new WriterContext(repository));
+    auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, std::move(storage)));
     Entry entry;
     entry.binding = {block_id, handle, block.orig_pos_start,
                      block.n_tokens, std::move(context)};
@@ -103,7 +110,7 @@ HistoricalKvShadowDirectory::acquire_transfer(uint32_t block_id) const {
 HistoricalKvShadowDirectory::Access HistoricalKvShadowDirectory::acquire(
         uint32_t block_id, HistoricalKvRepository::LeaseKind kind) const {
     const auto it = entries_.find(block_id);
-    if (it == entries_.end()) return {Access::Status::Unmanaged, {}};
+    if (it == entries_.end()) return {Access::Status::Unmanaged, {}, {}};
     const auto & entry = it->second;
     if (entry.state != State::Bound || !entry.repository ||
         entry.repository->repository_id() != entry.repository_id) return {};
@@ -113,7 +120,8 @@ HistoricalKvShadowDirectory::Access HistoricalKvShadowDirectory::acquire(
         ? entry.repository->acquire_read(entry.binding.handle)
         : entry.repository->acquire_transfer(entry.binding.handle);
     if (!lease) return {};
-    return {Access::Status::Acquired, std::move(*lease)};
+    return {Access::Status::Acquired, std::move(*lease),
+            entry.binding.writer_context->storage()};
 }
 
 bool HistoricalKvShadowDirectory::unbind_retired(uint32_t block_id) {

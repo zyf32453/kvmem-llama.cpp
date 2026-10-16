@@ -587,6 +587,60 @@ static void test_combined_slice_remains_atomic_with_component_writes() {
           "mixed-slice payload was not reclaimed");
 }
 
+static void test_sparse_layers_and_independent_progress() {
+    HistoricalKvRawStoreConfig config;
+    config.n_layer = 3;
+    config.max_tokens_per_slot = 2;
+    config.packed_k_bytes_per_token = config.packed_v_bytes_per_token = 1;
+    config.mean_k_elements = 1;
+    config.attention_layers = {0, 2};
+    HistoricalKvRawStore store(config, 1);
+    HistoricalKvRepository repo(1, 103);
+    auto writer = repo.begin_write(1, 7, 2, 1, 16,
+        [&](const HistoricalKvHandle & handle) {
+            return callback_succeeded(store.release(repo, handle).code);
+        });
+    check(writer.has_value(), "sparse writer missing");
+    const auto handle = writer->handle();
+    check(store.reserve(*writer, handle, 7, 2) && store.allocated_payload_bytes() == 16,
+          "non-attention layers allocated payload");
+    check(!store.write_progress(*writer, handle, 1) &&
+          !store.write_layer(*writer, handle, 1, {1, 2}, {3, 4}, {2.0f}, 2),
+          "non-attention layer accepted writes");
+    check(store.write_packed_k_slice(*writer, handle, 2, 0, 1, {7}),
+          "sparse partial K write failed");
+    const auto progress = store.write_progress(*writer, handle, 2);
+    check(progress && progress->packed_k_tokens == 1 && progress->packed_v_tokens == 0 &&
+          progress->mean_k_tokens == 0, "component prefixes were conflated");
+    check(store.write_packed_k_slice(*writer, handle, 2, 1, 1, {8}) &&
+          store.write_packed_v_slice(*writer, handle, 2, 0, 2, {9, 10}) &&
+          store.write_mean_k_slice(*writer, handle, 2, 0, 2, {2.0f}) &&
+          !store.publish_complete(repo, *writer, handle), "missing attention layer was published");
+    check(store.write_layer(*writer, handle, 0, {1, 2}, {3, 4}, {2.0f}, 2) &&
+          store.publish_complete(repo, *writer, handle), "sparse complete block was not published");
+    auto reader = repo.acquire_read(handle);
+    check(reader && !store.read_layer(*reader, handle, 1) &&
+          store.read_layer(*reader, handle, 2)->packed_k == std::vector<uint8_t>({7, 8}),
+          "sparse layer read mismatch");
+    float mean = -1.0f;
+    check(store.copy_mean_k(*reader, handle, 2, &mean, 1) && mean == 1.0f &&
+          !store.copy_mean_k(*reader, handle, 1, &mean, 1) &&
+          !store.copy_mean_k(*reader, handle, 2, &mean, 0), "mean-only read has invalid coverage");
+    reader->reset();
+    writer->reset();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          store.allocated_payload_bytes() == 0, "sparse payload not reclaimed");
+
+    for (const auto & ids : {std::vector<uint32_t>{2, 0}, {0, 0}, {0, 3}}) {
+        config.attention_layers = ids;
+        bool rejected = false;
+        try { HistoricalKvRawStore invalid(config, 1); }
+        catch (const std::invalid_argument &) { rejected = true; }
+        check(rejected, "invalid physical layer list was accepted");
+    }
+}
+
 int main() {
     test_exact_generation_ram_reclamation();
     test_incremental_unaligned_tail_retired_while_writing();
@@ -596,5 +650,6 @@ int main() {
     test_independent_components_without_mean();
     test_concurrent_component_arrival();
     test_combined_slice_remains_atomic_with_component_writes();
+    test_sparse_layers_and_independent_progress();
     std::cout << "historical KV RAM payload checks passed\n";
 }

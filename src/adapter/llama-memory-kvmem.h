@@ -278,7 +278,13 @@ private:
         size_t pin_off = 0;
         ggml_tensor * vt = nullptr;
         size_t tensor_off = 0;
+        uint32_t token_offset = 0;
+        bool committed = false;
+        // Captured before D2H submission. Commit uses this exact writer and
+        // allocation even after the foreground retires/unbinds the block.
+        std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
     };
+    void commit_harvest_packed(const HarvestVJob & job, const uint8_t * bytes);
     struct HarvestVBatch {
         int slot = -1;
         std::vector<HarvestVJob> jobs;

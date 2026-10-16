@@ -35,6 +35,11 @@ bool HistoricalKvRawStore::same(HistoricalKvHandle a,
            a.generation == b.generation;
 }
 
+bool HistoricalKvRawStore::required_layer(uint32_t layer) const noexcept {
+    return layer < config_.n_layer && (config_.attention_layers.empty() ||
+        std::binary_search(config_.attention_layers.begin(), config_.attention_layers.end(), layer));
+}
+
 void HistoricalKvRawStore::mark_layer_complete(Block & block,
                                                 Layer & layer) const noexcept {
     if (layer.written || layer.k_written_tokens != block.valid_tokens ||
@@ -51,6 +56,11 @@ HistoricalKvRawStore::HistoricalKvRawStore(HistoricalKvRawStoreConfig config,
     if (!capacity || !config_.n_layer || !config_.max_tokens_per_slot ||
         !config_.packed_k_bytes_per_token || !config_.packed_v_bytes_per_token)
         throw std::invalid_argument("invalid historical KV raw store configuration");
+    if (!std::is_sorted(config_.attention_layers.begin(), config_.attention_layers.end()) ||
+        std::adjacent_find(config_.attention_layers.begin(), config_.attention_layers.end()) !=
+            config_.attention_layers.end() ||
+        (!config_.attention_layers.empty() && config_.attention_layers.back() >= config_.n_layer))
+        throw std::invalid_argument("invalid historical KV attention layer IDs");
 
     // Bound every successful reservation by a finite, representable maximum.
     const size_t k_max = multiply(config_.max_tokens_per_slot,
@@ -100,7 +110,9 @@ bool HistoricalKvRawStore::reserve(
     block->layers.resize(config_.n_layer);
     const size_t k_bytes = multiply(valid_tokens, config_.packed_k_bytes_per_token);
     const size_t v_bytes = multiply(valid_tokens, config_.packed_v_bytes_per_token);
-    for (auto & layer : block->layers) {
+    for (uint32_t il = 0; il < config_.n_layer; ++il) {
+        if (!required_layer(il)) continue;
+        auto & layer = block->layers[il];
         layer.packed_k.resize(k_bytes);
         layer.packed_v.resize(v_bytes);
         layer.mean_k_sum.resize(config_.mean_k_elements);
@@ -130,7 +142,7 @@ bool HistoricalKvRawStore::write_layer(
     if (!writer || !writer.is_writer() || !writer.repository_id() ||
         !same(writer.handle(), handle) ||
         !handle.incarnation || !handle.generation || handle.slot >= slots_.size() ||
-        layer >= config_.n_layer) return false;
+        !required_layer(layer)) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     // The same slot lock protects publish_complete. A published layer is
@@ -172,7 +184,7 @@ bool HistoricalKvRawStore::write_slice(
     if (!writer || !writer.is_writer() || !writer.repository_id() ||
         !same(writer.handle(), handle) || !handle.incarnation ||
         !handle.generation || handle.slot >= slots_.size() ||
-        layer >= config_.n_layer || !token_count) return false;
+        !required_layer(layer) || !token_count) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const auto meta = writer.metadata();
@@ -220,7 +232,7 @@ bool HistoricalKvRawStore::write_packed_k_slice(
     if (!writer || !writer.is_writer() || !writer.repository_id() ||
         !same(writer.handle(), handle) || !handle.incarnation ||
         !handle.generation || handle.slot >= slots_.size() ||
-        layer >= config_.n_layer || !token_count) return false;
+        !required_layer(layer) || !token_count) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const auto meta = writer.metadata();
@@ -249,7 +261,7 @@ bool HistoricalKvRawStore::write_packed_v_slice(
     if (!writer || !writer.is_writer() || !writer.repository_id() ||
         !same(writer.handle(), handle) || !handle.incarnation ||
         !handle.generation || handle.slot >= slots_.size() ||
-        layer >= config_.n_layer || !token_count) return false;
+        !required_layer(layer) || !token_count) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const auto meta = writer.metadata();
@@ -278,7 +290,7 @@ bool HistoricalKvRawStore::write_mean_k_slice(
     if (!writer || !writer.is_writer() || !writer.repository_id() ||
         !same(writer.handle(), handle) || !handle.incarnation ||
         !handle.generation || handle.slot >= slots_.size() ||
-        layer >= config_.n_layer || !config_.mean_k_elements ||
+        !required_layer(layer) || !config_.mean_k_elements ||
         !token_count) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
@@ -300,6 +312,23 @@ bool HistoricalKvRawStore::write_mean_k_slice(
     return true;
 }
 
+std::optional<HistoricalKvRawStore::WriteProgress>
+HistoricalKvRawStore::write_progress(
+    const HistoricalKvRepository::Lease & writer,
+    HistoricalKvHandle handle, uint32_t layer) const {
+    if (!writer || !writer.is_writer() || !writer.repository_id() ||
+        !same(writer.handle(), handle) || handle.slot >= slots_.size() ||
+        !required_layer(layer)) return std::nullopt;
+    const Slot & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    const Block * block = slot.block.get();
+    if (!block || block->repository_id != writer.repository_id() ||
+        !same(block->handle, handle)) return std::nullopt;
+    const auto & source = block->layers[layer];
+    return WriteProgress{source.k_written_tokens, source.v_written_tokens,
+                         source.mean_written_tokens};
+}
+
 bool HistoricalKvRawStore::publish_complete(
     HistoricalKvRepository & repository,
     const HistoricalKvRepository::Lease & writer,
@@ -312,7 +341,8 @@ bool HistoricalKvRawStore::publish_complete(
     const Block * block = slot.block.get();
     if (!block || block->repository_id != repository.repository_id() ||
         !same(block->handle, handle) ||
-        block->written_layers != config_.n_layer) return false;
+        block->written_layers != (config_.attention_layers.empty()
+            ? config_.n_layer : config_.attention_layers.size())) return false;
     return repository.publish_write(writer);
 }
 
@@ -323,7 +353,7 @@ HistoricalKvRawStore::read_layer(
     if (!reader || !reader.repository_id() ||
         !same(reader.handle(), handle) ||
         !handle.incarnation || !handle.generation || handle.slot >= slots_.size() ||
-        layer >= config_.n_layer) return std::nullopt;
+        !required_layer(layer)) return std::nullopt;
     const Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const Block * block = slot.block.get();
@@ -348,6 +378,24 @@ HistoricalKvRawStore::inspect(const HistoricalKvRepository & repository,
     return BlockInfo{block->handle, block->original_begin,
                      block->valid_tokens, block->written_layers,
                      block->payload_bytes};
+}
+
+bool HistoricalKvRawStore::copy_mean_k(
+    const HistoricalKvRepository::Lease & reader,
+    HistoricalKvHandle handle, uint32_t layer, float * output, size_t elements) const {
+    if (!reader || !reader.repository_id() || !same(reader.handle(), handle) ||
+        handle.slot >= slots_.size() || !required_layer(layer) || !output ||
+        !config_.mean_k_elements || elements != config_.mean_k_elements) return false;
+    const Slot & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    const Block * block = slot.block.get();
+    if (!block || block->repository_id != reader.repository_id() ||
+        !same(block->handle, handle)) return false;
+    const auto & source = block->layers[layer];
+    if (!source.written || !source.mean_tokens) return false;
+    for (size_t i = 0; i < elements; ++i)
+        output[i] = source.mean_k_sum[i] / static_cast<float>(source.mean_tokens);
+    return true;
 }
 
 HistoricalKvRawStore::ReleaseResult

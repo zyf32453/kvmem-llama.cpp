@@ -1,5 +1,6 @@
 #include "llama-kvmem-diag.h"
 #include "llama-memory-kvmem.h"
+#include "kvmem/historical_kv_raw_store.hpp"
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-memory-kvmem-mtp.h"
 
@@ -3530,6 +3531,23 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
     if (timed) perf_.multi_host_us += ggml_time_us() - t_host - read_us;
 }
 
+void llama_memory_kvmem::commit_harvest_packed(const HarvestVJob & job, const uint8_t * bytes) {
+    if (job.writer) {
+        const auto & storage = job.writer->storage();
+        if (!storage) throw std::logic_error("historical harvest has no captured storage");
+        const std::vector<uint8_t> packed(bytes, bytes + job.nbytes);
+        const bool written = job.is_k
+            ? storage->write_packed_k_slice(job.writer->writer(), job.writer->handle(),
+                                           job.il, job.token_offset, job.n, packed)
+            : storage->write_packed_v_slice(job.writer->writer(), job.writer->handle(),
+                                           job.il, job.token_offset, job.n, packed);
+        if (!written) throw std::runtime_error("historical harvest rejected captured generation or range");
+        return;
+    }
+    if (job.is_k) raw_->write_layer_k_gpu(job.pos0, job.n, job.il, bytes);
+    else raw_->write_layer_v_gpu(job.pos0, job.n, job.il, bytes);
+}
+
 void llama_memory_kvmem::harvest_write_batch() {
     HarvestVBatch & b = harvest_v_pending_;
     if (b.jobs.empty()) {
@@ -3542,11 +3560,7 @@ void llama_memory_kvmem::harvest_write_batch() {
         }
         std::vector<uint8_t> packed(j.nbytes);
         auto commit = [&](const uint8_t * src) {
-            if (j.is_k) {
-                raw_->write_layer_k_gpu(j.pos0, j.n, j.il, src);
-            } else {
-                raw_->write_layer_v_gpu(j.pos0, j.n, j.il, src);
-            }
+            commit_harvest_packed(j, src);
         };
         if (j.gpu_src &&
             kvmem_copy(packed.data(), j.gpu_src, j.nbytes,
@@ -3557,21 +3571,23 @@ void llama_memory_kvmem::harvest_write_batch() {
         if (j.vt) {
             kvmem_tensor_get(j.vt, packed.data(), j.tensor_off, j.nbytes);
             commit(packed.data());
+        } else if (j.writer) {
+            throw std::runtime_error("historical harvest fallback lost its captured source");
         }
     };
     const uint8_t * base = (b.slot >= 0) ? kvmem_stageout_slot_base(b.slot) : nullptr;
     const int64_t t0 = ggml_time_us();
-    for (const HarvestVJob & j : b.jobs) {
+    for (HarvestVJob & j : b.jobs) {
+        if (j.committed) continue;
         const uint8_t * p = (base && j.nbytes) ? base + j.pin_off : nullptr;
         if (p) {
-            if (j.is_k) {
-                raw_->write_layer_k_gpu(j.pos0, j.n, j.il, p);
-            } else {
-                raw_->write_layer_v_gpu(j.pos0, j.n, j.il, p);
-            }
+            commit_harvest_packed(j, p);
         } else {
             fallback(j);
         }
+        // A later job may throw (for example allocation failure). Retrying
+        // this batch must not submit an already committed write-once slice.
+        j.committed = true;
     }
     if (retr_.enabled) {
         retr_.stage_out_host_us += ggml_time_us() - t0;
@@ -3640,6 +3656,19 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
     if (blk.gpu_slot < 0 || blk.n_tokens == 0) {
         return;
     }
+    const auto & directory = runtime_->historical_shadow_directory();
+    const auto identity = directory.observe(block_id);
+    std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
+    if (identity.state != kvmem::HistoricalKvShadowDirectory::State::Unmanaged) {
+        const auto binding = directory.find(block_id);
+        if (!binding) return; // A closed tombstone is never a legacy writer.
+        writer = binding->writer_context;
+        // Legacy Raw bindings are already sealed and immutable. New payload
+        // bindings may accept only the original unfinished writer's ranges.
+        if (!writer->storage()) return;
+        const auto meta = writer->writer().metadata();
+        if (!meta || meta->life != kvmem::HistoricalKvLife::Writing) return;
+    }
     const llama_kv_cells & cells = kv_->get_cells(0);
     const uint32_t idx = static_cast<uint32_t>(blk.gpu_slot) * block_tokens_;
     if (idx >= cells.size() || cells.is_empty(idx)) {
@@ -3653,29 +3682,31 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
         kvmem_stagein_gpu_ready((size_t) block_tokens_ * std::max(n_embd_k_, n_embd_v_),
                                 std::max(krow, vrow) * (size_t) block_tokens_);
     }
-    auto enqueue_or_get = [&](ggml_tensor * t, uint32_t il, uint32_t nget, bool is_k) {
+    auto enqueue_or_get = [&](ggml_tensor * t, uint32_t il, uint32_t nget,
+                              uint32_t token_offset, bool is_k) {
         const size_t row = is_k ? krow : vrow;
-        const size_t nbytes = static_cast<size_t>(nget) * row;
-        const size_t toff = static_cast<size_t>(cell0) * row;
+        const size_t nbytes = static_cast<size_t>(nget - token_offset) * row;
+        const size_t toff = static_cast<size_t>(cell0 + token_offset) * row;
+        HarvestVJob job;
+        job.pos0 = blk.orig_pos_start + token_offset;
+        job.n = nget - token_offset;
+        job.il = il;
+        job.is_k = is_k;
+        job.nbytes = nbytes;
+        job.vt = t;
+        job.tensor_off = toff;
+        job.token_offset = token_offset;
+        job.writer = writer;
         if (multi_gpu_) {
             std::vector<uint8_t> packed(nbytes);
             kvmem_tensor_get(t, packed.data(), toff, nbytes);
-            if (is_k) raw_->write_layer_k_gpu(blk.orig_pos_start, nget, il, packed.data());
-            else raw_->write_layer_v_gpu(blk.orig_pos_start, nget, il, packed.data());
+            commit_harvest_packed(job, packed.data());
             return;
         }
         uint8_t * base = kvmem_cuda_tensor_ptr(t);
         const uint8_t * gpu_src = (base && nbytes > 0) ? base + toff : nullptr;
-        HarvestVJob job;
-        job.pos0 = blk.orig_pos_start;
-        job.n = nget;
-        job.il = il;
-        job.is_k = is_k;
         job.gpu_src = gpu_src;
-        job.nbytes = nbytes;
         job.pin_off = kvmem_stageout_used();
-        job.vt = t;
-        job.tensor_off = toff;
         if (gpu_src && kvmem_stageout_enqueue(gpu_src, nbytes)) {
             harvest_v_jobs_.push_back(job);
             return;
@@ -3690,11 +3721,7 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
         }
         std::vector<uint8_t> packed(nbytes);
         kvmem_tensor_get(t, packed.data(), toff, nbytes);
-        if (is_k) {
-            raw_->write_layer_k_gpu(blk.orig_pos_start, nget, il, packed.data());
-        } else {
-            raw_->write_layer_v_gpu(blk.orig_pos_start, nget, il, packed.data());
-        }
+        commit_harvest_packed(job, packed.data());
     };
     uint32_t n_ok = 0;
     uint32_t n_skip = 0;
@@ -3707,16 +3734,23 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
         if (nget == 0) {
             continue;
         }
+        uint32_t k_prefix = 0, v_prefix = 0;
+        if (writer) {
+            const auto progress = writer->storage()->write_progress(writer->writer(), writer->handle(), il);
+            if (!progress) throw std::runtime_error("historical harvest has no matching layer allocation");
+            k_prefix = progress->packed_k_tokens;
+            v_prefix = progress->packed_v_tokens;
+        }
         ggml_tensor * kt = kv_->get_k_storage(static_cast<int32_t>(il));
-        if (kt && krow && !raw_->has_k_gpu(block_id, il, nget)) {
-            enqueue_or_get(kt, il, nget, true);
+        if (kt && krow && (writer ? k_prefix < nget : !raw_->has_k_gpu(block_id, il, nget))) {
+            enqueue_or_get(kt, il, nget, k_prefix, true);
             n_ok++;
         } else {
             n_skip++;
         }
         ggml_tensor * vt = kv_->get_v_storage(static_cast<int32_t>(il));
-        if (vt && !v_trans_ && vrow && !raw_->has_v_gpu(block_id, il, nget)) {
-            enqueue_or_get(vt, il, nget, false);
+        if (vt && !v_trans_ && vrow && (writer ? v_prefix < nget : !raw_->has_v_gpu(block_id, il, nget))) {
+            enqueue_or_get(vt, il, nget, v_prefix, false);
             n_ok++;
         } else {
             n_skip++;
@@ -3745,6 +3779,13 @@ void llama_memory_kvmem::harvest_full_blocks_async() {
             continue;
         }
         if (b.block_id < harvest_gpu_queued_.size() && harvest_gpu_queued_[b.block_id]) {
+            continue;
+        }
+        if (runtime_->historical_shadow_directory().observe(b.block_id).state !=
+                kvmem::HistoricalKvShadowDirectory::State::Unmanaged) {
+            // The managed path uses captured writer/component progress and
+            // never treats absent legacy Raw bytes as a request to rewrite.
+            harvest_gpu_v(b.block_id);
             continue;
         }
         bool need = false;
@@ -4052,7 +4093,7 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
         throw std::runtime_error("KVMem historical block is unavailable for stage-in");
     }
     const kvmem::KvMemBlock & blk = store.blocks()[block_id];
-    if (blk.gpu_slot < 0 || !raw_->has_block(block_id)) {
+    if (blk.gpu_slot < 0 || (!transfer.storage && !raw_->has_block(block_id))) {
         return;
     }
     ++attention_epoch_;
@@ -4097,8 +4138,20 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
             continue;
         }
         const int64_t t_copy = ggml_time_us();
-        const bool have_k = raw_->copy_k_gpu(block_id, il, kpack.data(), nt);
-        const bool have_v = !v_trans_ && raw_->copy_v_gpu(block_id, il, vpack.data(), nt);
+        bool have_k = false, have_v = false;
+        if (transfer.storage) {
+            auto layer = transfer.storage->read_layer(transfer.lease, transfer.lease.handle(), il);
+            if (!layer || layer->packed_k.size() != kpack.size() ||
+                layer->packed_v.size() != vpack.size())
+                throw std::runtime_error("historical stage-in payload does not match the admitted block");
+            kpack = std::move(layer->packed_k);
+            vpack = std::move(layer->packed_v);
+            have_k = true;
+            have_v = !v_trans_;
+        } else {
+            have_k = raw_->copy_k_gpu(block_id, il, kpack.data(), nt);
+            have_v = !v_trans_ && raw_->copy_v_gpu(block_id, il, vpack.data(), nt);
+        }
         if (retr_.enabled) {
             retr_.copy_us += ggml_time_us() - t_copy;
         }
@@ -4209,7 +4262,7 @@ void llama_memory_kvmem::score_retrieval() {
         if (!read) {
             continue;
         }
-        if (!raw_->has_block(b)) {
+        if (!read.storage && !raw_->has_block(b)) {
             continue;
         }
         double acc = 0;
@@ -4218,7 +4271,12 @@ void llama_memory_kvmem::score_retrieval() {
             if (q_count_[il] == 0) {
                 continue;
             }
-            raw_->mean_k(b, il, mk.data());
+            if (read.storage) {
+                if (!read.storage->copy_mean_k(read.lease, read.lease.handle(), il, mk.data(), mk.size()))
+                    throw std::runtime_error("historical scoring payload has no complete Mean-K");
+            } else {
+                raw_->mean_k(b, il, mk.data());
+            }
             double layer = 0;
             const float invq = 1.0f / static_cast<float>(q_count_[il] * std::max(1u, g));
             for (uint32_t h = 0; h < n_head_kv_; ++h) {

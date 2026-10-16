@@ -4,6 +4,7 @@
 #include "llama-batch.h"
 #include "llama-kvmem-hooks.h"
 #include "ggml-backend.h"
+#include "kvmem/historical_kv_raw_store.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -15,6 +16,11 @@
 struct kvmem_transfer_test_access {
     static void restore(llama_memory_kvmem & mem, uint32_t id) {
         mem.write_block_to_gpu(id);
+    }
+    static void capture(llama_memory_kvmem & mem, uint32_t id) { mem.harvest_gpu_v(id); }
+    static void commit(llama_memory_kvmem & mem) { mem.harvest_gpu_v_commit(); }
+    static size_t pending(const llama_memory_kvmem & mem) {
+        return mem.harvest_v_jobs_.size() + mem.harvest_v_pending_.jobs.size();
     }
     static void score(llama_memory_kvmem & mem) {
         mem.reset_query_acc();
@@ -171,6 +177,145 @@ static void check_access(llama_memory_kvmem & mem) {
     runtime.truncate_to(0);
 }
 
+static void check_managed_async_harvest(llama_memory_kvmem & mem) {
+    using Repository = kvmem::HistoricalKvRepository;
+    using Payload = kvmem::HistoricalKvRawStore;
+    const auto & legacy_cfg = mem.raw().config();
+    const uint32_t block = mem.block_tokens();
+    kvmem::HistoricalKvRawStoreConfig cfg;
+    cfg.n_layer = legacy_cfg.n_layer;
+    cfg.max_tokens_per_slot = block;
+    cfg.packed_k_bytes_per_token = legacy_cfg.k_gpu_row_bytes;
+    cfg.packed_v_bytes_per_token = legacy_cfg.v_gpu_row_bytes;
+    cfg.mean_k_elements = legacy_cfg.n_embd_k;
+    cfg.attention_layers = legacy_cfg.historical_gc_attention_layers;
+    auto payload = std::make_shared<Payload>(cfg, 1);
+    auto repository = std::make_shared<Repository>(1);
+    const std::weak_ptr<Repository> weak_repository = repository;
+    kvmem::HistoricalKvHandle previous{};
+    for (uint32_t round = 0; round < 3; ++round) {
+        mem.clear(true);
+        std::vector<llama_pos> positions(block);
+        for (uint32_t i = 0; i < block; ++i) positions[i] = i;
+        llama_ubatch ub{};
+        ub.n_tokens = block;
+        ub.n_pos = 1;
+        ub.pos = ub.logical_pos = positions.data();
+        llama_kv_cache::slot_info_vec_t slots;
+        require(mem.prepare_ubatches({ub}, block, slots), "managed harvest slot preparation failed");
+        mem.occupy_in(mem.get_kv(), 0);
+        auto & runtime = mem.runtime();
+        const auto & directory = runtime.historical_shadow_directory();
+        auto writer = repository->begin_write(0, 0, block, round + 1, 0,
+            [payload, weak_repository](const kvmem::HistoricalKvHandle & h) {
+                const auto owner = weak_repository.lock();
+                if (!owner) return false;
+                const auto result = payload->release(*owner, h);
+                return result.code == Payload::ReleaseCode::Released ||
+                       result.code == Payload::ReleaseCode::AlreadyReleased;
+            });
+        require(writer.has_value(), "managed harvest slot was not reusable");
+        const auto handle = writer->handle();
+        require(!round || (handle.slot == previous.slot && handle.generation > previous.generation),
+                "reused payload slot has no new generation");
+        require(payload->reserve(*writer, handle, 0, block), "managed payload reserve failed");
+        struct LayerCheck {
+            uint32_t il;
+            std::vector<uint8_t> k, v;
+        };
+        std::vector<LayerCheck> checks;
+        const uint32_t cell0 = runtime.store().blocks()[0].gpu_slot * block;
+        for (uint32_t il : cfg.attention_layers) {
+            LayerCheck check{il, pattern(block * cfg.packed_k_bytes_per_token, il + 300 + round),
+                                pattern(block * cfg.packed_v_bytes_per_token, il + 400 + round)};
+            require(payload->write_mean_k_slice(*writer, handle, il, 0, block,
+                                                std::vector<float>(cfg.mean_k_elements, float(block))),
+                    "managed fixture Mean-K write failed");
+            // Distinct K/V prefixes prove capture submits only each missing
+            // component suffix; blindly rewriting from row zero is rejected.
+            if (round == 0) {
+                require(payload->write_packed_k_slice(*writer, handle, il, 0, 4,
+                            std::vector<uint8_t>(check.k.begin(), check.k.begin() + 4 * cfg.packed_k_bytes_per_token)) &&
+                        payload->write_packed_v_slice(*writer, handle, il, 0, 8,
+                            std::vector<uint8_t>(check.v.begin(), check.v.begin() + 8 * cfg.packed_v_bytes_per_token)),
+                        "managed fixture component prefix write failed");
+            }
+            ggml_backend_tensor_set(mem.get_kv()->get_k_storage(il), check.k.data(),
+                                     cell0 * cfg.packed_k_bytes_per_token, check.k.size());
+            ggml_backend_tensor_set(mem.get_kv()->get_v_storage(il), check.v.data(),
+                                     cell0 * cfg.packed_v_bytes_per_token, check.v.size());
+            checks.push_back(std::move(check));
+        }
+        require(runtime.bind_historical_full_block(0, repository, handle, *writer, payload),
+                "managed payload directory binding failed");
+        kvmem_transfer_test_access::capture(mem, 0);
+        require(kvmem_transfer_test_access::pending(mem) > 0, "test did not enqueue asynchronous packed writes");
+        const bool retire_in_flight = round == 1;
+        auto reclaim = [&] {
+            auto result = Repository::ReclaimResult::Stale;
+            std::thread worker([&] { result = repository->try_reclaim(handle); });
+            worker.join();
+            return result;
+        };
+        if (retire_in_flight) {
+            require(repository->retire(handle) == Repository::RetireResult::Committed &&
+                    runtime.unbind_retired_historical_block(0), "in-flight writer retirement failed");
+            require(reclaim() == Repository::ReclaimResult::Deferred,
+                    "queued DMA writer failed to retain its allocation");
+        }
+        kvmem_transfer_test_access::commit(mem);
+        require(kvmem_transfer_test_access::pending(mem) == 0 && !mem.raw().has_block(0),
+                "managed completion leaked jobs or wrote the positional legacy store");
+        if (!retire_in_flight) {
+            require(payload->publish_complete(*repository, directory.find(0)->writer_context->writer(), handle),
+                    "completed managed capture could not publish");
+            {
+                auto read = directory.acquire_read(0);
+                require(read && read.storage == payload, "managed read resolved wrong allocation");
+                for (const auto & check : checks) {
+                    const auto layer = payload->read_layer(read.lease, handle, check.il);
+                    require(layer && layer->packed_k == check.k && layer->packed_v == check.v,
+                            "async component suffixes corrupted captured bytes");
+                }
+                if (round) require(!payload->read_layer(read.lease, previous, cfg.attention_layers.front()),
+                                   "old generation read the reused slot");
+            }
+            kvmem_transfer_test_access::score(mem);
+            require(runtime.store().blocks()[0].retrieval_score > 0.9,
+                    "scorer did not read managed Mean-K");
+            for (const auto & check : checks) {
+                for (auto * tensor : {mem.get_kv()->get_k_storage(check.il), mem.get_kv()->get_v_storage(check.il)}) {
+                    std::vector<uint8_t> blank(ggml_nbytes(tensor), 0x5a);
+                    ggml_backend_tensor_set(tensor, blank.data(), 0, blank.size());
+                }
+            }
+            kvmem_transfer_test_access::restore(mem, 0);
+            for (const auto & check : checks) {
+                for (auto * tensor : {mem.get_kv()->get_k_storage(check.il), mem.get_kv()->get_v_storage(check.il)}) {
+                    const auto & bytes = tensor == mem.get_kv()->get_k_storage(check.il) ? check.k : check.v;
+                    const size_t row = ggml_row_size(tensor->type, tensor->ne[0]);
+                    std::vector<uint8_t> expected(ggml_nbytes(tensor), 0x5a), actual(expected.size());
+                    std::copy(bytes.begin(), bytes.end(), expected.begin() + cell0 * row);
+                    ggml_backend_tensor_get(tensor, actual.data(), 0, actual.size());
+                    require(actual == expected, "managed storage stage-in restored incorrect GPU bytes");
+                }
+            }
+            require(repository->retire(handle) == Repository::RetireResult::Committed &&
+                    runtime.unbind_retired_historical_block(0), "completed capture retirement failed");
+        }
+        require(reclaim() == Repository::ReclaimResult::Complete && payload->allocated_payload_bytes() == 0 &&
+                runtime.confirm_reclaimed_historical_block(0), "captured generation did not fully reclaim");
+        const auto queued_before = kvmem_transfer_test_access::pending(mem);
+        kvmem_transfer_test_access::capture(mem, 0);
+        require(kvmem_transfer_test_access::pending(mem) == queued_before && !mem.raw().has_block(0),
+                "reclaimed GPU block was recaptured into legacy storage");
+        previous = handle;
+        std::printf("PASS managed async harvest: round=%u generation=%llu retired_in_flight=%d\n",
+                    round, (unsigned long long) handle.generation, retire_in_flight);
+    }
+    mem.clear(true);
+}
+
 int main(int argc, char ** argv) {
     if (argc != 2) {
         std::fprintf(stderr, "Usage: %s model.gguf (requires CUDA)\n", argv[0]);
@@ -198,14 +343,17 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        std::unique_ptr<llama_context, decltype(&llama_free)> ctx(
-            llama_init_from_model(model.get(), cp), llama_free);
-        require(bool(ctx), "context init failed");
-        auto * mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(ctx.get()));
-        if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
-            mem = hybrid->attn_kvmem();
-        require(mem != nullptr, "missing KVMem adapter");
-        check_access(*mem);
+        for (bool managed : {false, true}) {
+            std::unique_ptr<llama_context, decltype(&llama_free)> ctx(
+                llama_init_from_model(model.get(), cp), llama_free);
+            require(bool(ctx), "context init failed");
+            auto * mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(ctx.get()));
+            if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
+                mem = hybrid->attn_kvmem();
+            require(mem != nullptr, "missing KVMem adapter");
+            if (managed) check_managed_async_harvest(*mem);
+            else check_access(*mem);
+        }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FAIL historical adapter access: %s\n", e.what());
         return 1;

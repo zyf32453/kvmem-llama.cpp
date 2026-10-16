@@ -1,4 +1,5 @@
 #include "kvmem/kvmem_runtime.hpp"
+#include "kvmem/historical_kv_raw_store.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -478,6 +479,51 @@ static void test_read_admission_requires_live_exact_generation() {
     CHECK(directory.acquire_read(0).status == Status::Unmanaged);
 }
 
+static void test_binding_captures_exact_payload_owner() {
+    auto repo = std::make_shared<HistoricalKvRepository>(1, 90);
+    auto foreign_repo = std::make_shared<HistoricalKvRepository>(1, 90);
+    HistoricalKvRawStoreConfig cfg;
+    cfg.n_layer = 1;
+    cfg.max_tokens_per_slot = 4;
+    cfg.packed_k_bytes_per_token = cfg.packed_v_bytes_per_token = 1;
+    auto storage = std::make_shared<HistoricalKvRawStore>(cfg, 1);
+    auto foreign_storage = std::make_shared<HistoricalKvRawStore>(cfg, 1);
+    auto writer = repo->begin_write(0, 0, 4, 1, 8,
+        [storage, owner = std::weak_ptr<HistoricalKvRepository>(repo)](const HistoricalKvHandle & h) {
+            const auto locked = owner.lock();
+            return locked && storage->release(*locked, h).code == HistoricalKvRawStore::ReleaseCode::Released;
+        });
+    auto foreign_writer = foreign_repo->begin_write(0, 0, 4, 1, 8,
+        [](const HistoricalKvHandle &) { return true; });
+    CHECK(writer && foreign_writer);
+    if (!writer || !foreign_writer) return;
+    const auto handle = writer->handle();
+    CHECK(foreign_storage->reserve(*foreign_writer, foreign_writer->handle(), 0, 4));
+    KvMemRuntime runtime(config());
+    runtime.register_append(4);
+    CHECK(!runtime.bind_historical_full_block(0, repo, handle, *writer, storage));
+    CHECK(!runtime.bind_historical_full_block(0, repo, handle, *writer, foreign_storage));
+    CHECK(static_cast<bool>(*writer));
+    CHECK(storage->reserve(*writer, handle, 0, 4));
+    CHECK(runtime.bind_historical_full_block(0, repo, handle, *writer, storage));
+    auto captured = runtime.historical_shadow_directory().find(0);
+    CHECK(captured && captured->writer_context->storage() == storage);
+    CHECK(storage->write_layer(captured->writer_context->writer(), handle, 0,
+                               {1, 2, 3, 4}, {5, 6, 7, 8}, {}, 0));
+    CHECK(storage->publish_complete(*repo, captured->writer_context->writer(), handle));
+    auto read = runtime.historical_shadow_directory().acquire_read(0);
+    CHECK(read && read.storage == storage &&
+          read.storage->read_layer(read.lease, handle, 0)->packed_k == std::vector<uint8_t>({1, 2, 3, 4}));
+    CHECK(repo->retire(handle) == HistoricalKvRepository::RetireResult::Committed);
+    CHECK(runtime.unbind_retired_historical_block(0));
+    captured.reset();
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred);
+    read.lease.reset();
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(storage->allocated_payload_bytes() == 0);
+    discard_unbound_writer(*foreign_repo, foreign_writer);
+}
+
 int main() {
     test_full_block_binding_and_runtime_owner_move();
     test_truncate_then_reuse_dense_id();
@@ -488,6 +534,7 @@ int main() {
     test_retirement_closes_new_host_selection_before_unbind();
     test_direct_store_mutations_cannot_bypass_identity_guards();
     test_read_admission_requires_live_exact_generation();
+    test_binding_captures_exact_payload_owner();
     if (failures != 0) {
         std::printf("FAILED: %d check(s)\n", failures);
         return 1;

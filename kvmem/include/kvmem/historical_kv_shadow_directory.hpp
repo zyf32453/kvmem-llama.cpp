@@ -11,6 +11,7 @@
 namespace kvmem {
 
 class KvMemStore;
+class HistoricalKvRawStore;
 
 // An opt-in, per-runtime identity bridge for the gradual migration away from
 // dense block IDs. Selection filters and read/transfer admission consult the
@@ -32,13 +33,16 @@ public:
         HistoricalKvRepository & repository() { return *repository_; }
         const HistoricalKvRepository::Lease & writer() const { return writer_; }
         HistoricalKvHandle handle() const { return writer_.handle(); }
+        const std::shared_ptr<HistoricalKvRawStore> & storage() const { return storage_; }
 
     private:
         friend class HistoricalKvShadowDirectory;
-        explicit WriterContext(std::shared_ptr<HistoricalKvRepository> repository)
-            : repository_(std::move(repository)) {}
+        WriterContext(std::shared_ptr<HistoricalKvRepository> repository,
+                      std::shared_ptr<HistoricalKvRawStore> storage)
+            : repository_(std::move(repository)), storage_(std::move(storage)) {}
 
         std::shared_ptr<HistoricalKvRepository> repository_;
+        std::shared_ptr<HistoricalKvRawStore> storage_;
         HistoricalKvRepository::Lease writer_;
     };
 
@@ -64,6 +68,9 @@ public:
         enum class Status { Unmanaged, Acquired, Denied };
         Status status = Status::Denied;
         HistoricalKvRepository::Lease lease;
+        // Non-null for the new handle-addressed payload store. Captured
+        // accesses never resolve storage again through a current block ID.
+        std::shared_ptr<HistoricalKvRawStore> storage;
 
         explicit operator bool() const {
             return status == Status::Unmanaged ||
@@ -77,7 +84,8 @@ public:
     bool bind_full_block(const KvMemStore & store, uint32_t block_id,
                          std::shared_ptr<HistoricalKvRepository> repository,
                          HistoricalKvHandle handle,
-                         HistoricalKvRepository::Lease & writer);
+                         HistoricalKvRepository::Lease & writer,
+                         std::shared_ptr<HistoricalKvRawStore> storage = {});
     std::optional<Binding> find(uint32_t block_id) const;
     // Unlike find(), this preserves a retired generation's identity even
     // after physical release. Retired and Reclaimed are both closed to new

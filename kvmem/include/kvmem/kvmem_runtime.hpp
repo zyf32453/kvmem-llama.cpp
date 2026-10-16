@@ -49,9 +49,10 @@ public:
     bool bind_historical_full_block(
         uint32_t block_id, std::shared_ptr<HistoricalKvRepository> repository,
         HistoricalKvHandle handle,
-        HistoricalKvRepository::Lease & writer) {
+        HistoricalKvRepository::Lease & writer,
+        std::shared_ptr<HistoricalKvRawStore> storage = {}) {
         return historical_shadow_directory_.bind_full_block(
-            store_, block_id, std::move(repository), handle, writer);
+            store_, block_id, std::move(repository), handle, writer, std::move(storage));
     }
     bool unbind_retired_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.unbind_retired(block_id);
