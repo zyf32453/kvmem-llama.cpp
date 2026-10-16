@@ -1,4 +1,5 @@
 #include "kvmem/kvmem_store.hpp"
+#include "kvmem/historical_kv_shadow_directory.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -26,7 +27,10 @@ void KvMemStore::gc_begin_step() {
 }
 
 bool KvMemStore::is_live(uint32_t id) const {
-    return id < block_count() && (!gc_ || (gc_view_ && gc_->is_live(id, gc_view_)));
+    return id < block_count() &&
+        (!gc_ || (gc_view_ && gc_->is_live(id, gc_view_))) &&
+        (!historical_shadow_directory_ ||
+         historical_shadow_directory_->allows_new_selection(id));
 }
 
 std::shared_ptr<KvMemGc::Lease> KvMemStore::gc_checkpoint_lease() const {
@@ -40,7 +44,9 @@ std::shared_ptr<KvMemGc::Lease> KvMemStore::gc_checkpoint_lease() const {
 
 uint32_t KvMemStore::gc_missing_required_prefix_block(uint32_t begin,
         uint32_t end, uint32_t prefix_end) const {
-    if (!gc_ || cfg_.block_tokens == 0) return UINT32_MAX;
+    if ((!gc_ && (!historical_shadow_directory_ ||
+                 historical_shadow_directory_->size() == 0)) ||
+        cfg_.block_tokens == 0) return UINT32_MAX;
     end = std::min(end, prefix_end);
     if (end <= begin) return UINT32_MAX;
     const uint32_t last = std::min(block_count(), (end - 1) / cfg_.block_tokens + 1);
@@ -51,7 +57,8 @@ uint32_t KvMemStore::gc_missing_required_prefix_block(uint32_t begin,
 }
 
 void KvMemStore::gc_validate_mandatory(const std::vector<uint32_t> &ids) const {
-    if (!gc_) return;
+    if (!gc_ && (!historical_shadow_directory_ ||
+                 historical_shadow_directory_->size() == 0)) return;
     for (uint32_t id : ids) {
         if (id < block_count() && !is_live(id)) {
             throw std::runtime_error("KVMem GC: requested historical block was deleted");

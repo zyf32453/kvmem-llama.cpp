@@ -15,6 +15,7 @@ KvMemRuntime::KvMemRuntime(KvMemRuntimeConfig cfg, KvMemBackend *backend)
 #if !KVMEM_ENABLE_NVME
     if (cfg_.nvme_bytes) throw std::runtime_error("NVMe offload is disabled in this build");
 #endif
+    store_.attach_historical_shadow_directory(&historical_shadow_directory_);
     trace_ = std::getenv("KVMEM_TRACE") != nullptr;
     slot_bytes_ = cfg_.store.estimated_block_bytes;
     if (cfg_.cpu_bytes > 0 && slot_bytes_ > 0) {

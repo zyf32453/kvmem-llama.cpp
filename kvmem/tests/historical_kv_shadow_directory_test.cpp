@@ -1,11 +1,13 @@
 #include "kvmem/kvmem_runtime.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 using namespace kvmem;
 
@@ -31,6 +33,17 @@ static bool throws_logic(Fn && fn) {
     try { fn(); }
     catch (const std::logic_error &) { return true; }
     return false;
+}
+
+template <typename Fn>
+static bool throws_runtime(Fn && fn) {
+    try { fn(); }
+    catch (const std::runtime_error &) { return true; }
+    return false;
+}
+
+static bool contains(const std::vector<uint32_t> & ids, uint32_t target) {
+    return std::find(ids.begin(), ids.end(), target) != ids.end();
 }
 
 static void discard_unbound_writer(
@@ -328,6 +341,47 @@ static void test_tombstone_survives_deferred_and_releasing_retry() {
           HistoricalKvShadowDirectory::State::Unmanaged);
 }
 
+static void test_retirement_closes_new_host_selection_before_unbind() {
+    auto repo = std::make_shared<HistoricalKvRepository>(1, 87);
+    KvMemRuntime runtime(config());
+    runtime.register_append(12);
+    auto writer = repo->begin_write(1, 4, 4, 1, 8,
+        [](const HistoricalKvHandle &) { return true; });
+    CHECK(writer.has_value());
+    if (!writer) return;
+    const auto handle = writer->handle();
+    CHECK(runtime.bind_historical_full_block(1, repo, handle, *writer));
+    auto bound = runtime.historical_shadow_directory().find(1);
+    CHECK(bound.has_value());
+    if (!bound) return;
+    CHECK(repo->publish_write(bound->writer_context->writer()));
+    CHECK(runtime.store().is_live(1) &&
+          contains(runtime.store().pick_topk_blocks(), 1));
+
+    CHECK(repo->retire(handle) == HistoricalKvRepository::RetireResult::Committed);
+    // The directory still owns its writer here; the selector must observe
+    // repository retirement before the foreground has unbound the block.
+    CHECK(!runtime.store().is_live(1));
+    CHECK(!contains(runtime.store().pick_topk_blocks(), 1));
+    CHECK(!contains(runtime.store().pick_prefill_pressure_blocks(), 1));
+    CHECK(runtime.store().gc_missing_required_prefix_block(0, 12, 12) == 1);
+    CHECK(throws_runtime([&] { runtime.store().set_selection({0, 1}); }));
+    CHECK(throws_runtime([&] { runtime.store().commit_resident_selection({0, 1}); }));
+    CHECK(throws_runtime([&] { runtime.store().pick_topk_blocks({1}); }));
+
+    CHECK(runtime.unbind_retired_historical_block(1));
+    CHECK(!runtime.store().is_live(1));
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred);
+    bound.reset();
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(runtime.confirm_reclaimed_historical_block(1));
+    CHECK(!runtime.store().is_live(1) &&
+          !contains(runtime.store().pick_topk_blocks(), 1));
+    runtime.truncate_to(4);
+    CHECK(runtime.historical_shadow_directory().observe(1).state ==
+          HistoricalKvShadowDirectory::State::Unmanaged);
+}
+
 int main() {
     test_full_block_binding_and_runtime_owner_move();
     test_truncate_then_reuse_dense_id();
@@ -335,6 +389,7 @@ int main() {
     test_closed_session_keeps_writer_with_caller();
     test_wrong_expected_generation_keeps_writer();
     test_tombstone_survives_deferred_and_releasing_retry();
+    test_retirement_closes_new_host_selection_before_unbind();
     if (failures != 0) {
         std::printf("FAILED: %d check(s)\n", failures);
         return 1;

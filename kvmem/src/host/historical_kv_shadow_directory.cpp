@@ -77,6 +77,19 @@ HistoricalKvShadowDirectory::observe(uint32_t block_id) const {
             entry.binding.original_begin, entry.binding.valid_tokens};
 }
 
+bool HistoricalKvShadowDirectory::allows_new_selection(uint32_t block_id) const {
+    const auto it = entries_.find(block_id);
+    if (it == entries_.end()) return true;
+    const auto & entry = it->second;
+    if (entry.state != State::Bound || !entry.repository ||
+        entry.repository->repository_id() != entry.repository_id ||
+        entry.repository->closed()) return false;
+    const auto meta = entry.repository->inspect(entry.binding.handle);
+    return meta && same_handle(meta->handle, entry.binding.handle) &&
+        (meta->life == HistoricalKvLife::Writing ||
+         meta->life == HistoricalKvLife::Live);
+}
+
 bool HistoricalKvShadowDirectory::unbind_retired(uint32_t block_id) {
     const auto it = entries_.find(block_id);
     if (it == entries_.end() || it->second.state != State::Bound) return false;

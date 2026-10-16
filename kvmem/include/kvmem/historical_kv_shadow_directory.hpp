@@ -71,6 +71,10 @@ public:
     // after physical release. Retired and Reclaimed are both closed to new
     // reads; neither is an unmanaged legacy block.
     Observation observe(uint32_t block_id) const;
+    // Host selection prefilter only. It reads the exact repository generation
+    // so a retirement is visible even before the owner unbinds its writer.
+    // It does not grant an execution or transfer lease.
+    bool allows_new_selection(uint32_t block_id) const;
 
     // This does NOT call retire. A separately coordinated owner must first
     // retire the exact generation and ensure all production reads are gated.

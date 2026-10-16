@@ -30,6 +30,8 @@
 
 namespace kvmem {
 
+class HistoricalKvShadowDirectory;
+
 enum class KvTier : uint8_t { GPU = 0, CPU = 1, SSD = 2 };
 
 // Metadata for one context block, spanning all attention layers (a token range
@@ -342,6 +344,12 @@ public:
     // Optional historical-block GC. The owner must stop the worker before
     // destroying the physical backing store captured by its release callback.
     void attach_gc(std::shared_ptr<KvMemGc> gc);
+    // Runtime-owned, opt-in historical identity filter. The directory must
+    // outlive all selection calls on this store; this is not an ExecLease.
+    void attach_historical_shadow_directory(
+        const HistoricalKvShadowDirectory * directory) noexcept {
+        historical_shadow_directory_ = directory;
+    }
     void gc_begin_step();
     void gc_end_step() { gc_view_.reset(); }
     bool is_live(uint32_t id) const;
@@ -501,6 +509,7 @@ public:
     }
 private:
     KvMemStoreConfig cfg_;
+    const HistoricalKvShadowDirectory * historical_shadow_directory_ = nullptr;
     uint32_t runtime_select_budget_ = 0;
     std::vector<KvMemBlock> blocks_;
     uint32_t total_tokens_ = 0;  // total appended context length

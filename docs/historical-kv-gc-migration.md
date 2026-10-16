@@ -22,7 +22,9 @@
 
 对真实采集路径的审查发现，Mean-K、packed K 和 packed V 会由不同的调用或异步任务分别到达。按句柄存储因此增加 `write_mean_k_slice`、`write_packed_k_slice` 和 `write_packed_v_slice`：每个分量独立记录连续前缀，顺序可以不同；所有必需分量和所有配置层写满以前，整层读取与 `publish_complete` 均拒绝。原 `write_slice` 仍在同一 slot 锁下验证并一次提交全部分量，不会因后一分量错误而留下半次写入。测试覆盖错序完成、缺分量/缺层、洞与重复、非对齐短 span、退休后旧 writer 完成、旧 reader 阻止回收，以及跨仓库同值句柄。
 
-`KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。它只允许把完整的现有 `KvMemBlock` 与同一仓库的精确 writer/handle/span 绑定，供将来异步任务在提交时捕获原代数；绑定失败不会消耗 writer。通过 runtime 追加/截断时，若会改变已绑定跨度就先拒绝，避免密集 block ID 被悄悄复用。目录绑定长期持有 writer lease，因此退休后若不解除绑定并等待异步 writer 退出，后台释放会一直延后。解绑仅把目录状态改为 `Retired` 并放掉目录 writer；仓库确认同代物理释放后，目录才可改为 `Reclaimed`。两个状态都保留关闭墓碑，`find()` 不返回可用绑定；只有运行时实际截断并移走旧密集块后，才删除墓碑并允许编号重用。该状态机避免“payload 已释放而旧块尚在目录”时把它误认为未托管块。目录仍**不参与当前选块、执行许可、退休或物理释放**，也尚未由适配器使用。`runtime.store()` 暴露的直接修改入口目前可绕过此预检，生产接线前必须收口。仓库/worker、异步 writer 与 Raw 存储还需统一销毁顺序，不能让后台释放回调捕获先于其销毁的裸 `RawKvStore` 指针。
+`KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。它只允许把完整的现有 `KvMemBlock` 与同一仓库的精确 writer/handle/span 绑定，供将来异步任务在提交时捕获原代数；绑定失败不会消耗 writer。通过 runtime 追加/截断时，若会改变已绑定跨度就先拒绝，避免密集 block ID 被悄悄复用。目录绑定长期持有 writer lease，因此退休后若不解除绑定并等待异步 writer 退出，后台释放会一直延后。解绑仅把目录状态改为 `Retired` 并放掉目录 writer；仓库确认同代物理释放后，目录才可改为 `Reclaimed`。两个状态都保留关闭墓碑，`find()` 不返回可用绑定；只有运行时实际截断并移走旧密集块后，才删除墓碑并允许编号重用。该状态机避免“payload 已释放而旧块尚在目录”时把它误认为未托管块。
+
+宿主 `KvMemStore` 的现有选块入口现可查询这个目录：仓库刚提交退休、尚未由前台解绑时，下一轮 top-k、prefill pressure、显式选块和必需前缀检查已把该代看作不可选；解绑后及确认回收后的墓碑也继续阻止重新选中。此检查只是**选块预过滤**，不会取得覆盖 GPU 执行的 ExecLease，也不阻止尚未接入目录的 adapter 快捷路径直接访问 Raw；目录尚未由生产适配器绑定或启动后台删除。`runtime.store()` 暴露的直接修改入口目前可绕过追加/截断预检，生产接线前必须收口。仓库/worker、异步 writer 与 Raw 存储还需统一销毁顺序，不能让后台释放回调捕获先于其销毁的裸 `RawKvStore` 指针。
 
 **此桥接尚未接入真实模型推理。** 现有 `KvMemStore` 和 `RawKvStore` 的生产读取仍依赖 `pos / block_tokens` 的密集位置；检索选择、GPU stage、异步传输、checkpoint、session 和 MTP 路径未统一持有逐块许可。封存时 `truncate`、`clear` 和 snapshot 也会拒绝操作，NVMe、短尾块及共享位置块不受支持。由此不能打开生产删除开关，也不能把单测中的释放字节数当作实际模型运行的内存收益。下一步需要把生产目录与所有读写路径迁到稳定句柄，补足这几条路径的 lease 和恢复语义，再做远程模型验收。
 
@@ -30,7 +32,7 @@
 
 在正式绑定异步 writer 前，已修正两个现有错误路径：D2H 提交失败时保留位置队列供同步回退，并在回退读图张量前完成 scheduler 同步；CUDA stage-in 的直接 H2D fallback 等待 stream 拷贝完成才返回，避免调用者的局部 packed 缓冲区先析构。这些修复不构成 GC 生产接入。
 
-实际接线还要拒绝没有注意力层的配置，并保证 Mean-K 每段只提交一次：连续前缀证明覆盖范围，不能识别重复累加。`Writing` 块尚未封存，不能被生产删除策略选中。退休和确认回收后的目录墓碑都必须由读取端识别为关闭状态，禁止按“找不到绑定”退回旧位置读取；现有 `KvMemStore::is_live` 仅连接旧 `KvMemGc`，尚不会自动过滤新仓库退休块。`seq_rm`、清空、截断、回放和快照要在修改 GPU/Raw 前完成统一退休与异步排空；退休的 GPU 块再次 stage-out 时也不能重写已释放的 Raw 位置。
+实际接线还要拒绝没有注意力层的配置，并保证 Mean-K 每段只提交一次：连续前缀证明覆盖范围，不能识别重复累加。`Writing` 块尚未封存，不能作为当前 legacy Raw 桥接的生产删除候选；独立按句柄存储允许在 Writing 期间退休，这仍是最终目标。退休和确认回收后的目录墓碑都必须由 adapter 读取端识别为关闭状态，禁止按“找不到绑定”退回旧位置读取；宿主选块预过滤已经接线，但不等于全部读取和执行许可已完成。`seq_rm`、清空、截断、回放和快照要在修改 GPU/Raw 前完成统一退休与异步排空；退休的 GPU 块再次 stage-out 时也不能重写已释放的 Raw 位置。
 
 ### 本阶段验收记录
 
