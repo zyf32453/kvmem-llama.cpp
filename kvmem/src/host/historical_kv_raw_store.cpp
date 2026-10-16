@@ -123,12 +123,19 @@ bool HistoricalKvRawStore::write_layer(
         layer >= config_.n_layer) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
+    // The same slot lock protects publish_complete. A published layer is
+    // immutable; a retired old writer may still finish admitted writes.
+    const auto meta = writer.metadata();
+    if (!meta || (meta->life != HistoricalKvLife::Writing &&
+                  meta->life != HistoricalKvLife::Retired)) return false;
     Block * block = slot.block.get();
     if (!block || block->repository_id != writer.repository_id() ||
         !same(block->handle, handle) ||
-        mean_tokens > block->valid_tokens) return false;
+        (config_.mean_k_elements ? mean_tokens != block->valid_tokens
+                                 : mean_tokens != 0)) return false;
     Layer & target = block->layers[layer];
-    if (target.written || packed_k.size() != target.packed_k.size() ||
+    if (target.written || target.written_tokens != 0 ||
+        packed_k.size() != target.packed_k.size() ||
         packed_v.size() != target.packed_v.size() ||
         mean_k_sum.size() != target.mean_k_sum.size() ||
         (config_.mean_k_elements == 0 && mean_tokens != 0)) return false;
@@ -136,9 +143,76 @@ bool HistoricalKvRawStore::write_layer(
     std::copy(packed_v.begin(), packed_v.end(), target.packed_v.begin());
     std::copy(mean_k_sum.begin(), mean_k_sum.end(), target.mean_k_sum.begin());
     target.mean_tokens = mean_tokens;
+    target.written_tokens = block->valid_tokens;
     target.written = true;
     ++block->written_layers;
     return true;
+}
+
+bool HistoricalKvRawStore::write_slice(
+    const HistoricalKvRepository::Lease & writer,
+    HistoricalKvHandle handle, uint32_t layer,
+    uint32_t token_offset, uint32_t token_count,
+    const std::vector<uint8_t> & packed_k,
+    const std::vector<uint8_t> & packed_v,
+    const std::vector<float> & mean_k_sum,
+    uint32_t mean_tokens) {
+    if (!writer || !writer.is_writer() || !writer.repository_id() ||
+        !same(writer.handle(), handle) || !handle.incarnation ||
+        !handle.generation || handle.slot >= slots_.size() ||
+        layer >= config_.n_layer || !token_count) return false;
+    Slot & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    const auto meta = writer.metadata();
+    if (!meta || (meta->life != HistoricalKvLife::Writing &&
+                  meta->life != HistoricalKvLife::Retired)) return false;
+    Block * block = slot.block.get();
+    if (!block || block->repository_id != writer.repository_id() ||
+        !same(block->handle, handle) ||
+        token_offset >= block->valid_tokens ||
+        token_count > block->valid_tokens - token_offset) return false;
+
+    Layer & target = block->layers[layer];
+    if (target.written || token_offset != target.written_tokens ||
+        packed_k.size() != static_cast<size_t>(token_count) *
+                           config_.packed_k_bytes_per_token ||
+        packed_v.size() != static_cast<size_t>(token_count) *
+                           config_.packed_v_bytes_per_token ||
+        mean_k_sum.size() != target.mean_k_sum.size() ||
+        (config_.mean_k_elements ? mean_tokens != token_count
+                                 : mean_tokens != 0)) return false;
+
+    const size_t k_offset = static_cast<size_t>(token_offset) *
+                            config_.packed_k_bytes_per_token;
+    const size_t v_offset = static_cast<size_t>(token_offset) *
+                            config_.packed_v_bytes_per_token;
+    std::copy(packed_k.begin(), packed_k.end(), target.packed_k.begin() + k_offset);
+    std::copy(packed_v.begin(), packed_v.end(), target.packed_v.begin() + v_offset);
+    for (size_t i = 0; i < mean_k_sum.size(); ++i)
+        target.mean_k_sum[i] += mean_k_sum[i];
+    target.mean_tokens += mean_tokens;
+    target.written_tokens += token_count;
+    if (target.written_tokens == block->valid_tokens) {
+        target.written = true;
+        ++block->written_layers;
+    }
+    return true;
+}
+
+bool HistoricalKvRawStore::publish_complete(
+    HistoricalKvRepository & repository,
+    const HistoricalKvRepository::Lease & writer,
+    HistoricalKvHandle handle) {
+    if (!repository.owns_writer(writer) || !same(writer.handle(), handle) ||
+        !handle.incarnation || !handle.generation ||
+        handle.slot >= slots_.size()) return false;
+    Slot & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    const Block * block = slot.block.get();
+    if (!block || block->repository_id != repository.repository_id() ||
+        !same(block->handle, handle) ||
+        block->written_layers != config_.n_layer) return false;
+    return repository.publish_write(writer);
 }
 
 std::optional<HistoricalKvRawStore::LayerSnapshot>

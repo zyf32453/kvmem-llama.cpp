@@ -55,6 +55,10 @@ static void test_exact_generation_ram_reclamation() {
     const uint64_t old_bytes = store->allocated_payload_bytes();
     check(old_bytes >= old_min_bytes,
           "multi-layer K/V/mean bytes were not allocated");
+    check(!store->write_layer(*writer, old, 0,
+              {1, 2, 3, 4, 5, 6, 7, 8, 9}, {10, 11, 12, 13, 14, 15},
+              {1.0f, 2.0f, 3.0f, 4.0f}, 2),
+          "incomplete whole-layer mean was accepted for publication");
     check(store->write_layer(*writer, old, 0, {1, 2, 3, 4, 5, 6, 7, 8, 9},
                              {10, 11, 12, 13, 14, 15},
                              {1.0f, 2.0f, 3.0f, 4.0f}, 3),
@@ -71,7 +75,8 @@ static void test_exact_generation_ram_reclamation() {
     check(info && info->original_begin == 713 && info->valid_tokens == 3 &&
           info->written_layers == 2 && info->payload_bytes == old_bytes,
           "explicit original span or byte accounting was lost");
-    check(repo.publish_write(*writer), "complete RAM payload did not publish");
+    check(store->publish_complete(repo, *writer, old),
+          "complete RAM payload did not publish");
     check(store->release(repo, old).code == HistoricalKvRawStore::ReleaseCode::Busy &&
           store->allocated_payload_bytes() == old_bytes,
           "public release freed a Live block before repository reclamation");
@@ -163,7 +168,7 @@ static void test_exact_generation_ram_reclamation() {
               {1, 2, 3, 4, 5, 6}, {7, 8, 9, 10}, {1, 1, 1, 1}, 2) &&
           store->write_layer(*replacement_writer, old, 1,
               {11, 12, 13, 14, 15, 16}, {17, 18, 19, 20}, {2, 2, 2, 2}, 2) &&
-          replacement.publish_write(*replacement_writer),
+          store->publish_complete(replacement, *replacement_writer, old),
           "replacement repository could not own freed physical storage");
     const uint64_t replacement_bytes = store->allocated_payload_bytes();
     check(store->release(repo, old).code == HistoricalKvRawStore::ReleaseCode::Stale &&
@@ -190,7 +195,8 @@ static void test_exact_generation_ram_reclamation() {
                              {7, 8, 9, 10}, {1, 1, 1, 1}, 2) &&
           store->write_layer(*new_writer, current, 1, {11, 12, 13, 14, 15, 16},
                              {17, 18, 19, 20}, {2, 2, 2, 2}, 2) &&
-          repo.publish_write(*new_writer), "new generation did not publish");
+          store->publish_complete(repo, *new_writer, current),
+          "new generation did not publish");
 
     HistoricalKvRawStore::ReleaseResult stale_release;
     std::thread stale_reclaimer([&] { stale_release = store->release(repo, old); });
@@ -216,7 +222,158 @@ static void test_exact_generation_ram_reclamation() {
           "second generation did not return its own physical bytes");
 }
 
+static void test_incremental_unaligned_tail_retired_while_writing() {
+    HistoricalKvRawStoreConfig config;
+    config.n_layer = 2;
+    config.max_tokens_per_slot = 4;
+    config.packed_k_bytes_per_token = 2;
+    config.packed_v_bytes_per_token = 2;
+    config.mean_k_elements = 2;
+    HistoricalKvRawStore store(config, 1);
+    HistoricalKvRepository repo(1, 96);
+    HistoricalKvRawStore::ReleaseResult released;
+    std::thread::id release_thread;
+    auto writer = repo.begin_write(17, 7, 3, 1, 40,
+        [&](const HistoricalKvHandle & handle) {
+            release_thread = std::this_thread::get_id();
+            released = store.release(repo, handle);
+            return callback_succeeded(released.code);
+        });
+    check(writer.has_value(), "unaligned tail writer could not be reserved");
+    const HistoricalKvHandle handle = writer->handle();
+    check(store.reserve(*writer, handle, 7, 3),
+          "unaligned partial span could not reserve a physical slot");
+    const uint64_t allocated = store.allocated_payload_bytes();
+
+    check(store.write_slice(*writer, handle, 0, 0, 1,
+              {1, 2}, {7, 8}, {1.0f, 2.0f}, 1) &&
+          store.write_slice(*writer, handle, 1, 0, 1,
+              {21, 22}, {27, 28}, {5.0f, 6.0f}, 1),
+          "first incremental K/V/mean slice failed");
+    check(!store.write_slice(*writer, handle, 0, 2, 1,
+              {5, 6}, {11, 12}, {3.0f, 4.0f}, 1) &&
+          !store.write_slice(*writer, handle, 0, 0, 1,
+              {1, 2}, {7, 8}, {1.0f, 2.0f}, 1) &&
+          !store.write_slice(*writer, handle, 0, 1, 2,
+              {3, 4}, {9, 10, 11, 12}, {3.0f, 4.0f}, 2),
+          "hole, duplicate or short packed slice was accepted");
+    auto partial = store.inspect(repo, handle);
+    check(partial && partial->original_begin == 7 &&
+          partial->valid_tokens == 3 && partial->written_layers == 0 &&
+          !store.read_layer(*writer, handle, 0),
+          "partial slice was exposed as a complete layer");
+
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          !repo.acquire_new(handle) &&
+          repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred,
+          "retired partial block admitted new work or freed an old writer");
+    check(store.write_slice(*writer, handle, 0, 1, 2,
+              {3, 4, 5, 6}, {9, 10, 11, 12}, {3.0f, 4.0f}, 2) &&
+          store.write_slice(*writer, handle, 1, 1, 2,
+              {23, 24, 25, 26}, {29, 30, 31, 32}, {7.0f, 8.0f}, 2),
+          "previously admitted writer could not finish after retirement");
+    auto layer = store.read_layer(*writer, handle, 0);
+    auto complete = store.inspect(repo, handle);
+    check(layer && complete && complete->written_layers == 2 &&
+          layer->packed_k == std::vector<uint8_t>({1, 2, 3, 4, 5, 6}) &&
+          layer->packed_v == std::vector<uint8_t>({7, 8, 9, 10, 11, 12}) &&
+          layer->mean_k_sum == std::vector<float>({4.0f, 6.0f}) &&
+          layer->mean_tokens == 3,
+          "incremental slice content or mean accumulation was incorrect");
+    check(!store.publish_complete(repo, *writer, handle) &&
+          store.allocated_payload_bytes() == allocated,
+          "retired writer republished or prematurely released its block");
+    writer->reset();
+    HistoricalKvRepository::ReclaimResult result =
+        HistoricalKvRepository::ReclaimResult::Retry;
+    std::thread reclaimer([&] { result = repo.try_reclaim(handle); });
+    reclaimer.join();
+    check(result == HistoricalKvRepository::ReclaimResult::Complete &&
+          released.code == HistoricalKvRawStore::ReleaseCode::Released &&
+          released.physical_payload_bytes == allocated &&
+          release_thread != std::this_thread::get_id() &&
+          store.allocated_payload_bytes() == 0,
+          "retired unaligned tail was not physically reclaimed by the worker");
+}
+
+static void test_abandoned_partial_writer_reclaims_payload() {
+    HistoricalKvRawStoreConfig config;
+    config.n_layer = 1;
+    config.max_tokens_per_slot = 4;
+    config.packed_k_bytes_per_token = 1;
+    config.packed_v_bytes_per_token = 1;
+    HistoricalKvRawStore store(config, 1);
+    HistoricalKvRepository repo(1, 97);
+    HistoricalKvRawStore::ReleaseResult released;
+    auto writer = repo.begin_write(19, 11, 3, 1, 6,
+        [&](const HistoricalKvHandle & handle) {
+            released = store.release(repo, handle);
+            return callback_succeeded(released.code);
+        });
+    check(writer.has_value(), "abandoned writer could not reserve repository slot");
+    const HistoricalKvHandle handle = writer->handle();
+    check(store.reserve(*writer, handle, 11, 3) &&
+          store.write_slice(*writer, handle, 0, 0, 1,
+              {1}, {2}, {}, 0),
+          "abandoned writer did not create partial payload");
+    const uint64_t bytes = store.allocated_payload_bytes();
+    check(bytes >= 6 && !store.read_layer(*writer, handle, 0),
+          "partial abandoned payload was mistaken for a complete layer");
+    check(!store.publish_complete(repo, *writer, handle),
+          "partial abandoned writer published an incomplete layer");
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "partial writer could not be retired");
+    writer->reset();
+    std::thread reclaimer([&] { repo.try_reclaim(handle); });
+    reclaimer.join();
+    check(released.code == HistoricalKvRawStore::ReleaseCode::Released &&
+          released.physical_payload_bytes == bytes &&
+          store.allocated_payload_bytes() == 0 &&
+          repo.ready_count() == 1,
+          "abandoned partial payload was not reclaimed");
+}
+
+static void test_published_writer_cannot_mutate_payload() {
+    HistoricalKvRawStoreConfig config;
+    config.n_layer = 1;
+    config.max_tokens_per_slot = 3;
+    config.packed_k_bytes_per_token = 1;
+    config.packed_v_bytes_per_token = 1;
+    HistoricalKvRawStore store(config, 1);
+    HistoricalKvRepository repo(1, 98);
+    auto writer = repo.begin_write(20, 0, 3, 1, 6,
+        [&](const HistoricalKvHandle & handle) {
+            return callback_succeeded(store.release(repo, handle).code);
+        });
+    check(writer.has_value(), "publication test writer missing");
+    const HistoricalKvHandle handle = writer->handle();
+    check(store.reserve(*writer, handle, 0, 3) &&
+          store.write_slice(*writer, handle, 0, 0, 1,
+              {1}, {2}, {}, 0) &&
+          !store.publish_complete(repo, *writer, handle) &&
+          repo.publish_write(*writer),
+          "publication test could not establish a Live generation");
+    check(!store.write_slice(*writer, handle, 0, 1, 2,
+              {3, 4}, {5, 6}, {}, 0) &&
+          !store.write_layer(*writer, handle, 0,
+              {1, 3, 4}, {2, 5, 6}, {}, 0),
+          "published writer mutated an immutable payload");
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "publication test block did not retire");
+    writer->reset();
+    HistoricalKvRepository::ReclaimResult reclaimed =
+        HistoricalKvRepository::ReclaimResult::Retry;
+    std::thread reclaimer([&] { reclaimed = repo.try_reclaim(handle); });
+    reclaimer.join();
+    check(reclaimed == HistoricalKvRepository::ReclaimResult::Complete &&
+          store.allocated_payload_bytes() == 0,
+          "publication test payload did not reclaim");
+}
+
 int main() {
     test_exact_generation_ram_reclamation();
+    test_incremental_unaligned_tail_retired_while_writing();
+    test_abandoned_partial_writer_reclaims_payload();
+    test_published_writer_cannot_mutate_payload();
     std::cout << "historical KV RAM payload checks passed\n";
 }

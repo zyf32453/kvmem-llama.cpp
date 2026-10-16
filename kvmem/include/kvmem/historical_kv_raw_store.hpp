@@ -63,7 +63,8 @@ public:
                  HistoricalKvHandle handle, uint64_t original_begin,
                  uint32_t valid_tokens);
 
-    // Whole-layer, write-once publication. The packed rows are opaque bytes.
+    // Whole-layer, write-once publication. The packed rows are opaque bytes;
+    // configured mean-K must cover the complete reserved span.
     // The caller must publish the repository writer only after all layers are
     // written. Reader snapshots copy under a per-slot lock and require a
     // repository lease for the whole operation.
@@ -73,6 +74,24 @@ public:
                      const std::vector<uint8_t> & packed_v,
                      const std::vector<float> & mean_k_sum,
                      uint32_t mean_tokens);
+    // Incremental, contiguous write for one layer of an explicitly reserved
+    // span. offset must equal the layer's current written prefix; holes and
+    // duplicate writes are rejected. The old writer may finish after retire,
+    // but cannot publish that retired generation back to Live. When mean-K is
+    // enabled, each slice supplies the sum for all its tokens.
+    bool write_slice(const HistoricalKvRepository::Lease & writer,
+                     HistoricalKvHandle handle, uint32_t layer,
+                     uint32_t token_offset, uint32_t token_count,
+                     const std::vector<uint8_t> & packed_k,
+                     const std::vector<uint8_t> & packed_v,
+                     const std::vector<float> & mean_k_sum,
+                     uint32_t mean_tokens);
+    // Publish only when every layer has its full reserved span. The slot lock
+    // serializes this transition with write_slice/write_layer in this store.
+    // A strategy may still retire the writer; then publication fails.
+    bool publish_complete(HistoricalKvRepository & repository,
+                          const HistoricalKvRepository::Lease & writer,
+                          HistoricalKvHandle handle);
     std::optional<LayerSnapshot> read_layer(
         const HistoricalKvRepository::Lease & reader,
         HistoricalKvHandle handle, uint32_t layer) const;
@@ -100,6 +119,7 @@ private:
         std::vector<uint8_t> packed_v;
         std::vector<float> mean_k_sum;
         uint32_t mean_tokens = 0;
+        uint32_t written_tokens = 0;
         bool written = false;
     };
     struct Block {

@@ -297,7 +297,8 @@ void test_manager_reclaims_real_ram_payload() {
     const auto handle = writer->handle();
     check(raw->reserve(*writer, handle, 713, 2) &&
           raw->write_layer(*writer, handle, 0, {1, 2}, {3, 4}, {}, 0) &&
-          repo->publish_write(*writer), "RAM manager payload setup failed");
+          raw->publish_complete(*repo, *writer, handle),
+          "RAM manager payload setup failed");
     writer->reset();
     auto reader = repo->acquire_read(handle);
     check(reader.has_value(), "RAM manager reader missing");
