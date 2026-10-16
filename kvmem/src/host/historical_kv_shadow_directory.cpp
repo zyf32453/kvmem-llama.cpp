@@ -3,7 +3,10 @@
 #include "kvmem/kvmem_store.hpp"
 #include "kvmem/historical_kv_raw_store.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace kvmem {
@@ -29,6 +32,17 @@ bool HistoricalKvShadowDirectory::bind_full_block(
         HistoricalKvHandle handle,
         HistoricalKvRepository::Lease & writer,
         std::shared_ptr<HistoricalKvRawStore> storage) {
+    if (block_id >= store.block_count() ||
+        store.blocks()[block_id].n_tokens != store.config().block_tokens) return false;
+    return bind_block(store, block_id, std::move(repository), handle, writer, std::move(storage));
+}
+
+bool HistoricalKvShadowDirectory::bind_block(
+        const KvMemStore & store, uint32_t block_id,
+        std::shared_ptr<HistoricalKvRepository> repository,
+        HistoricalKvHandle handle,
+        HistoricalKvRepository::Lease & writer,
+        std::shared_ptr<HistoricalKvRawStore> storage) {
     if (!repository || repository->closed() || !writer ||
         !repository->owns_writer(writer) ||
         !same_handle(handle, writer.handle()) ||
@@ -37,8 +51,10 @@ bool HistoricalKvShadowDirectory::bind_full_block(
         block_id >= store.block_count() || entries_.count(block_id) != 0) return false;
 
     const auto & block = store.blocks()[block_id];
-    if (store.config().block_tokens == 0 ||
-        block.n_tokens != store.config().block_tokens) return false;
+    const auto bt = store.config().block_tokens;
+    if (!bt || !block.n_tokens || block.n_tokens > bt) return false;
+    if (!storage && (block.n_tokens != bt ||
+                    block.orig_pos_start != uint64_t(block_id) * bt)) return false;
 
     const auto meta = writer.metadata();
     if (!meta || !same_handle(meta->handle, handle) ||
@@ -65,6 +81,72 @@ bool HistoricalKvShadowDirectory::bind_full_block(
     if (!inserted.second) return false;
     inserted.first->second.binding.writer_context->writer_ = std::move(writer);
     repository_id_ = inserted.first->second.repository_id;
+    return true;
+}
+
+bool HistoricalKvShadowDirectory::fixes_span(uint32_t block_id) const noexcept {
+    return entries_.count(block_id) != 0;
+}
+
+bool HistoricalKvShadowDirectory::append_blocks(
+        KvMemStore & store, std::shared_ptr<HistoricalKvRepository> repository,
+        std::shared_ptr<HistoricalKvRawStore> storage,
+        std::vector<HistoricalKvRepository::Lease> & writers) {
+    static_assert(std::is_trivially_copyable<KvMemBlock>::value,
+                  "historical append commit requires nonthrowing block copies");
+    if (!repository || repository->closed() || !storage ||
+        store.historical_shadow_directory_ != this || store.gc_ ||
+        (repository_id_ && repository_id_ != repository->repository_id()) ||
+        !tail_span_matches(store) || store.append_tail_room() != 0 ||
+        !store.config().block_tokens ||
+        writers.size() > size_t(INT32_MAX) - store.block_count()) return false;
+    if (writers.empty()) return true;
+
+    // Prepare all fallible metadata allocations before moving any writer or
+    // publishing any position. No rollback frees a historical payload here.
+    std::map<uint32_t, Entry> pending;
+    std::vector<KvMemBlock> blocks;
+    blocks.reserve(writers.size());
+    uint64_t position = store.total_tokens();
+    for (size_t i = 0; i < writers.size(); ++i) {
+        const auto & writer = writers[i];
+        const auto meta = writer.metadata();
+        const uint32_t id = store.block_count() + static_cast<uint32_t>(i);
+        if (!repository->owns_writer(writer) || !meta ||
+            (meta->life != HistoricalKvLife::Writing && meta->life != HistoricalKvLife::Retired) ||
+            meta->logical_id != id || meta->original_begin != position ||
+            !meta->valid_tokens || meta->valid_tokens > store.config().block_tokens ||
+            position + meta->valid_tokens > std::numeric_limits<uint32_t>::max() ||
+            entries_.count(id)) return false;
+        const auto payload = storage->inspect(*repository, writer.handle());
+        if (!payload || payload->original_begin != position ||
+            payload->valid_tokens != meta->valid_tokens) return false;
+        auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, storage));
+        Entry entry;
+        entry.binding = {id, writer.handle(), position, meta->valid_tokens, std::move(context)};
+        entry.repository = repository;
+        entry.repository_id = repository->repository_id();
+        pending.emplace(id, std::move(entry));
+        KvMemBlock block;
+        block.block_id = id;
+        block.orig_pos_start = static_cast<uint32_t>(position);
+        block.n_tokens = meta->valid_tokens;
+        block.baked_pos = static_cast<int64_t>(position);
+        blocks.push_back(block);
+        position += meta->valid_tokens;
+    }
+    const auto count = store.blocks_.size() + blocks.size();
+    if (count > store.blocks_.capacity())
+        store.blocks_.reserve(std::max(count, std::min<size_t>(INT32_MAX,
+            std::max<size_t>(1, store.blocks_.capacity()) * 2)));
+    size_t i = 0;
+    for (auto & pair : pending) pair.second.binding.writer_context->writer_ = std::move(writers[i++]);
+    // map node transfer uses the same allocator and a nonthrowing integer
+    // comparator. The reserved vector only copies plain block descriptors.
+    entries_.merge(pending);
+    store.blocks_.insert(store.blocks_.end(), blocks.begin(), blocks.end());
+    store.total_tokens_ = static_cast<uint32_t>(position);
+    repository_id_ = repository->repository_id();
     return true;
 }
 
@@ -164,13 +246,9 @@ bool HistoricalKvShadowDirectory::tail_span_matches(const KvMemStore & store) co
 
 void HistoricalKvShadowDirectory::validate_append(
         const KvMemStore & store, uint32_t n_tokens) const {
+    (void) n_tokens;
     if (!tail_span_matches(store))
         throw std::logic_error("historical shadow directory has a stale block span");
-    if (n_tokens == 0 || entries_.empty()) return;
-    const auto & tail = entries_.rbegin()->second.binding;
-    if (tail.block_id == store.block_count() - 1 &&
-        tail.valid_tokens < store.config().block_tokens)
-        throw std::logic_error("cannot extend a bound historical generation");
 }
 
 void HistoricalKvShadowDirectory::validate_truncate(

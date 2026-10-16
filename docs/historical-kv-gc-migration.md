@@ -24,7 +24,7 @@
 
 对真实采集路径的审查发现，Mean-K、packed K 和 packed V 会由不同的调用或异步任务分别到达。按句柄存储因此增加 `write_mean_k_slice`、`write_packed_k_slice` 和 `write_packed_v_slice`：每个分量独立记录连续前缀，顺序可以不同；所有必需分量和所有配置层写满以前，整层读取与 `publish_complete` 均拒绝。原 `write_slice` 仍在同一 slot 锁下验证并一次提交全部分量，不会因后一分量错误而留下半次写入。测试覆盖错序完成、缺分量/缺层、洞与重复、非对齐短 span、退休后旧 writer 完成、旧 reader 阻止回收，以及跨仓库同值句柄。
 
-`KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。它只允许把完整的现有 `KvMemBlock` 与同一仓库的精确 writer/handle/span 绑定，异步 packed K/V 任务可在提交时捕获原代数；绑定失败不会消耗 writer。绑定可另外携带已预约的 `HistoricalKvRawStore`，并验证它属于同一仓库、代数和原始跨度；writer 与读写许可都保留这一存储 owner。通过 runtime 追加/截断时，若会改变已绑定跨度就先拒绝，避免密集 block ID 被悄悄复用。目录绑定长期持有 writer lease，因此退休后若不解除绑定并等待异步 writer 退出，后台释放会一直延后。解绑仅把目录状态改为 `Retired` 并放掉目录 writer；仓库确认同代物理释放后，目录才可改为 `Reclaimed`。两个状态都保留关闭墓碑，`find()` 不返回可用绑定；只有运行时实际截断并移走旧密集块后，才删除墓碑并允许编号重用。该状态机避免“payload 已释放而旧块尚在目录”时把它误认为未托管块。
+`KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。早期接口只绑定完整块；现在 `bind_historical_block` 也接受由 `HistoricalKvRawStore` 承载的短块和非对齐 span，legacy Raw 桥接仍限于完整对齐块。绑定验证同一仓库、精确 writer/handle/span 和实际 payload，失败不会消耗 writer；异步任务及读写许可保留原存储 owner。绑定后的范围固定，追加转到新块，截断不能缩短尚未安全回收的旧块。目录绑定长期持有 writer lease，因此退休后若不解除绑定并等待异步 writer 退出，后台释放会一直延后。解绑仅把目录状态改为 `Retired` 并放掉目录 writer；仓库确认同代物理释放后，目录才可改为 `Reclaimed`。两个状态都保留关闭墓碑，`find()` 不返回可用绑定；只有运行时实际截断并移走旧密集块后，才删除墓碑并允许编号重用。该状态机避免“payload 已释放而旧块尚在目录”时把它误认为未托管块。
 
 宿主 `KvMemStore` 的现有选块入口现可查询这个目录：仓库刚提交退休、尚未由前台解绑时，下一轮 top-k、prefill pressure、显式选块和必需前缀检查已把该代看作不可选；解绑后及确认回收后的墓碑也继续阻止重新选中。此检查只是**选块预过滤**，不会取得覆盖 GPU 执行的 ExecLease，也不阻止尚未接入目录的 adapter 快捷路径直接访问 Raw；目录尚未由生产适配器绑定或启动后台删除。追加/截断预检现已下沉到 `KvMemStore`，直接调用 `runtime.store().truncate_to()` 也不能绕过原代数的保护；确认释放后，实际删除密集块时才清除墓碑。截断结果的容量在修改块表前预约，避免返回列表分配失败造成块表已删、墓碑未更新。生产操作仍应走 runtime，由它排空预取并清理 tier 槽位；store 的直接方法只处理元数据。仓库/worker、异步 writer 与 Raw 存储还需统一销毁顺序，不能让后台释放回调捕获先于其销毁的裸 `RawKvStore` 指针。
 
@@ -62,9 +62,25 @@ Mean-K 与 packed K/V 一样只写原代数尚缺失的连续后缀；重复采�
 
 实际 GGUF 在 `retrieval --kvmem-budget 512` 下完成 **356-token 预填充 + 64-token query replay + 8-token 生成**。日志记录 3 次异步预填充采集，每次有 48 层 K；最终 decode 为 `n_tok=8, n_flush=1, n_gpu=384, n_miss=0, last_layers=48`。同版 `recency --kvmem-budget 96` 完成 356-token 预填充与 8-token 生成，并记录 9 次 `stage_out_cpu`。这验证了实际模型的采集入口和既有推理路径；仍不证明生产 GC 删除、长期有界或较小 retrieval 容量已通过。原始日志保存在隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-mean-gpu-test.log`、`model-mean-retrieval-capture.log`、`model-mean-recency.log` 与 `historical-mean-host-test.log`。
 
-**GC 托管身份尚未在正常推理中自动启用。** 现有 `KvMemStore` 和 `RawKvStore` 的生产读取仍依赖 `pos / block_tokens` 的密集位置；检索选择、GPU stage、异步传输、checkpoint、session 和 MTP 路径未统一持有逐块许可。封存时 `truncate`、`clear` 和 snapshot 也会拒绝操作，NVMe、短尾块及共享位置块不受支持。由此不能打开生产删除开关，也不能把单测中的释放字节数当作实际模型运行的内存收益。下一步需要把生产目录与所有读写路径迁到稳定句柄，补足这几条路径的 lease 和恢复语义，再做远程模型验收。
+**GC 托管身份尚未在正常推理中自动启用。** 块表查找、语义/媒体分组及托管采集已支持显式原始范围，但 legacy `RawKvStore`、容量快捷证明及部分会话/MTP 路径仍依赖对齐密集位置；检索选择、GPU stage、异步传输、checkpoint、session 和 MTP 路径未统一持有逐块许可。封存时 `truncate`、`clear` 和 snapshot 也会拒绝操作。短尾块的受控接线见下节，NVMe 与完整会话生命周期仍待支持。由此不能打开生产删除开关，也不能把单测中的释放字节数当作实际模型运行的内存收益。
 
-生产接线的首个受限配置应是单会话、单 lane、文本、RAM 权威存储、MTP 关闭且所需注意力层与 packed V 均明确可用。目录、packed harvest job 与 Mean-K batch 已携带 `block_id → (handle, original span)` 及原 writer；自动创建目录身份和完成后的发布协调仍需接入。`valid_tokens` 在预约时固定，因此尾块增长/退休切换、非对齐新 span、请求级容量预约也还需要设计和验证。`score_retrieval` 与直接 stage-in 已取得 Read/Transfer 许可；prefetch、同 query、全驻留、keep-selected 及压力换块等执行入口仍需接线，旧许可应保留到 GPU/异步 D2H 真正完成。
+生产接线的首个受限配置应是单会话、单 lane、文本、RAM 权威存储、MTP 关闭且所需注意力层与 packed V 均明确可用。目录、packed harvest job 与 Mean-K batch 已携带 `block_id → (handle, original span)` 及原 writer；正常请求的自动资源预约、身份创建和完成后的发布协调仍需接入。`valid_tokens` 在预约时固定，当前实现以固定 span + 新块切换保持该约束；不能把它当作可无限扩展的尾块。`score_retrieval` 与直接 stage-in 已取得 Read/Transfer 许可；prefetch、同 query、全驻留、keep-selected 及压力换块等执行入口仍需接线，旧许可应保留到 GPU/异步 D2H 真正完成。
+
+### 短尾块与非对齐追加
+
+新增 `register_historical_append(repository, storage, writers)`：调用方先取得已有 writer 和实际 payload，该入口验证连续原始位置、逻辑编号、仓库/代数和有效长度，再把块表与身份目录一起登记。所有可能失败的元数据分配先完成，成功才移动 writer；中间一个 span 无效不会留下半张块表或消耗先前 writer。它不分配历史 payload、不代替请求准入、不启动 GC，也不在失败时由前台回收历史存储。退休前已取得的 writer 仍可登记其获准范围，但不能因此重新获得历史可选资格。
+
+已绑定的短尾块不再随 `register_append` 增长；Writing、Live、Retired 和 Reclaimed 都保持原范围。新块从旧范围末端继续，原位置不补齐、不重排。例如 `[0,3)`、`[3,8)` 后，后一块退休，后续可写入新 handle 的 `[8,35)`。当前选择是绑定即固定范围，尚未实现同代可增长尾块的优化；小批次可能产生更多块，必须由后续整请求预约计入真实碎片上界。
+
+块查找改为按 `orig_pos_start` 二分定位，必需前缀、语义分组与媒体组均使用实际范围。追加容量检查按实际新块数计算，先检查原位置溢出和申请元数据容量，再修改尾块；不能以 `ceil(total_tokens/B)` 漏算短块。Mean-K 捕获同时记录逻辑块号和范围末端，decode 在真正的末端 flush；一个非对齐 span 穿过旧 `pos/B` 边界时不会被误拆到别的块。固定短块也进入异步 packed harvest，不再必须等到 B 个 token。
+
+未经绑定的非对齐数据不会回退到 legacy 采集、打分或直接 stage-in。托管目录存在时，旧 `can_append` / `selection_fits` / query replay 容量快捷证明拒绝通过，MTP 不再猜测尚未登记位置的 GPU 槽；这些入口等待整请求预约和对应执行许可接入。这里只关闭未实现的快捷证明，不代表其后所有普通执行路径已经安全支持 GC。
+
+新增宿主测试覆盖批量登记失败的原子性、退休中的短尾块、迟到 writer 完成但不能重新发布、非对齐位置/分组、容量碎片与位置溢出。GPU 定向测试扩展到 48 层的短 span 和跨 32-token 边界，验证真实生产采集与按句柄恢复；测试所用 K/V 和 Mean-K 输入仍为已知 fixture 张量，不能当作正常模型托管 GC 闭环。
+
+本轮本地相关 CTest **12/12**、Linux 宿主 CTest **21/21**、宿主 ASan/UBSan **9/9** 通过，CUDA CLI 与定向测试完成编译。短尾块 GPU 用例验证 `[3,8)` 在异步采集中退休，原写入完成后释放 CPU payload，再以同一物理槽的新 generation 存储 `[8,35)`；逐层检查所有 GPU 字节，包括退休块和未使用单元，均未被 CPU 回收改变。完整块原有 5 代复用用例继续通过。ASan/UBSan 覆盖宿主模块，未覆盖 CUDA adapter。
+
+实际 GGUF 的 retrieval（预算 512）再次完成 356-token 预填充、64-token query replay 和 8-token 生成，Mean-K 为 48 层、`n_miss=0`；recency（预算 96）完成同一提示词和 8-token 生成，记录 9 次 `stage_out_cpu`。这是默认未托管路径的回归，不是 GC 效果对照。日志保存在远程隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-tail-{host,gpu,asan}-test.log` 和 `historical-tail-model-{retrieval,recency}.log`。远程原工作仓库未修改。
 
 在正式绑定异步 writer 前，已修正两个现有错误路径：D2H 提交失败时保留位置队列供同步回退，并在回退读图张量前完成 scheduler 同步；CUDA stage-in 的直接 H2D fallback 等待 stream 拷贝完成才返回，避免调用者的局部 packed 缓冲区先析构。这些修复不构成 GC 生产接入。
 
@@ -86,7 +102,7 @@ Mean-K 与 packed K/V 一样只写原代数尚缺失的连续后缀；重复采�
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
-1. **生产身份创建与发布。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已接入捕获的同代 writer/范围；还需在正常推理中自动预约/创建身份，并按全部组件覆盖情况发布。partial tail 退休后切换新 handle，支持非对齐 span，不能继续追加到旧代或偷偷保留其检索资格。
+1. **生产身份创建与发布。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已接入捕获的同代 writer/范围；短尾块、非对齐范围和批量身份登记已有受控接线，还需由正常请求的资源 owner 自动预约/创建身份、调用登记入口，并按全部组件覆盖情况发布。批量登记本身不承诺后续请求还有足够资源。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
 3. **请求预约与长期有界。** 请求进入 active 前，用真实内存/slots/extent 为最坏输入、输出、每追加边界删尾块造成的碎片及在途/rollback/scratch 资源一次预约。失败在入口处理；不能等 GC 补给，不支持的 streaming 显式拒绝。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证复用与计数守恒。
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。

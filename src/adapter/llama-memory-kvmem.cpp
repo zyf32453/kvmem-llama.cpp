@@ -1768,6 +1768,9 @@ bool llama_memory_kvmem::slot_for_orig_pos(llama_pos pos, int32_t * slot, uint32
         *off = static_cast<uint32_t>(pos) - b.orig_pos_start;
         return *off < bt;
     }
+    // Draft placement beyond a fixed historical span needs its own reserved
+    // handle/slot. Do not guess a slot from positional legacy arithmetic.
+    if (runtime_->historical_shadow_directory().size() != 0) return false;
     // Token not yet on the target store (MTP draft before verify). Stay in
     // the last GPU block if it still has room; otherwise peek the next free
     // slot without popping so target's next alloc_slot() takes the same one.
@@ -2565,15 +2568,27 @@ llama_memory_kvmem::CaptureBatch llama_memory_kvmem::capture_batch(
         range.source_token = i;
         range.original_begin = static_cast<uint32_t>(positions[i]);
         range.token_count = 1;
-        const uint32_t bid = range.original_begin / block_tokens_;
+        const auto & store = runtime_->store();
+        const auto found = store.block_id_containing(range.original_begin);
+        const uint32_t bid = found >= 0 ? static_cast<uint32_t>(found)
+                                       : range.original_begin / block_tokens_;
+        if (found < 0 && directory.size())
+            throw std::logic_error("historical capture has no admitted original span");
+        const auto observation = directory.observe(bid);
+        range.block_id = bid;
+        range.original_end = observation.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged
+            ? (uint64_t(bid) + 1) * block_tokens_
+            : observation.original_begin + observation.valid_tokens;
+        if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged && found >= 0 &&
+                store.blocks()[bid].orig_pos_start != uint64_t(bid) * block_tokens_)
+            throw std::logic_error("non-aligned capture requires a historical payload identity");
         while (i + range.token_count < positions.size()) {
             const auto next = positions[i + range.token_count];
             if (next < 0 || static_cast<uint64_t>(next) !=
                     uint64_t(range.original_begin) + range.token_count ||
-                    static_cast<uint32_t>(next) / block_tokens_ != bid) break;
+                    static_cast<uint64_t>(next) >= range.original_end) break;
             ++range.token_count;
         }
-        const auto observation = directory.observe(bid);
         if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged) {
             range.route = MeanWriteRange::Route::Legacy;
         } else if (const auto binding = directory.find(bid)) {
@@ -3744,6 +3759,9 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
     }
     const auto & directory = runtime_->historical_shadow_directory();
     const auto identity = directory.observe(block_id);
+    if (identity.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged &&
+            blk.orig_pos_start != uint64_t(block_id) * block_tokens_)
+        throw std::logic_error("non-aligned packed harvest requires a historical payload identity");
     std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
     if (identity.state != kvmem::HistoricalKvShadowDirectory::State::Unmanaged) {
         const auto binding = directory.find(block_id);
@@ -3861,14 +3879,15 @@ void llama_memory_kvmem::harvest_full_blocks_async() {
     auto & store = runtime_->store();
     uint32_t n_enq = 0;
     for (const auto & b : store.blocks()) {
-        if (b.gpu_slot < 0 || b.n_tokens != block_tokens_) {
+        const bool managed = runtime_->historical_shadow_directory().observe(b.block_id).state !=
+                kvmem::HistoricalKvShadowDirectory::State::Unmanaged;
+        if (b.gpu_slot < 0 || (!managed && b.n_tokens != block_tokens_)) {
             continue;
         }
         if (b.block_id < harvest_gpu_queued_.size() && harvest_gpu_queued_[b.block_id]) {
             continue;
         }
-        if (runtime_->historical_shadow_directory().observe(b.block_id).state !=
-                kvmem::HistoricalKvShadowDirectory::State::Unmanaged) {
+        if (managed) {
             // The managed path uses captured writer/component progress and
             // never treats absent legacy Raw bytes as a request to rewrite.
             harvest_gpu_v(b.block_id);
@@ -4033,7 +4052,7 @@ void llama_memory_kvmem::decode_mean_add_range(const MeanWriteRange & range, uin
     }
     const uint32_t tok0 = range.source_token;
     const uint32_t pos0 = range.original_begin;
-    const uint32_t bid = pos0 / block_tokens_;
+    const uint32_t bid = range.block_id;
     if (range.route == MeanWriteRange::Route::Managed) {
         // Validate the whole admitted set before launching any accumulation.
         // A missing layer must not silently produce a partial-token sum that
@@ -4116,12 +4135,12 @@ void llama_memory_kvmem::decode_mean_commit(uint32_t n_keep) {
     for (const auto & range : decode_mean_pending_batch_.ranges) {
         if (range.source_token >= n_keep) break;
         const uint32_t take = std::min(range.token_count, n_keep - range.source_token);
-        const uint32_t bid = range.original_begin / block_tokens_;
+        const uint32_t bid = range.block_id;
         decode_mean_add_range(range, take);
         // Accepted tokens only. Store n_tokens can include MTP drafts that
         // seq_rm will drop; do not flush on that watermark.
         if (decode_mean_block_ == bid && decode_mean_n_ > 0 &&
-            (decode_mean_pos0_ % block_tokens_) + decode_mean_n_ >= block_tokens_) {
+            uint64_t(decode_mean_pos0_) + decode_mean_n_ >= range.original_end) {
             decode_mean_flush();
         }
     }
@@ -4213,6 +4232,8 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
         throw std::runtime_error("KVMem historical block is unavailable for stage-in");
     }
     const kvmem::KvMemBlock & blk = store.blocks()[block_id];
+    if (!transfer.storage && blk.orig_pos_start != uint64_t(block_id) * block_tokens_)
+        throw std::logic_error("non-aligned stage-in requires a historical payload identity");
     if (blk.gpu_slot < 0 || (!transfer.storage && !raw_->has_block(block_id))) {
         return;
     }
@@ -4382,6 +4403,8 @@ void llama_memory_kvmem::score_retrieval() {
         if (!read) {
             continue;
         }
+        if (!read.storage && store.blocks()[b].orig_pos_start != uint64_t(b) * block_tokens_)
+            throw std::logic_error("non-aligned scoring requires a historical payload identity");
         if (!read.storage && !raw_->has_block(b)) {
             continue;
         }
@@ -4516,6 +4539,10 @@ llama_kvmem_attention_view llama_memory_kvmem::attention_view(bool canonical) co
 bool llama_memory_kvmem::can_append(uint32_t end, uint32_t generation_rows, bool all_history, std::string & reason) const {
     auto fail = [&](const char * why) { reason = why; return false; };
     if (!runtime_ || !kv_ || end < store_n_tokens()) return fail("invalid_boundary");
+    // These fast-path proofs currently reserve aligned legacy slots only.
+    // A managed tail can roll over at every future append boundary; until the
+    // request reservation owns that bound, do not grant a false fit proof.
+    if (runtime_->historical_shadow_directory().size()) return fail("historical_reservation_required");
     const auto view = attention_view(all_history);
     if (!view.valid) return fail("coverage_or_layout");
     const auto & s = store();
@@ -4581,6 +4608,7 @@ llama_kvmem_selection llama_memory_kvmem::preview_retrieval() {
 }
 
 bool llama_memory_kvmem::selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t generation_rows) const {
+    if (runtime_->historical_shadow_directory().size()) return false;
     if (selection.epoch != attention_epoch_ || selection.rows != store_n_tokens() || end < selection.rows) return false;
     // The selector can trim mandatory ranges to its budget. Such a plan is
     // unsuitable for continuation even if it fits the physical slot pool.
@@ -5019,6 +5047,7 @@ bool llama_memory_kvmem::query_replay_fits(uint32_t query_begin, uint32_t prompt
     if (!runtime_ || query_begin >= prompt_end) {
         return true;
     }
+    if (runtime_->historical_shadow_directory().size()) return false;
     const kvmem::KvMemStore & store = runtime_->store();
     const uint32_t bt = std::max(1u, store.config().block_tokens);
     const uint32_t budget = store.budget_blocks();

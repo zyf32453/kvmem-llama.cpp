@@ -86,6 +86,24 @@ public:
                          HistoricalKvHandle handle,
                          HistoricalKvRepository::Lease & writer,
                          std::shared_ptr<HistoricalKvRawStore> storage = {});
+    // Bind an immutable admitted span, including a short/non-aligned tail.
+    // Such spans require handle-addressed storage: positional legacy Raw
+    // cannot represent them. Later appends start a new dense block, regardless
+    // of whether this generation is Writing, Live or already retired.
+    bool bind_block(const KvMemStore & store, uint32_t block_id,
+                    std::shared_ptr<HistoricalKvRepository> repository,
+                    HistoricalKvHandle handle,
+                    HistoricalKvRepository::Lease & writer,
+                    std::shared_ptr<HistoricalKvRawStore> storage);
+    bool fixes_span(uint32_t block_id) const noexcept;
+    // Atomically append already admitted, payload-backed spans and install
+    // their identities before an adapter can capture work for those positions.
+    // On failure all writers remain with the caller and the table is unchanged.
+    // The caller still owns request-wide resource reservation and GPU admission.
+    bool append_blocks(KvMemStore & store,
+                       std::shared_ptr<HistoricalKvRepository> repository,
+                       std::shared_ptr<HistoricalKvRawStore> storage,
+                       std::vector<HistoricalKvRepository::Lease> & writers);
     std::optional<Binding> find(uint32_t block_id) const;
     // Unlike find(), this preserves a retired generation's identity even
     // after physical release. Retired and Reclaimed are both closed to new
@@ -112,8 +130,8 @@ public:
     // until the runtime actually drops the dense block on truncate.
     bool confirm_reclaimed(uint32_t block_id);
 
-    // Called before store mutations. A bound or retired block may not be
-    // extended, shrunk, dropped, or reused before confirmed reclamation.
+    // Called before store mutations. Fixed spans may not be extended/shrunk;
+    // append must roll over. Drop/reuse requires confirmed reclamation.
     void validate_append(const KvMemStore & store, uint32_t n_tokens) const;
     void validate_truncate(const KvMemStore & store, uint32_t token_pos) const;
     // Called by KvMemStore after a successful truncate. Only tombstones

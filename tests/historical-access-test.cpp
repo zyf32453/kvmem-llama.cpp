@@ -20,6 +20,12 @@ struct kvmem_transfer_test_access {
         mem.write_block_to_gpu(id);
     }
     static void capture(llama_memory_kvmem & mem, uint32_t id) { mem.harvest_gpu_v(id); }
+    static void capture_fixed_spans(llama_memory_kvmem & mem) { mem.harvest_full_blocks_async(); }
+    static void place(llama_memory_kvmem & mem, uint32_t id) {
+        const auto slot = mem.alloc_slot();
+        if (slot < 0) throw std::runtime_error("fixture has no GPU slot");
+        mem.runtime().store().set_block_gpu_slot(id, slot);
+    }
     static void commit(llama_memory_kvmem & mem) { mem.harvest_gpu_v_commit(); }
     static size_t pending(const llama_memory_kvmem & mem) {
         return mem.harvest_v_jobs_.size() + mem.harvest_v_pending_.jobs.size();
@@ -459,6 +465,186 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
     mem.clear(true);
 }
 
+static void check_partial_rollover(llama_memory_kvmem & mem) {
+    using Repository = kvmem::HistoricalKvRepository;
+    using Payload = kvmem::HistoricalKvRawStore;
+    const auto & legacy = mem.raw().config();
+    const uint32_t block = mem.block_tokens();
+    kvmem::HistoricalKvRawStoreConfig cfg{legacy.n_layer, block,
+        legacy.k_gpu_row_bytes, legacy.v_gpu_row_bytes, legacy.n_embd_k,
+        legacy.historical_gc_attention_layers};
+    auto repository = std::make_shared<Repository>(2);
+    auto payload = std::make_shared<Payload>(cfg, 2);
+    const std::weak_ptr<Repository> weak = repository;
+    auto & runtime = mem.runtime();
+    const auto & directory = runtime.historical_shadow_directory();
+    auto make_writer = [&](uint32_t id, uint32_t begin, uint32_t count) {
+        auto writer = repository->begin_write(id, begin, count, id + 1, 0,
+            [payload, weak](kvmem::HistoricalKvHandle h) {
+                auto owner = weak.lock();
+                if (!owner) return false;
+                const auto result = payload->release(*owner, h);
+                return result.code == Payload::ReleaseCode::Released ||
+                       result.code == Payload::ReleaseCode::AlreadyReleased;
+            });
+        require(writer && payload->reserve(*writer, writer->handle(), begin, count), "tail reservation failed");
+        return std::move(*writer);
+    };
+    auto reclaim = [&](kvmem::HistoricalKvHandle handle) {
+        auto result = Repository::ReclaimResult::Stale;
+        std::thread worker([&] { result = repository->try_reclaim(handle); });
+        worker.join();
+        return result;
+    };
+    struct Check {
+        uint32_t id, il, cell0;
+        std::vector<uint8_t> k, v;
+    };
+    std::vector<Check> checks;
+    for (uint32_t il : cfg.attention_layers) {
+        for (auto * tensor : {mem.get_kv()->get_k_storage(il), mem.get_kv()->get_v_storage(il)}) {
+            std::vector<uint8_t> blank(ggml_nbytes(tensor), 0x5a);
+            ggml_backend_tensor_set(tensor, blank.data(), 0, blank.size());
+        }
+    }
+    auto place = [&](uint32_t id) {
+        kvmem_transfer_test_access::place(mem, id);
+        const auto & span = runtime.store().blocks()[id];
+        const uint32_t cell0 = span.gpu_slot * block;
+        for (uint32_t il : cfg.attention_layers) {
+            Check c{id, il, cell0,
+                pattern(span.n_tokens * cfg.packed_k_bytes_per_token, 500 + 7 * id + il),
+                pattern(span.n_tokens * cfg.packed_v_bytes_per_token, 600 + 7 * id + il)};
+            ggml_backend_tensor_set(mem.get_kv()->get_k_storage(il), c.k.data(),
+                cell0 * cfg.packed_k_bytes_per_token, c.k.size());
+            ggml_backend_tensor_set(mem.get_kv()->get_v_storage(il), c.v.data(),
+                cell0 * cfg.packed_v_bytes_per_token, c.v.size());
+            checks.push_back(std::move(c));
+        }
+    };
+    auto prepare = [&](uint32_t begin, uint32_t count) {
+        std::vector<llama_pos> positions(count);
+        for (uint32_t i = 0; i < count; ++i) positions[i] = begin + i;
+        llama_ubatch ub{};
+        ub.n_tokens = count;
+        ub.n_pos = 1;
+        ub.pos = ub.logical_pos = positions.data();
+        llama_kv_cache::slot_info_vec_t slots;
+        require(mem.prepare_ubatches({ub}, 0, slots), "non-aligned batch prepare failed");
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto id = runtime.store().block_id_containing(begin + i);
+            const auto & span = runtime.store().blocks()[id];
+            require(slots[0].idxs[0][i] == span.gpu_slot * block + begin + i - span.orig_pos_start,
+                    "slot mapping used aligned original positions");
+        }
+    };
+    std::vector<Repository::Lease> writers;
+    writers.push_back(make_writer(0, 0, 3));
+    writers.push_back(make_writer(1, 3, 5));
+    const auto old = writers[1].handle();
+    require(runtime.register_historical_append(repository, payload, writers), "short spans append failed");
+    place(0);
+    place(1);
+    prepare(0, 8);
+    mem.occupy_in(mem.get_kv(), 0);
+    mem.occupy_in(mem.get_kv(), 1);
+    MeanTensors first(mem, 0, 8, false, GGML_TYPE_F16);
+    kvmem_transfer_test_access::mean_inputs(mem, first.layers, 0, 8);
+    require(kvmem_transfer_test_access::mean_submit(mem), "short Mean-K DMA failed");
+    kvmem_transfer_test_access::capture_fixed_spans(mem);
+    require(kvmem_transfer_test_access::pending(mem) > 0, "short packed spans were skipped");
+    auto late = directory.find(1);
+    require(repository->retire(old) == Repository::RetireResult::Committed &&
+            runtime.unbind_retired_historical_block(1), "short Writing tail retirement failed");
+    require(reclaim(old) == Repository::ReclaimResult::Deferred, "short writer not retained");
+    kvmem_transfer_test_access::commit(mem);
+    mem.harvest_flush();
+    kvmem_transfer_test_access::clear_mean_nodes(mem);
+    for (uint32_t il : cfg.attention_layers) {
+        auto progress = payload->write_progress(late->writer_context->writer(), old, il);
+        require(progress && progress->packed_k_tokens == 5 && progress->packed_v_tokens == 5 &&
+                progress->mean_k_tokens == 5, "late short capture lost part of its admitted range");
+    }
+    require(!payload->publish_complete(*repository, late->writer_context->writer(), old),
+            "short tail was resurrected");
+    late.reset();
+    require(reclaim(old) == Repository::ReclaimResult::Complete &&
+            runtime.confirm_reclaimed_historical_block(1), "short tail reclaim failed");
+
+    writers.clear();
+    // Cross the old position/B boundary (32) within a single admitted span.
+    writers.push_back(make_writer(2, 8, 27));
+    const auto fresh = writers[0].handle();
+    require(fresh.slot == old.slot && fresh.generation > old.generation, "tail slot generation not advanced");
+    require(runtime.register_historical_append(repository, payload, writers), "rollover append failed");
+    place(2);
+    prepare(8, 27);
+    mem.occupy_in(mem.get_kv(), 2);
+    MeanTensors next(mem, 8, 27, true, GGML_TYPE_F32);
+    kvmem_transfer_test_access::mean_inputs(mem, next.layers, 8, 27);
+    kvmem_transfer_test_access::mean_decode(mem, 27);
+    require(kvmem_transfer_test_access::decode_tokens(mem) == 0,
+            "non-aligned decode mean did not flush at admitted end");
+    kvmem_transfer_test_access::capture_fixed_spans(mem);
+    kvmem_transfer_test_access::commit(mem);
+    kvmem_transfer_test_access::clear_mean_nodes(mem);
+    for (uint32_t id : {0u, 2u}) {
+        auto binding = directory.find(id);
+        const auto & span = runtime.store().blocks()[id];
+        require(payload->publish_complete(*repository, binding->writer_context->writer(), binding->handle),
+                "short span could not publish complete");
+        auto read = directory.acquire_read(id);
+        for (const auto & c : checks) if (c.id == id) {
+            auto layer = payload->read_layer(read.lease, binding->handle, c.il);
+            require(layer && layer->packed_k == c.k && layer->packed_v == c.v &&
+                    layer->mean_tokens == span.n_tokens &&
+                    layer->mean_k_sum == mean_sum(span.orig_pos_start, span.n_tokens, cfg.mean_k_elements),
+                    "non-aligned producer wrote the wrong generation/mean/token span");
+        }
+        kvmem_transfer_test_access::restore(mem, id);
+    }
+    // CPU tail release and later stage-in must leave all original GPU bytes,
+    // including the retired span and unused cells, untouched.
+    for (uint32_t il : cfg.attention_layers) {
+        for (bool is_k : {true, false}) {
+            auto * tensor = is_k ? mem.get_kv()->get_k_storage(il) : mem.get_kv()->get_v_storage(il);
+            const auto row = is_k ? cfg.packed_k_bytes_per_token : cfg.packed_v_bytes_per_token;
+            std::vector<uint8_t> expected(ggml_nbytes(tensor), 0x5a), actual(expected.size());
+            for (const auto & c : checks) if (c.il == il) {
+                const auto & bytes = is_k ? c.k : c.v;
+                std::copy(bytes.begin(), bytes.end(), expected.begin() + c.cell0 * row);
+            }
+            ggml_backend_tensor_get(tensor, actual.data(), 0, actual.size());
+            require(actual == expected, "CPU partial rollover changed unrelated GPU cells");
+        }
+    }
+    require(!mem.raw().has_block(0) && !mem.raw().has_block(1) && !mem.raw().has_block(2),
+            "short managed spans leaked into positional Raw storage");
+    std::string reason;
+    require(!mem.can_append(35, 1, false, reason) && reason == "historical_reservation_required",
+            "legacy fast path promised managed capacity without request reservation");
+    require(!mem.query_replay_fits(3, 35), "legacy replay fit accepted fragmented managed history");
+    runtime.register_append(1); // Deliberately leave the new non-aligned span unbound.
+    auto rejects_legacy = [](auto operation) {
+        try { operation(); } catch (const std::logic_error &) { return true; }
+        return false;
+    };
+    require(rejects_legacy([&] { kvmem_transfer_test_access::score(mem); }) &&
+            rejects_legacy([&] { kvmem_transfer_test_access::restore(mem, 3); }) &&
+            rejects_legacy([&] { kvmem_transfer_test_access::mean_positions(mem, {35}); }),
+            "unbound non-aligned span fell back to positional legacy storage");
+    for (uint32_t id : {0u, 2u}) {
+        const auto handle = directory.find(id)->handle;
+        require(repository->retire(handle) == Repository::RetireResult::Committed &&
+                runtime.unbind_retired_historical_block(id) &&
+                reclaim(handle) == Repository::ReclaimResult::Complete &&
+                runtime.confirm_reclaimed_historical_block(id), "short fixture cleanup failed");
+    }
+    require(payload->allocated_payload_bytes() == 0, "short fixture retained payload");
+    mem.clear(true);
+    std::puts("PASS managed partial rollover: spans=[0,3),[3,8),[8,35), CPU slot reused, GPU unchanged");
+}
+
 int main(int argc, char ** argv) {
     if (argc != 2) {
         std::fprintf(stderr, "Usage: %s model.gguf (requires CUDA)\n", argv[0]);
@@ -486,7 +672,7 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (bool managed : {false, true}) {
+        for (unsigned scenario : {0u, 1u, 2u}) {
             std::unique_ptr<llama_context, decltype(&llama_free)> ctx(
                 llama_init_from_model(model.get(), cp), llama_free);
             require(bool(ctx), "context init failed");
@@ -494,7 +680,8 @@ int main(int argc, char ** argv) {
             if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
-            if (managed) check_managed_async_harvest(*mem);
+            if (scenario == 2) check_partial_rollover(*mem);
+            else if (scenario == 1) check_managed_async_harvest(*mem);
             else {
                 check_mean_ranges(*mem);
                 check_access(*mem);

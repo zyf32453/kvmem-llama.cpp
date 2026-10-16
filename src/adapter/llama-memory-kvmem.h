@@ -455,6 +455,8 @@ private:
         uint32_t source_token = 0;
         uint32_t token_count = 0;
         uint32_t original_begin = 0;
+        uint32_t block_id = 0;
+        uint64_t original_end = 0; // admitted span end, not (block_id + 1) * B
         uint32_t token_offset = 0;
         std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
     };

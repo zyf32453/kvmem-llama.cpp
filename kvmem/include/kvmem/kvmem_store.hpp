@@ -333,6 +333,7 @@ struct KvMemStoreConfig {
 };
 
 class KvMemStore {
+    friend class HistoricalKvShadowDirectory;
 public:
     explicit KvMemStore(KvMemStoreConfig cfg) : cfg_(cfg) {}
 
@@ -361,10 +362,14 @@ public:
     int32_t block_id_containing(uint32_t pos) const;
 
     // Register newly-appended context tokens as blocks. Called as the context
-    // grows. Partial trailing blocks are extended in place until full, then a
-    // new block starts. Returns the number of blocks that became newly full
-    // (the trailing partial block is always present once any token exists).
+    // grows. An unmanaged partial tail extends until full. A bound historical
+    // span is immutable, so append starts a new (possibly non-aligned) block.
     void register_append(uint32_t n_new_tokens);
+    // Remaining room in the current mutable tail; zero for fixed spans.
+    uint32_t append_tail_room() const noexcept;
+    // Physical blocks needed in addition to the existing table. Counts short
+    // historical spans rather than inferring blocks from cumulative positions.
+    uint64_t additional_blocks_for_append(uint64_t tokens) const;
 
     // Drop trailing blocks so the store holds exactly `token_pos` tokens (the
     // inverse of register_append). Used by the kvmem prefix cache to rewind the

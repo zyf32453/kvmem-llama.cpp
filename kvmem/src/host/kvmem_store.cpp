@@ -49,8 +49,11 @@ uint32_t KvMemStore::gc_missing_required_prefix_block(uint32_t begin,
         cfg_.block_tokens == 0) return UINT32_MAX;
     end = std::min(end, prefix_end);
     if (end <= begin) return UINT32_MAX;
-    const uint32_t last = std::min(block_count(), (end - 1) / cfg_.block_tokens + 1);
-    for (uint32_t id = begin / cfg_.block_tokens; id < last; ++id) {
+    end = std::min(end, total_tokens_);
+    if (end <= begin) return UINT32_MAX;
+    const auto first = block_id_containing(begin);
+    const auto last = block_id_containing(end - 1);
+    for (uint32_t id = static_cast<uint32_t>(first); id <= static_cast<uint32_t>(last); ++id) {
         if (!is_live(id)) return id;
     }
     return UINT32_MAX;
@@ -228,21 +231,27 @@ int32_t KvMemStore::block_id_containing(uint32_t pos) const {
     if (blocks_.empty() || pos >= total_tokens_) {
         return -1;
     }
-    uint32_t id = cfg_.block_tokens == 0 ? 0 : pos / cfg_.block_tokens;
-    if (id >= blocks_.size()) {
-        id = static_cast<uint32_t>(blocks_.size() - 1);
-    }
-    const KvMemBlock &guess = blocks_[id];
-    if (pos >= guess.orig_pos_start && pos < guess.orig_pos_end()) {
-        return static_cast<int32_t>(id);
-    }
-    for (uint32_t i = 0; i < blocks_.size(); ++i) {
-        const KvMemBlock &b = blocks_[i];
-        if (pos >= b.orig_pos_start && pos < b.orig_pos_end()) {
-            return static_cast<int32_t>(i);
-        }
-    }
-    return -1;
+    auto it = std::upper_bound(blocks_.begin(), blocks_.end(), pos,
+        [](uint32_t position, const KvMemBlock & block) {
+            return position < block.orig_pos_start;
+        });
+    if (it == blocks_.begin()) return -1;
+    --it;
+    return pos < it->orig_pos_end() ? static_cast<int32_t>(it->block_id) : -1;
+}
+
+uint32_t KvMemStore::append_tail_room() const noexcept {
+    if (blocks_.empty() || (historical_shadow_directory_ &&
+            historical_shadow_directory_->fixes_span(blocks_.back().block_id))) return 0;
+    return cfg_.block_tokens - blocks_.back().n_tokens;
+}
+
+uint64_t KvMemStore::additional_blocks_for_append(uint64_t tokens) const {
+    if (!cfg_.block_tokens) throw std::invalid_argument("KVMem block size must be nonzero");
+    const uint64_t room = append_tail_room();
+    if (tokens <= room) return 0;
+    const uint64_t remaining = tokens - room;
+    return remaining / cfg_.block_tokens + (remaining % cfg_.block_tokens != 0);
 }
 
 void KvMemStore::register_append(uint32_t n_new_tokens) {
@@ -250,16 +259,21 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
         historical_shadow_directory_->validate_append(*this, n_new_tokens);
     if (n_new_tokens == 0) return;
     const uint32_t bt = cfg_.block_tokens;
-    if (gc_) {
-        if (bt == 0 ||
-            (static_cast<uint64_t>(total_tokens_) + n_new_tokens + bt - 1) / bt > gc_->capacity()) {
-            throw std::out_of_range("KVMem GC block capacity exceeded");
-        }
-    }
+    if (n_new_tokens > std::numeric_limits<uint32_t>::max() - total_tokens_)
+        throw std::overflow_error("KVMem original token position overflow");
+    const uint64_t count = blocks_.size() + additional_blocks_for_append(n_new_tokens);
+    if (count > INT32_MAX || (gc_ && count > gc_->capacity()))
+        throw std::out_of_range("KVMem block capacity exceeded");
+    // Allocation failure must leave the old tail and all positions untouched.
+    // Retain geometric growth; reserving exactly count on every token would
+    // make a heavily fragmented history quadratic to append.
+    if (count > blocks_.capacity())
+        blocks_.reserve(static_cast<size_t>(std::max<uint64_t>(count,
+            std::min<uint64_t>(INT32_MAX, std::max<uint64_t>(1, blocks_.capacity()) * 2))));
 
     // Extend the trailing partial block first, then spill into new blocks.
     uint32_t remaining = n_new_tokens;
-    if (!blocks_.empty()) {
+    if (append_tail_room() != 0) {
         KvMemBlock &last = blocks_.back();
         if (last.n_tokens < bt) {
             const uint32_t room = bt - last.n_tokens;
@@ -467,8 +481,9 @@ std::vector<uint32_t> KvMemStore::constrain_media(std::vector<uint32_t> selected
     std::vector<std::pair<uint32_t, uint32_t>> groups;
     for (const auto & range : media_ranges_) {
         if (range.first >= total_tokens_ || range.second <= range.first) continue;
-        const uint32_t first = range.first / cfg_.block_tokens;
-        const uint32_t end = std::min(n, (range.second + cfg_.block_tokens - 1) / cfg_.block_tokens);
+        const uint32_t first = static_cast<uint32_t>(block_id_containing(range.first));
+        const uint32_t end = static_cast<uint32_t>(
+            block_id_containing(std::min(range.second, total_tokens_) - 1)) + 1;
         if (!groups.empty() && first < groups.back().second) groups.back().second = std::max(groups.back().second, end);
         else groups.emplace_back(first, end);
     }
@@ -797,7 +812,6 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
     };
     std::vector<Candidate> candidates;
     candidates.reserve(groups.size());
-    const uint32_t bt = std::max<uint32_t>(1, cfg_.block_tokens);
     const uint64_t covered_tokens =
         static_cast<uint64_t>(blocks_.back().orig_pos_start) +
         blocks_.back().n_tokens;
@@ -807,8 +821,8 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
         if (end <= begin || begin >= covered_tokens) continue;
         const uint32_t capped_end = static_cast<uint32_t>(
             std::min<uint64_t>(end, covered_tokens));
-        const uint32_t first = begin / bt;
-        const uint32_t last = (capped_end - 1) / bt;
+        const uint32_t first = static_cast<uint32_t>(block_id_containing(begin));
+        const uint32_t last = static_cast<uint32_t>(block_id_containing(capped_end - 1));
         if (first >= n) continue;
         candidates.push_back(Candidate{
             g, first, std::min(last, n - 1), group_scores[g]});

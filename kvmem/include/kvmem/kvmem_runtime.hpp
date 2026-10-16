@@ -57,6 +57,20 @@ public:
     bool unbind_retired_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.unbind_retired(block_id);
     }
+    bool bind_historical_block(
+        uint32_t block_id, std::shared_ptr<HistoricalKvRepository> repository,
+        HistoricalKvHandle handle, HistoricalKvRepository::Lease & writer,
+        std::shared_ptr<HistoricalKvRawStore> storage) {
+        return historical_shadow_directory_.bind_block(
+            store_, block_id, std::move(repository), handle, writer, std::move(storage));
+    }
+    bool register_historical_append(
+        std::shared_ptr<HistoricalKvRepository> repository,
+        std::shared_ptr<HistoricalKvRawStore> storage,
+        std::vector<HistoricalKvRepository::Lease> & writers) {
+        return historical_shadow_directory_.append_blocks(
+            store_, std::move(repository), std::move(storage), writers);
+    }
     bool confirm_reclaimed_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.confirm_reclaimed(block_id);
     }
