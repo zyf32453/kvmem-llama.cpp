@@ -14,6 +14,7 @@ add_library(kvmem
     src/host/historical_kv_policy_lru.cpp
     src/host/historical_kv_raw_store.cpp
     src/host/historical_kv_repository.cpp
+    src/host/historical_kv_shadow_directory.cpp
     src/host/kvmem_gc.cpp
     src/host/kvmem_store.cpp
     src/host/kvmem_runtime.cpp
@@ -53,6 +54,7 @@ kvmem_add_test(historical_kv_legacy_raw_bridge_test)
 kvmem_add_test(historical_kv_policy_test)
 kvmem_add_test(historical_kv_raw_store_test)
 kvmem_add_test(historical_kv_repository_test)
+kvmem_add_test(historical_kv_shadow_directory_test)
 kvmem_add_test(pinned_kv_tier_test)
 kvmem_add_test(raw_kv_gc_release_test)
 if (WIN32)

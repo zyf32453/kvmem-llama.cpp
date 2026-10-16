@@ -5,6 +5,7 @@
 // KvMemBackend (no-op in P0).
 
 #include "kvmem/kvmem_backend.hpp"
+#include "kvmem/historical_kv_shadow_directory.hpp"
 #include "kvmem/kvmem_store.hpp"
 #if defined(_WIN32)
 // The POSIX implementation cannot be built on Windows; see the header.
@@ -19,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace kvmem {
@@ -39,13 +41,30 @@ public:
     KvMemStore &store() { return store_; }
     const KvMemStore &store() const { return store_; }
     const KvMemPlan &last_plan() const { return last_plan_; }
+    // Opt-in identity bridge. No production read/selection path consults it
+    // yet; callers must separately coordinate retirement and active leases.
+    const HistoricalKvShadowDirectory &historical_shadow_directory() const {
+        return historical_shadow_directory_;
+    }
+    bool bind_historical_full_block(
+        uint32_t block_id, std::shared_ptr<HistoricalKvRepository> repository,
+        HistoricalKvHandle handle,
+        HistoricalKvRepository::Lease & writer) {
+        return historical_shadow_directory_.bind_full_block(
+            store_, block_id, std::move(repository), handle, writer);
+    }
+    bool unbind_retired_historical_block(uint32_t block_id) {
+        return historical_shadow_directory_.unbind_retired(block_id);
+    }
     // True while a prepared plan has not been applied yet (prepare_selection /
     // prepare_prefill_pressure set it, admit_incoming clears it).
     bool pending() const { return pending_; }
     // A parked runtime has no GPU slots or unapplied transfers.
     void rebind_backend(KvMemBackend * backend);
     size_t allocated_bytes() const {
-        size_t bytes = sizeof(*this) + store_.allocated_bytes() + cpu_arena_.capacity() + scratch_.capacity();
+        size_t bytes = sizeof(*this) + store_.allocated_bytes() +
+            historical_shadow_directory_.allocated_bytes() +
+            cpu_arena_.capacity() + scratch_.capacity();
         bytes += last_plan_.stage_in.capacity()*sizeof(uint32_t) +
             last_plan_.stage_out.capacity()*sizeof(uint32_t) + last_plan_.remaps.capacity()*sizeof(KvMemRemap);
         bytes += pending_gpu_frees_.capacity()*sizeof(int32_t) + prefetch_futs_.capacity()*sizeof(std::future<void>);
@@ -111,6 +130,7 @@ private:
 
     KvMemRuntimeConfig cfg_;
     KvMemStore store_;
+    HistoricalKvShadowDirectory historical_shadow_directory_;
     KvMemBackend *backend_;
     KvMemBackend null_backend_;
     std::unique_ptr<PinnedKvTier> cpu_tier_;
