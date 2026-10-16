@@ -3050,6 +3050,14 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
         }
         if (!kvmem_cuda_ok(cudaMalloc(reinterpret_cast<void **>(&s.gpu), bytes), "gpu staging") ||
             !kvmem_cuda_ok(cudaMallocHost(reinterpret_cast<void **>(&s.pin), bytes), "pinned host")) {
+            if (s.gpu) {
+                cudaFree(s.gpu);
+                s.gpu = nullptr;
+            }
+            if (s.pin) {
+                cudaFreeHost(s.pin);
+                s.pin = nullptr;
+            }
             s.cap = 0;
             return false;
         }
@@ -3078,7 +3086,9 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             ggml_backend_event_record(d2h_->compute_done, be);
             cudaEvent_t cde = kvmem_ggml_cuda_event(d2h_->compute_done);
             if (cde) {
-                cudaStreamWaitEvent(d2h_->stream, cde, 0);
+                if (!kvmem_cuda_ok(cudaStreamWaitEvent(d2h_->stream, cde, 0), "compute wait")) {
+                    return false;
+                }
             } else {
                 ggml_backend_synchronize(be);
             }
@@ -3087,8 +3097,19 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
         perf_.sync_us += perf_.last_sync_us;
     }
     s.items.clear();
-    s.pos = std::move(pos_queue_.front());
-    pos_queue_.erase(pos_queue_.begin());
+    // The position queue is the synchronous fallback's input. Keep its front
+    // intact until every CUDA operation and worker-queue insertion succeeds.
+    s.pos = pos_queue_.front();
+    const auto abort_submit = [&]() -> bool {
+        // A failed copy/event can leave earlier copies queued against s.gpu or
+        // s.pin. Drain the stream before a retry can reuse/free either buffer.
+        if (!kvmem_cuda_ok(cudaStreamSynchronize(d2h_->stream), "failed D2H drain")) {
+            throw std::runtime_error("KVMem D2H stream could not be drained after submission failure");
+        }
+        s.items.clear();
+        s.pos.clear();
+        return false;
+    };
     size_t off = 0;
     uint32_t n_q = 0, n_k = 0, n_v = 0, n_host = 0, n_dev = 0;
     const int64_t t_d2d = ggml_time_us();
@@ -3117,8 +3138,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             if (!kvmem_cuda_ok(kvmem_copy_async(s.gpu + off, src, it.nbytes,
                                                cudaMemcpyDeviceToDevice, d2h_->stream),
                                "D2D")) {
-                pos_queue_.insert(pos_queue_.begin(), std::move(s.pos));
-                return false;
+                return abort_submit();
             }
             it.from_gpu = true;
             n_dev++;
@@ -3137,7 +3157,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     perf_.d2d_us += perf_.last_d2d_us;
     if (n_dev > 0) {
         if (!kvmem_cuda_ok(cudaEventRecord(d2h_->snap, d2h_->stream), "snap record")) {
-            return false;
+            return abort_submit();
         }
         const int64_t t_snap = ggml_time_us();
         cudaEvent_t snap_cuda = kvmem_ggml_cuda_event(d2h_->snap_be);
@@ -3145,18 +3165,18 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             // Record the ggml event on the harvest stream (never
             // ggml_backend_event_record(snap_be, be) — that is the compute stream).
             if (!kvmem_cuda_ok(cudaEventRecord(snap_cuda, d2h_->stream), "snap_be record")) {
-                return false;
+                return abort_submit();
             }
             ggml_backend_event_wait(be, d2h_->snap_be);
         } else if (!kvmem_cuda_ok(cudaEventSynchronize(d2h_->snap), "snap wait")) {
-            return false;
+            return abort_submit();
         }
         perf_.last_snap_wait_us = ggml_time_us() - t_snap;
         perf_.snap_wait_us += perf_.last_snap_wait_us;
         if (n_host == 0) {
             if (!kvmem_cuda_ok(kvmem_copy_async(s.pin, s.gpu, off, cudaMemcpyDeviceToHost, d2h_->stream),
                                "D2H")) {
-                return false;
+                return abort_submit();
             }
         } else {
             for (const auto & it : s.items) {
@@ -3166,25 +3186,38 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
                 if (!kvmem_cuda_ok(kvmem_copy_async(s.pin + it.offset, s.gpu + it.offset, it.nbytes,
                                                    cudaMemcpyDeviceToHost, d2h_->stream),
                                    "D2H item")) {
-                    return false;
+                    return abort_submit();
                 }
             }
         }
     }
     if (!kvmem_cuda_ok(cudaEventRecord(s.done, d2h_->stream), "record")) {
-        return false;
+        return abort_submit();
     }
     const int submitted = d2h_->next;
-    if (harvest_worker_on()) {
+    // Once queued, a spurious worker wake may clear s.items/s.pos before the
+    // foreground reaches its trace. Capture these while this thread owns it.
+    const size_t submitted_items = s.items.size();
+    const size_t submitted_positions = s.pos.size();
+    const bool worker_active = harvest_worker_on();
+    if (worker_active) {
+        bool queued = false;
         {
             std::lock_guard<std::mutex> lk(harvest_w_->mu);
-            s.inflight = true;
-            harvest_w_->q.push_back(submitted);
+            try {
+                harvest_w_->q.push_back(submitted);
+                s.inflight = true;
+                queued = true;
+            } catch (const std::bad_alloc &) {
+                // The original position is still available for sync fallback.
+            }
         }
-        harvest_w_->cv.notify_one();
+        if (!queued) return abort_submit();
     } else {
         s.inflight = true;
     }
+    pos_queue_.erase(pos_queue_.begin());
+    if (worker_active) harvest_w_->cv.notify_one();
     if (!old_sync && d2h_->compute_done) {
         ggml_backend_event_synchronize(d2h_->compute_done);
     }
@@ -3192,7 +3225,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     perf_.d2h_submit_us += perf_.last_d2h_submit_us;
     if (trace_) {
         kvmem_diag("KVMEM_TRACE harvest n=%zu q=%u k=%u v=%u host=%u gpu=%u bytes=%zu n_pos=%zu async=1 slot=%d\n",
-                s.items.size(), n_q, n_k, n_v, n_host, n_dev, off, s.pos.size(), submitted);
+                submitted_items, n_q, n_k, n_v, n_host, n_dev, off, submitted_positions, submitted);
     }
     d2h_->next = 1 - d2h_->next;
     return true;
@@ -3271,13 +3304,18 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
     const uint32_t n_pos = pos_queue_.empty() ? 0u : (uint32_t) pos_queue_.front().size();
     bool submitted = d2h_submit(be);
     if (!submitted) {
+        // The failed async path leaves its input at the queue front. Finish
+        // the graph before the synchronous tensor reads below.
+        if (sched) {
+            ggml_backend_sched_synchronize(sched);
+        }
+        if (pos_queue_.empty()) {
+            throw std::runtime_error("KVMem D2H fallback lost its position batch");
+        }
         cur_pos_ = std::move(pos_queue_.front());
         pos_queue_.erase(pos_queue_.begin());
         for (const CaptureNode & n : pending_capture_) {
             harvest_capture(n.t, n.il, n.which);
-        }
-        if (sched) {
-            ggml_backend_sched_synchronize(sched);
         }
     }
     harvest_full_blocks_async();

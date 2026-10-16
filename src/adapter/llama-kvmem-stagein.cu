@@ -645,8 +645,15 @@ bool kvmem_stagein_h2d_bytes(void * gpu_dst, const void * host, size_t n) {
     if (!gpu_dst || !host || n == 0) {
         return n == 0;
     }
-    return cuda_ok(kvmem_copy_async(gpu_dst, host, n, cudaMemcpyHostToDevice, stream()),
-                   "H2D bytes");
+    // The fallback caller owns `host` in a local vector that is destroyed on
+    // return. Keep the transfer on this stream, but do not return until it has
+    // finished reading that vector.
+    cudaStream_t st = stream();
+    if (!cuda_ok(kvmem_copy_async(gpu_dst, host, n, cudaMemcpyHostToDevice, st),
+                 "H2D bytes")) {
+        return false;
+    }
+    return cuda_ok(cudaStreamSynchronize(st), "H2D bytes wait");
 }
 
 void kvmem_stagein_sync() {
