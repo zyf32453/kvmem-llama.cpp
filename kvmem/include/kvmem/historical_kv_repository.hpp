@@ -25,6 +25,7 @@ public:
         // At most `count` entries, in ascending physical slot order.
         std::vector<HistoricalKvBlockMeta> blocks;
         uint32_t ready = 0;
+        uint32_t reserved = 0; // Request-private; never pending reclaim credits.
         uint32_t pending = 0; // Retired or Releasing full-slot credits.
     };
 
@@ -59,6 +60,30 @@ public:
         bool counted_exec_ = false;
     };
 
+    // Request-private, real physical slots. Reserved slots are neither Ready
+    // credits nor policy candidates. Unused slots return on reset/destruction;
+    // consumed slots follow the ordinary writer/retire/reclaim lifecycle.
+    // Operations on one reservation are serialized by its request owner.
+    class Reservation {
+    public:
+        Reservation() = default;
+        ~Reservation();
+        Reservation(Reservation &&) noexcept;
+        Reservation & operator=(Reservation &&) noexcept;
+        Reservation(const Reservation &) = delete;
+        Reservation & operator=(const Reservation &) = delete;
+        uint32_t remaining() const noexcept;
+        std::optional<HistoricalKvHandle> next_handle() const noexcept;
+        uint64_t repository_id() const noexcept;
+        void reset() noexcept;
+
+    private:
+        friend class HistoricalKvRepository;
+        std::shared_ptr<Shared> shared_;
+        std::vector<HistoricalKvHandle> handles_;
+        uint32_t consumed_ = 0;
+    };
+
     // Zero requests an automatically unique incarnation for this process.
     // Explicit nonzero incarnations are for a caller-controlled session domain.
     explicit HistoricalKvRepository(uint32_t capacity, uint64_t incarnation = 0);
@@ -71,6 +96,17 @@ public:
     std::optional<Lease> begin_write(uint64_t logical_id, uint64_t original_begin,
                                      uint32_t valid_tokens, uint64_t birth_seq,
                                      uint64_t payload_bytes, ReleaseCallback release);
+    // All-or-none acquisition in a bounded pass; no waiting for GC. This
+    // reserves slots only. A request owner must also reserve real payload,
+    // scratch and metadata before promising whole-request admission.
+    std::optional<Reservation> try_reserve_slots(uint32_t count);
+    // Consumes one already reserved slot without allocating or scanning.
+    // Failure preserves the reservation; callbacks should be prepared before
+    // request admission, then moved here to avoid allocating in the foreground.
+    std::optional<Lease> begin_reserved_write(
+        Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
+        uint32_t valid_tokens, uint64_t birth_seq,
+        uint64_t payload_bytes, ReleaseCallback release);
     bool publish_write(const Lease & writer);
     // A retired block never grants a new lease, even if old leases remain.
     // acquire_new is the execution permission used at each active boundary.

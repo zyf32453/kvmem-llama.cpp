@@ -30,7 +30,28 @@ struct HistoricalKvRawStoreConfig {
 };
 
 class HistoricalKvRawStore {
+    struct Block;
+    struct Accounting;
 public:
+    // Actual K/V/Mean-K allocations prepared before request admission. A
+    // prepared payload is private, not historical data and not selectable.
+    // Moving it into a reserved writer needs no payload allocation. Unused
+    // objects may be returned at request cancellation/end without running GC.
+    class PreparedPayload {
+    public:
+        PreparedPayload();
+        ~PreparedPayload();
+        PreparedPayload(PreparedPayload &&) noexcept;
+        PreparedPayload & operator=(PreparedPayload &&) noexcept;
+        PreparedPayload(const PreparedPayload &) = delete;
+        PreparedPayload & operator=(const PreparedPayload &) = delete;
+        explicit operator bool() const noexcept;
+        uint64_t payload_bytes() const noexcept;
+        uint32_t token_capacity() const noexcept;
+    private:
+        friend class HistoricalKvRawStore;
+        std::unique_ptr<Block> block_;
+    };
     struct BlockInfo {
         HistoricalKvHandle handle;
         uint64_t original_begin = 0;
@@ -71,6 +92,13 @@ public:
     bool reserve(const HistoricalKvRepository::Lease & writer,
                  HistoricalKvHandle handle, uint64_t original_begin,
                  uint32_t valid_tokens);
+    PreparedPayload prepare_payload(uint32_t token_capacity);
+    // Same exact writer/span checks as reserve(). Failure preserves prepared.
+    // valid_tokens may be shorter than the reserved capacity; the full owned
+    // capacity remains charged until this generation is physically released.
+    bool install_payload(const HistoricalKvRepository::Lease & writer,
+                         HistoricalKvHandle handle, uint64_t original_begin,
+                         uint32_t valid_tokens, PreparedPayload & prepared);
 
     // Whole-layer, write-once publication. The packed rows are opaque bytes;
     // configured mean-K must cover the complete reserved span.
@@ -144,6 +172,7 @@ public:
     // a failed reserve); Busy means another release is still finishing.
     ReleaseResult release(const HistoricalKvRepository & repository,
                           HistoricalKvHandle handle) noexcept;
+    // Includes private PreparedPayload allocations as well as installed data.
     uint64_t allocated_payload_bytes() const noexcept;
     uint32_t capacity() const noexcept;
     const HistoricalKvRawStoreConfig & config() const noexcept;
@@ -160,12 +189,15 @@ private:
         bool written = false;
     };
     struct Block {
+        ~Block();
         HistoricalKvHandle handle;
         uint64_t repository_id = 0;
         uint64_t original_begin = 0;
         uint32_t valid_tokens = 0;
         uint32_t written_layers = 0;
         uint64_t payload_bytes = 0;
+        std::shared_ptr<Accounting> accounting;
+        bool payload_accounted = false;
         std::vector<Layer> layers;
     };
     struct Slot {
@@ -180,8 +212,8 @@ private:
     bool required_layer(uint32_t layer) const noexcept;
     void mark_layer_complete(Block & block, Layer & layer) const noexcept;
     HistoricalKvRawStoreConfig config_;
+    std::shared_ptr<Accounting> accounting_;
     std::vector<std::unique_ptr<Slot>> slots_;
-    std::atomic<uint64_t> allocated_payload_bytes_{0};
 };
 
 } // namespace kvmem

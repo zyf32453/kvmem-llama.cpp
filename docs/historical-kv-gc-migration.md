@@ -82,6 +82,22 @@ Mean-K 与 packed K/V 一样只写原代数尚缺失的连续后缀；重复采�
 
 实际 GGUF 的 retrieval（预算 512）再次完成 356-token 预填充、64-token query replay 和 8-token 生成，Mean-K 为 48 层、`n_miss=0`；recency（预算 96）完成同一提示词和 8-token 生成，记录 9 次 `stage_out_cpu`。这是默认未托管路径的回归，不是 GC 效果对照。日志保存在远程隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-tail-{host,gpu,asan}-test.log` 和 `historical-tail-model-{retrieval,recency}.log`。远程原工作仓库未修改。
 
+### 请求的实际 RAM 预约
+
+仓库新增请求私有的 `Reserved` 状态和可移动 `Reservation`。`try_reserve_slots` 以有界扫描一次取得全部槽位；不足就归还已取得的私有额度，不等 GC。Reserved 不进入策略快照，不授予读/执行许可，也不计作 Ready 或待回收 pending；范围观察单列 reserved 数量。`begin_reserved_write` 直接消费已经占有的槽位，不再扫描或申请槽位内存。未用额度在取消/结束时归还，已转成 Writing 的额度继续按原 writer/退休/回收协议结算。仓库关闭、外来 reservation、非法原始范围均不能消耗额度。
+
+`HistoricalKvRawStore::prepare_payload` 在准入阶段真正分配各注意力层的 packed K/V 和 Mean-K 向量。`install_payload` 只把已准备的内存交给确切 writer/handle；短 span 缩短有效长度，但保留并计量所占容量，物理回收才归还容量。全池同时存在的私有 payload 与已安装 payload 合计受固定槽位数限制，计数包含二者。错误存储 owner、错误范围或已占用槽位不会吞掉准备好的 payload。未用 payload 可以随预约安全取消；历史 payload 仍由后台释放，在槽锁之外销毁后才归还计数。
+
+新增 `HistoricalKvRamReservation` 组合真实槽位、full-slot payload 与实际 scratch 分配。设总输入/最大接受输出 token 为 T，最多非空追加次数为 k=`min(T,max_append_boundaries)`，固定 span 所需槽位的最坏上界为 `k + floor((T-k)/B)`，另加未来额外 in-flight 分配；它不借用旧尾块剩余位置，也不把未来 GC 回收算进可用空间。测试穷举小规模 token 分拆与公式对照，每 token 删除尾块时会按 T 个槽位预约。未确定输出上限、缺少追加次数上限和 streaming 均由该 API 明确拒绝。
+
+这只是**整请求准入的 RAM 资源组件**，尚未接成 CLI/server 的 `try_reserve_request` 总入口。调用方还必须预留 GPU 页、目录/队列元数据及各后端实际 scratch/rollback/extent，限制资源预算与 token/追加次数，并统一失败清理。不能据此宣称正常模型请求已不依赖 GC，或整个进程的元数据已经有界。下一步的生产 owner 还必须取消目录永久持有 creation writer 的做法：只保留真实已提交生产任务的依赖，使后台在它们完成后即可释放，不等下一次前台 active 来解绑。
+
+新增预约测试通过逐分配点故障注入检查全量回滚；已存在历史没有被回收，槽位与 payload 容量没有泄漏。另在禁止后续普通堆分配、暂停物理回收的条件下，消费 8 个预约槽位完成每 token 退休的短尾块写入；请求结束后在途 writer 仍持有 payload，最后由后台归还。覆盖 move、跨 owner、短 span 容量、关闭及对象寿命，并在两个申请线程和一个观察线程之间完成 400 次预约/取消/写入/回收。该长循环仅验证固定仓库资源，不替代完整生产目录至少 10×容量的验收。
+
+本轮预约实现通过本地相关 CTest **13/13**、Linux 宿主 CTest **22/22**、宿主 ASan/UBSan **10/10**。独立 TSan 构建的 repository、GC、reservation 三项 **3/3** 通过：主机默认随机地址布局会在测试启动前触发 `unexpected memory mapping`，使用 `setarch x86_64 -R env TSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-tsan-reservation --output-on-failure -R 'historical_kv_(reservation|repository|gc)_test'` 仅调整测试进程即可正常运行，未改变系统设置。这些检查不覆盖 CUDA adapter 的完整并发执行。
+
+CUDA CLI 和定向测试重新编译通过；实际 GGUF 布局上的完整块 5 代复用与短尾块 GPU 测试均通过。本轮没有再次运行默认模型生成对照，因为普通路径未使用新增 RAM 预约组件；这也不构成生产请求预约验收。原始日志位于同一远程隔离目录的 `historical-reservation-{host,asan,gpu}-test.log`、`historical-reservation-tsan-test.log`（初始运行时失败）和 `historical-reservation-tsan-noaslr.log`（成功运行）。
+
 在正式绑定异步 writer 前，已修正两个现有错误路径：D2H 提交失败时保留位置队列供同步回退，并在回退读图张量前完成 scheduler 同步；CUDA stage-in 的直接 H2D fallback 等待 stream 拷贝完成才返回，避免调用者的局部 packed 缓冲区先析构。这些修复不构成 GC 生产接入。
 
 实际启用还要拒绝没有注意力层或没有模型采集入口的配置。`Writing` 块尚未封存，不能作为当前 legacy Raw 桥接的删除候选；独立按句柄存储已验证 Writing 期间退休及在途 packed/Mean-K writer 完成，正常推理仍待接入。退休和确认回收后的目录墓碑都必须由 adapter 读取端识别为关闭状态，禁止按“找不到绑定”退回旧位置读取；宿主选块预过滤已经接线，但不等于全部读取和执行许可已完成。`seq_rm`、清空、截断、回放和快照要在修改 GPU/Raw 前完成统一退休与异步排空；退休的 GPU 块再次 stage-out 时也不能重写已释放的 Raw 位置。
@@ -104,7 +120,7 @@ Mean-K 与 packed K/V 一样只写原代数尚缺失的连续后缀；重复采�
 
 1. **生产身份创建与发布。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已接入捕获的同代 writer/范围；短尾块、非对齐范围和批量身份登记已有受控接线，还需由正常请求的资源 owner 自动预约/创建身份、调用登记入口，并按全部组件覆盖情况发布。批量登记本身不承诺后续请求还有足够资源。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
-3. **请求预约与长期有界。** 请求进入 active 前，用真实内存/slots/extent 为最坏输入、输出、每追加边界删尾块造成的碎片及在途/rollback/scratch 资源一次预约。失败在入口处理；不能等 GC 补给，不支持的 streaming 显式拒绝。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证复用与计数守恒。
+3. **请求预约与长期有界。** RAM 槽位、payload、scratch 预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、元数据、各后端和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 接入 off/shadow/delete、LRU 压力与 pending credit，提供独立新策略模板及版本前置条件；策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补独立 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 

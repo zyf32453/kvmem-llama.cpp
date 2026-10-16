@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <utility>
 
@@ -29,6 +30,34 @@ size_t payload_bytes(const std::vector<uint8_t> & k,
 
 } // namespace
 
+struct HistoricalKvRawStore::Accounting {
+    std::atomic<uint64_t> bytes{0};
+    std::atomic<uint32_t> allocations{0};
+};
+
+HistoricalKvRawStore::Block::~Block() {
+    // Destroy payload before returning its actual capacity credit. The shared
+    // account also makes an unused reservation safe after its store is gone.
+    layers.clear();
+    if (accounting) {
+        if (payload_accounted) accounting->bytes.fetch_sub(payload_bytes, std::memory_order_relaxed);
+        accounting->allocations.fetch_sub(1, std::memory_order_release);
+    }
+}
+
+HistoricalKvRawStore::PreparedPayload::PreparedPayload() = default;
+HistoricalKvRawStore::PreparedPayload::~PreparedPayload() = default;
+HistoricalKvRawStore::PreparedPayload::PreparedPayload(PreparedPayload &&) noexcept = default;
+HistoricalKvRawStore::PreparedPayload &
+HistoricalKvRawStore::PreparedPayload::operator=(PreparedPayload &&) noexcept = default;
+HistoricalKvRawStore::PreparedPayload::operator bool() const noexcept { return bool(block_); }
+uint64_t HistoricalKvRawStore::PreparedPayload::payload_bytes() const noexcept {
+    return block_ ? block_->payload_bytes : 0;
+}
+uint32_t HistoricalKvRawStore::PreparedPayload::token_capacity() const noexcept {
+    return block_ ? block_->valid_tokens : 0;
+}
+
 bool HistoricalKvRawStore::same(HistoricalKvHandle a,
                                 HistoricalKvHandle b) noexcept {
     return a.incarnation == b.incarnation && a.slot == b.slot &&
@@ -52,7 +81,7 @@ void HistoricalKvRawStore::mark_layer_complete(Block & block,
 
 HistoricalKvRawStore::HistoricalKvRawStore(HistoricalKvRawStoreConfig config,
                                            uint32_t capacity)
-    : config_(config) {
+    : config_(config), accounting_(std::make_shared<Accounting>()) {
     if (!capacity || !config_.n_layer || !config_.max_tokens_per_slot ||
         !config_.packed_k_bytes_per_token || !config_.packed_v_bytes_per_token)
         throw std::invalid_argument("invalid historical KV raw store configuration");
@@ -82,15 +111,72 @@ HistoricalKvRawStore::~HistoricalKvRawStore() = default;
 bool HistoricalKvRawStore::reserve(
     const HistoricalKvRepository::Lease & writer,
     HistoricalKvHandle handle, uint64_t original_begin, uint32_t valid_tokens) {
+    const auto meta = writer.metadata();
+    if (!meta || !writer.is_writer() || !same(writer.handle(), handle) ||
+        handle.slot >= slots_.size() || !valid_tokens || valid_tokens > config_.max_tokens_per_slot ||
+        meta->original_begin != original_begin || meta->valid_tokens != valid_tokens ||
+        (meta->life != HistoricalKvLife::Writing && meta->life != HistoricalKvLife::Retired)) return false;
+    {
+        const auto & slot = *slots_[handle.slot];
+        std::lock_guard<std::mutex> lock(slot.mu);
+        if (slot.block || slot.releasing) return false;
+    }
+    auto prepared = prepare_payload(valid_tokens);
+    return install_payload(writer, handle, original_begin, valid_tokens, prepared);
+}
+
+HistoricalKvRawStore::PreparedPayload HistoricalKvRawStore::prepare_payload(uint32_t token_capacity) {
+    if (!token_capacity || token_capacity > config_.max_tokens_per_slot)
+        throw std::invalid_argument("invalid historical KV payload reservation size");
+    PreparedPayload prepared;
+    auto block = std::make_unique<Block>();
+    uint32_t allocations = accounting_->allocations.load(std::memory_order_acquire);
+    for (;;) {
+        if (allocations >= slots_.size()) throw std::bad_alloc();
+        if (accounting_->allocations.compare_exchange_weak(allocations, allocations + 1,
+                std::memory_order_acq_rel, std::memory_order_acquire)) break;
+    }
+    block->accounting = accounting_;
+    block->valid_tokens = token_capacity;
+    block->layers.resize(config_.n_layer);
+    const size_t k_bytes = multiply(token_capacity, config_.packed_k_bytes_per_token);
+    const size_t v_bytes = multiply(token_capacity, config_.packed_v_bytes_per_token);
+    for (uint32_t il = 0; il < config_.n_layer; ++il) {
+        if (!required_layer(il)) continue;
+        auto & layer = block->layers[il];
+        layer.packed_k.resize(k_bytes);
+        layer.packed_v.resize(v_bytes);
+        layer.mean_k_sum.resize(config_.mean_k_elements);
+        block->payload_bytes = add(static_cast<size_t>(block->payload_bytes),
+                                   payload_bytes(layer.packed_k, layer.packed_v, layer.mean_k_sum));
+    }
+    uint64_t previous = accounting_->bytes.load(std::memory_order_relaxed);
+    for (;;) {
+        if (block->payload_bytes > std::numeric_limits<uint64_t>::max() - previous)
+            throw std::overflow_error("historical KV aggregate payload size overflow");
+        if (accounting_->bytes.compare_exchange_weak(previous, previous + block->payload_bytes,
+                std::memory_order_relaxed, std::memory_order_relaxed)) break;
+    }
+    block->payload_accounted = true;
+    prepared.block_ = std::move(block);
+    return prepared;
+}
+
+bool HistoricalKvRawStore::install_payload(
+    const HistoricalKvRepository::Lease & writer,
+    HistoricalKvHandle handle, uint64_t original_begin, uint32_t valid_tokens,
+    PreparedPayload & prepared) {
     if (!writer || !writer.is_writer() || !writer.repository_id() ||
         !same(writer.handle(), handle) ||
         !handle.incarnation || !handle.generation || handle.slot >= slots_.size() ||
-        !valid_tokens || valid_tokens > config_.max_tokens_per_slot ||
+        !prepared.block_ || prepared.block_->accounting != accounting_ ||
+        !valid_tokens || valid_tokens > prepared.token_capacity() ||
         original_begin > std::numeric_limits<uint64_t>::max() - valid_tokens)
         return false;
     const auto meta = writer.metadata();
     if (!meta || meta->original_begin != original_begin ||
-        meta->valid_tokens != valid_tokens) return false;
+        meta->valid_tokens != valid_tokens ||
+        (meta->life != HistoricalKvLife::Writing && meta->life != HistoricalKvLife::Retired)) return false;
 
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
@@ -100,14 +186,11 @@ bool HistoricalKvRawStore::reserve(
         handle.generation <= slot.last_released.generation)
         return false;
 
-    // Only install after allocation succeeds. If allocation fails, the
-    // repository's release callback can safely treat Absent as a no-op.
-    auto block = std::make_unique<Block>();
+    auto & block = prepared.block_;
     block->handle = handle;
     block->repository_id = writer.repository_id();
     block->original_begin = original_begin;
     block->valid_tokens = valid_tokens;
-    block->layers.resize(config_.n_layer);
     const size_t k_bytes = multiply(valid_tokens, config_.packed_k_bytes_per_token);
     const size_t v_bytes = multiply(valid_tokens, config_.packed_v_bytes_per_token);
     for (uint32_t il = 0; il < config_.n_layer; ++il) {
@@ -115,18 +198,8 @@ bool HistoricalKvRawStore::reserve(
         auto & layer = block->layers[il];
         layer.packed_k.resize(k_bytes);
         layer.packed_v.resize(v_bytes);
-        layer.mean_k_sum.resize(config_.mean_k_elements);
-        block->payload_bytes = add(static_cast<size_t>(block->payload_bytes),
-                                   payload_bytes(layer.packed_k, layer.packed_v,
-                                                 layer.mean_k_sum));
-    }
-    uint64_t previous = allocated_payload_bytes_.load(std::memory_order_relaxed);
-    for (;;) {
-        if (block->payload_bytes > std::numeric_limits<uint64_t>::max() - previous)
-            throw std::overflow_error("historical KV aggregate payload size overflow");
-        if (allocated_payload_bytes_.compare_exchange_weak(
-                previous, previous + block->payload_bytes,
-                std::memory_order_relaxed, std::memory_order_relaxed)) break;
+        // resize only shrinks the logical range; capacity stays owned. This
+        // is how one worst-case reservation backs a short/non-aligned tail.
     }
     slot.block = std::move(block);
     return true;
@@ -436,7 +509,6 @@ HistoricalKvRawStore::release(const HistoricalKvRepository & repository,
     // reclaimer thread, outside all store locks. The slot remains unavailable
     // until that physical destruction is complete.
     retired.reset();
-    allocated_payload_bytes_.fetch_sub(bytes, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(slot.mu);
         slot.last_released = handle;
@@ -447,7 +519,7 @@ HistoricalKvRawStore::release(const HistoricalKvRepository & repository,
 }
 
 uint64_t HistoricalKvRawStore::allocated_payload_bytes() const noexcept {
-    return allocated_payload_bytes_.load(std::memory_order_relaxed);
+    return accounting_->bytes.load(std::memory_order_relaxed);
 }
 
 uint32_t HistoricalKvRawStore::capacity() const noexcept {

@@ -12,7 +12,7 @@ namespace {
 // The low three bits are the phase. The remaining bits count references.
 // Reserving is internal: it keeps an unpublished slot invisible while its
 // generation, immutable metadata, and release callback are installed.
-enum class Phase : uint64_t { Ready, Reserving, Writing, Live, Retired, Releasing };
+enum class Phase : uint64_t { Ready, Reserving, Writing, Live, Retired, Releasing, Reserved };
 constexpr uint64_t kPhaseMask = 7;
 constexpr uint64_t kRefOne = 8;
 constexpr uint64_t kMaxRefs = std::numeric_limits<uint64_t>::max() >> 3;
@@ -58,6 +58,7 @@ HistoricalKvLife public_life(Phase phase) {
         case Phase::Retired: return HistoricalKvLife::Retired;
         case Phase::Releasing: return HistoricalKvLife::Releasing;
         case Phase::Ready:
+        case Phase::Reserved: // Private entitlement; never emitted as a block.
         case Phase::Reserving: return HistoricalKvLife::Ready;
     }
     return HistoricalKvLife::Ready;
@@ -202,6 +203,113 @@ HistoricalKvRepository::HistoricalKvRepository(uint32_t capacity, uint64_t incar
 
 HistoricalKvRepository::~HistoricalKvRepository() { close(); }
 
+HistoricalKvRepository::Reservation::~Reservation() { reset(); }
+
+HistoricalKvRepository::Reservation::Reservation(Reservation && other) noexcept
+    : shared_(std::move(other.shared_)), handles_(std::move(other.handles_)),
+      consumed_(other.consumed_) {
+    other.consumed_ = 0;
+}
+
+HistoricalKvRepository::Reservation &
+HistoricalKvRepository::Reservation::operator=(Reservation && other) noexcept {
+    if (this != &other) {
+        reset();
+        shared_ = std::move(other.shared_);
+        handles_ = std::move(other.handles_);
+        consumed_ = other.consumed_;
+        other.consumed_ = 0;
+    }
+    return *this;
+}
+
+uint32_t HistoricalKvRepository::Reservation::remaining() const noexcept {
+    return shared_ ? static_cast<uint32_t>(handles_.size()) - consumed_ : 0;
+}
+
+std::optional<HistoricalKvHandle>
+HistoricalKvRepository::Reservation::next_handle() const noexcept {
+    return remaining() ? std::optional<HistoricalKvHandle>(handles_[consumed_]) : std::nullopt;
+}
+
+uint64_t HistoricalKvRepository::Reservation::repository_id() const noexcept {
+    return shared_ ? shared_->repository_id : 0;
+}
+
+void HistoricalKvRepository::Reservation::reset() noexcept {
+    if (shared_) {
+        for (size_t i = consumed_; i < handles_.size(); ++i) {
+            // No other owner can consume or retire a Reserved slot. Its
+            // generation was already advanced, so stale handles stay stale.
+            shared_->slots[handles_[i].slot].control.store(code(Phase::Ready), std::memory_order_release);
+        }
+    }
+    shared_.reset();
+    handles_.clear();
+    consumed_ = 0;
+}
+
+std::optional<HistoricalKvRepository::Reservation>
+HistoricalKvRepository::try_reserve_slots(uint32_t count) {
+    const auto shared = shared_;
+    if (count > shared->capacity || shared->closing.load(std::memory_order_acquire)) return std::nullopt;
+    Reservation reservation;
+    reservation.handles_.reserve(count); // All allocation precedes slot mutation.
+    reservation.shared_ = shared;
+    if (!count) return reservation;
+    const uint32_t start = shared->cursor.fetch_add(1, std::memory_order_relaxed);
+    for (uint32_t offset = 0; offset < shared->capacity; ++offset) {
+        const uint32_t index = static_cast<uint32_t>((uint64_t(start) + offset) % shared->capacity);
+        auto & slot = shared->slots[index];
+        uint64_t ready = code(Phase::Ready);
+        if (!slot.control.compare_exchange_strong(ready, code(Phase::Reserving),
+                std::memory_order_acq_rel, std::memory_order_acquire)) continue;
+        const uint64_t previous = slot.generation.load(std::memory_order_relaxed);
+        if (previous == std::numeric_limits<uint64_t>::max()) {
+            slot.control.store(code(Phase::Ready), std::memory_order_release);
+            continue;
+        }
+        const HistoricalKvHandle handle{shared->incarnation, index, previous + 1};
+        slot.generation.store(handle.generation, std::memory_order_release);
+        reservation.handles_.push_back(handle);
+        slot.control.store(code(Phase::Reserved), std::memory_order_release);
+        if (reservation.handles_.size() == count) {
+            // close() stops admission, including a reservation acquired while
+            // shutdown began. The local destructor returns all private slots.
+            if (shared->closing.load(std::memory_order_acquire)) return std::nullopt;
+            return reservation;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reserved_write(
+        Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
+        uint32_t valid_tokens, uint64_t birth_seq, uint64_t payload_bytes,
+        ReleaseCallback release) {
+    if (!release) throw std::invalid_argument("historical KV release callback is required");
+    const auto shared = shared_;
+    if (reservation.shared_.get() != shared.get() || !reservation.remaining() ||
+        !valid_tokens || original_begin > std::numeric_limits<uint64_t>::max() - valid_tokens ||
+        shared->closing.load(std::memory_order_acquire)) return std::nullopt;
+    const auto handle = reservation.handles_[reservation.consumed_];
+    auto & slot = shared->slots[handle.slot];
+    // Exclusive reservation ownership makes the metadata write race-free.
+    // Reserved is hidden from metadata readers, new leases and the policy.
+    slot.logical_id = logical_id;
+    slot.original_begin = original_begin;
+    slot.valid_tokens = valid_tokens;
+    slot.birth_seq = birth_seq;
+    slot.content_version = 1;
+    slot.payload_bytes = payload_bytes;
+    slot.last_use_seq.store(birth_seq, std::memory_order_relaxed);
+    slot.exec_refs.store(0, std::memory_order_relaxed);
+    slot.release = std::move(release);
+    ++reservation.consumed_;
+    slot.control.store(code(Phase::Writing, 1), std::memory_order_release);
+    return Lease(shared, handle, LeaseKind::Writer);
+}
+
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_write(
     uint64_t logical_id, uint64_t original_begin, uint32_t valid_tokens,
     uint64_t birth_seq, uint64_t payload_bytes, ReleaseCallback release) {
@@ -307,7 +415,8 @@ HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(HistoricalKv
             slot.release_busy.store(false, std::memory_order_release);
             return matching ? RetireResult::AlreadyRetired : RetireResult::Stale;
         }
-        return current == Phase::Ready ? RetireResult::Stale : RetireResult::Retry;
+        return current == Phase::Ready || current == Phase::Reserved
+            ? RetireResult::Stale : RetireResult::Retry;
     }
     Lease guard(shared, handle, LeaseKind::Read);
     if (!shared->matches(handle.slot, handle)) return RetireResult::Stale;
@@ -461,6 +570,10 @@ HistoricalKvRepository::RangeObservation HistoricalKvRepository::observe_range(
             // claim keeps a Releasing generation stable while observing it.
             auto & slot = shared->slots[index];
             const Phase observed = phase_of(slot.control.load(std::memory_order_acquire));
+            if (observed == Phase::Reserved) {
+                ++out.reserved;
+                continue;
+            }
             if (observed == Phase::Ready) {
                 const auto generation = slot.generation.load(std::memory_order_acquire);
                 if (generation != std::numeric_limits<uint64_t>::max() &&
