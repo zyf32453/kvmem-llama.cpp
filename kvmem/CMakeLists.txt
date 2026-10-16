@@ -9,6 +9,7 @@ if (WIN32 AND KVMEM_ENABLE_NVME)
 endif()
 
 add_library(kvmem
+    src/host/historical_kv_active_set.cpp
     src/host/historical_kv_gc.cpp
     src/host/historical_kv_policy_lru.cpp
     src/host/historical_kv_raw_store.cpp
@@ -46,11 +47,14 @@ endfunction()
 kvmem_add_test(backend_rebind_test)
 kvmem_add_test(kvmem_store_test)
 kvmem_add_test(kvmem_gc_test)
+kvmem_add_test(historical_kv_active_set_test)
 kvmem_add_test(historical_kv_gc_test)
+kvmem_add_test(historical_kv_legacy_raw_bridge_test)
 kvmem_add_test(historical_kv_policy_test)
 kvmem_add_test(historical_kv_raw_store_test)
 kvmem_add_test(historical_kv_repository_test)
 kvmem_add_test(pinned_kv_tier_test)
+kvmem_add_test(raw_kv_gc_release_test)
 if (WIN32)
     # nvme_kv_tier_test and kvmem_runtime_test drive real files through the POSIX
     # API (unistd.h), and raw_kv_store_test exercises the NVMe tier on /tmp

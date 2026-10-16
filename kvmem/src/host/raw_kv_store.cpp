@@ -13,6 +13,7 @@
 #include <cstring>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -105,6 +106,13 @@ void unpack_f16(const uint16_t * src, float * dst, size_t n) {
     }
 }
 
+void advance_written_prefix(uint32_t & prefix, uint32_t off, uint32_t take) {
+    // Offset zero starts a new write sequence. A tail written before the head
+    // is conservatively not credited, even if a later write fills the head.
+    if (off == 0) prefix = 0;
+    if (off <= prefix) prefix = std::max(prefix, off + take);
+}
+
 } // namespace
 
 RawKvStore::RawKvStore(RawKvStoreConfig cfg) : cfg_(std::move(cfg)) {
@@ -192,6 +200,23 @@ void RawKvStore::ensure_blocks(uint32_t block_count) {
     }
 }
 
+void RawKvStore::require_writable_block(uint32_t block_id) const {
+    // Caller holds mu_. A sealed or released positional block may not be
+    // silently repopulated by the legacy pos / block_tokens write path.
+    if (blocks_[block_id].gc_state != BlockRaw::GcState::None)
+        throw std::runtime_error("historical KV block is sealed for GC");
+}
+
+bool RawKvStore::has_gc_bound_blocks() const {
+    // Caller holds mu_. Released tombstones contain no payload and may be
+    // removed by a quiescent clear/truncate/restore.
+    for (const auto & block : blocks_) {
+        if (block.gc_state == BlockRaw::GcState::Sealed ||
+            block.gc_state == BlockRaw::GcState::Releasing) return true;
+    }
+    return false;
+}
+
 void RawKvStore::capture_mean_f16(LayerBlk & lb) const {
     if (!k_is_f16() || lb.k.empty() || cfg_.n_embd_k == 0) {
         return;
@@ -210,6 +235,7 @@ void RawKvStore::capture_mean_f16(LayerBlk & lb) const {
         }
     }
     lb.mean_tokens = nt;
+    lb.mean_prefix_tokens = lb.k_prefix_tokens;
 }
 
 void RawKvStore::add_mean_f32(LayerBlk & lb, uint32_t off, uint32_t take,
@@ -231,6 +257,7 @@ void RawKvStore::add_mean_f32(LayerBlk & lb, uint32_t off, uint32_t take,
     }
     const uint32_t nt = off == 0 ? take : std::max(lb.mean_tokens, off + take);
     lb.mean_tokens = nt;
+    advance_written_prefix(lb.mean_prefix_tokens, off, take);
 }
 
 void RawKvStore::enqueue_flush(uint32_t key, std::vector<uint8_t> && data,
@@ -436,6 +463,7 @@ void RawKvStore::write_layer_tokens(uint32_t pos0, uint32_t n, uint32_t il,
         const uint32_t off = pos % bt;
         const uint32_t take = std::min(n - done, bt - off);
         ensure_blocks(bid + 1);
+        require_writable_block(bid);
         if (k) {
             cv_.wait(lk, [&] { return !blocks_[bid].layers[il].k_flushing; });
         }
@@ -459,11 +487,13 @@ void RawKvStore::write_layer_tokens(uint32_t pos0, uint32_t n, uint32_t il,
                      reinterpret_cast<uint16_t *>(
                              lb.k.data() + static_cast<size_t>(off) * static_cast<size_t>(row)),
                      static_cast<size_t>(take) * cfg_.n_embd_k);
+            advance_written_prefix(lb.k_prefix_tokens, off, take);
             add_mean_f32(lb, off, take, k + done * cfg_.n_embd_k);
         }
         if (v) {
             lb.v_gpu.clear();
             lb.v_gpu.shrink_to_fit();
+            lb.v_gpu_prefix_tokens = 0;
             if (lb.v_on_nvme && lb.v_gpu_fmt) {
                 lb.v_on_nvme = false;
             }
@@ -480,6 +510,7 @@ void RawKvStore::write_layer_tokens(uint32_t pos0, uint32_t n, uint32_t il,
             pack_f32(v + done * cfg_.n_embd_v,
                      lb.v.data() + off * cfg_.n_embd_v,
                      static_cast<size_t>(take) * cfg_.n_embd_v);
+            advance_written_prefix(lb.v_prefix_tokens, off, take);
             lb.v_gpu_fmt = false;
         }
         lb.n_tokens = std::max(lb.n_tokens, off + take);
@@ -503,6 +534,7 @@ void RawKvStore::write_layer_tokens_f16(uint32_t pos0, uint32_t n, uint32_t il,
         const uint32_t off = pos % bt;
         const uint32_t take = std::min(n - done, bt - off);
         ensure_blocks(bid + 1);
+        require_writable_block(bid);
         if (k) {
             cv_.wait(lk, [&] { return !blocks_[bid].layers[il].k_flushing; });
         }
@@ -525,10 +557,12 @@ void RawKvStore::write_layer_tokens_f16(uint32_t pos0, uint32_t n, uint32_t il,
             std::memcpy(lb.k.data() + static_cast<size_t>(off) * static_cast<size_t>(row),
                         k + done * cfg_.n_embd_k,
                         static_cast<size_t>(take) * static_cast<size_t>(row));
+            advance_written_prefix(lb.k_prefix_tokens, off, take);
         }
         if (v) {
             lb.v_gpu.clear();
             lb.v_gpu.shrink_to_fit();
+            lb.v_gpu_prefix_tokens = 0;
             if (lb.v_on_nvme && lb.v_gpu_fmt) {
                 lb.v_on_nvme = false;
             }
@@ -545,6 +579,7 @@ void RawKvStore::write_layer_tokens_f16(uint32_t pos0, uint32_t n, uint32_t il,
             std::memcpy(lb.v.data() + off * cfg_.n_embd_v,
                         v + done * cfg_.n_embd_v,
                         static_cast<size_t>(take) * cfg_.n_embd_v * sizeof(uint16_t));
+            advance_written_prefix(lb.v_prefix_tokens, off, take);
             lb.v_gpu_fmt = false;
         }
         lb.n_tokens = std::max(lb.n_tokens, off + take);
@@ -573,6 +608,7 @@ void RawKvStore::write_layer_k_rows(uint32_t pos0, uint32_t n, uint32_t il,
         const uint32_t off = pos % bt;
         const uint32_t take = std::min(n - done, bt - off);
         ensure_blocks(bid + 1);
+        require_writable_block(bid);
         cv_.wait(lk, [&] { return !blocks_[bid].layers[il].k_flushing; });
         LayerBlk & lb = blocks_[bid].layers[il];
         const size_t need = static_cast<size_t>(bt) * static_cast<size_t>(row);
@@ -588,8 +624,15 @@ void RawKvStore::write_layer_k_rows(uint32_t pos0, uint32_t n, uint32_t il,
         std::memcpy(lb.k.data() + static_cast<size_t>(off) * static_cast<size_t>(row),
                     k + static_cast<size_t>(done) * static_cast<size_t>(row),
                     static_cast<size_t>(take) * static_cast<size_t>(row));
+        advance_written_prefix(lb.k_prefix_tokens, off, take);
         if (k_f32) {
             add_mean_f32(lb, off, take, k_f32 + done * cfg_.n_embd_k);
+        } else if (off == 0) {
+            // New raw-K content without a matching FP32 statistic invalidates
+            // any mean left by an older write sequence.
+            lb.k_sum.clear();
+            lb.mean_tokens = 0;
+            lb.mean_prefix_tokens = 0;
         }
         lb.n_tokens = std::max(lb.n_tokens, off + take);
         maybe_flush_k(bid, il);
@@ -613,9 +656,11 @@ void RawKvStore::write_layer_v_gpu(uint32_t pos0, uint32_t n, uint32_t il,
         const uint32_t off = pos % bt;
         const uint32_t take = std::min(n - done, bt - off);
         ensure_blocks(bid + 1);
+        require_writable_block(bid);
         cv_.wait(lk, [&] { return !blocks_[bid].layers[il].v_flushing; });
         LayerBlk & lb = blocks_[bid].layers[il];
         lb.v.clear();
+        lb.v_prefix_tokens = 0;
         const size_t need = static_cast<size_t>(bt) * static_cast<size_t>(row);
         const size_t nbytes = static_cast<size_t>(take) * static_cast<size_t>(row);
         const uint8_t * src = v + static_cast<size_t>(done) * static_cast<size_t>(row);
@@ -641,6 +686,7 @@ void RawKvStore::write_layer_v_gpu(uint32_t pos0, uint32_t n, uint32_t il,
         }
         lb.v_gpu_fmt = true;
         lb.v_gpu_tokens = std::max(lb.v_gpu_tokens, off + take);
+        advance_written_prefix(lb.v_gpu_prefix_tokens, off, take);
         lb.n_tokens = std::max(lb.n_tokens, off + take);
         maybe_flush_v(bid, il);
         done += take;
@@ -663,6 +709,7 @@ void RawKvStore::write_layer_k_gpu(uint32_t pos0, uint32_t n, uint32_t il,
         const uint32_t off = pos % bt;
         const uint32_t take = std::min(n - done, bt - off);
         ensure_blocks(bid + 1);
+        require_writable_block(bid);
         LayerBlk & lb = blocks_[bid].layers[il];
         const size_t need = static_cast<size_t>(bt) * static_cast<size_t>(row);
         const size_t nbytes = static_cast<size_t>(take) * static_cast<size_t>(row);
@@ -677,6 +724,7 @@ void RawKvStore::write_layer_k_gpu(uint32_t pos0, uint32_t n, uint32_t il,
         }
         lb.k_gpu_fmt = true;
         lb.k_gpu_tokens = std::max(lb.k_gpu_tokens, off + take);
+        advance_written_prefix(lb.k_gpu_prefix_tokens, off, take);
         lb.n_tokens = std::max(lb.n_tokens, off + take);
         done += take;
     }
@@ -697,6 +745,7 @@ void RawKvStore::write_layer_mean_k(uint32_t pos0, uint32_t n, uint32_t il,
         const uint32_t off = pos % bt;
         const uint32_t take = std::min(n - done, bt - off);
         ensure_blocks(bid + 1);
+        require_writable_block(bid);
         LayerBlk & lb = blocks_[bid].layers[il];
         add_mean_f32(lb, off, take, k + done * cfg_.n_embd_k);
         lb.n_tokens = std::max(lb.n_tokens, off + take);
@@ -716,6 +765,7 @@ void RawKvStore::write_layer_mean_sum(uint32_t pos0, uint32_t n, uint32_t il,
     const uint32_t off = pos0 % bt;
     const uint32_t take = std::min(n, bt - off);
     ensure_blocks(bid + 1);
+    require_writable_block(bid);
     LayerBlk & lb = blocks_[bid].layers[il];
     if (lb.k_sum.size() != cfg_.n_embd_k) {
         lb.k_sum.assign(cfg_.n_embd_k, 0.0f);
@@ -728,6 +778,175 @@ void RawKvStore::write_layer_mean_sum(uint32_t pos0, uint32_t n, uint32_t il,
     }
     lb.n_tokens = std::max(lb.n_tokens, off + take);
     lb.mean_tokens = off == 0 ? take : std::max(lb.mean_tokens, off + take);
+    advance_written_prefix(lb.mean_prefix_tokens, off, take);
+}
+
+bool RawKvStore::seal_for_historical_gc(
+    const HistoricalKvRepository & repository,
+    const HistoricalKvRepository::Lease & writer, HistoricalKvHandle handle,
+    uint32_t block_id, uint64_t original_begin, uint32_t valid_tokens) {
+    if (!repository.owns_writer(writer) ||
+        writer.handle().incarnation != handle.incarnation ||
+        writer.handle().slot != handle.slot ||
+        writer.handle().generation != handle.generation ||
+        !handle.incarnation || !handle.generation || cfg_.block_tokens == 0 ||
+        valid_tokens != cfg_.block_tokens ||
+        original_begin != uint64_t(block_id) * cfg_.block_tokens ||
+        original_begin > std::numeric_limits<uint32_t>::max() ||
+        uint64_t(valid_tokens - 1) >
+            std::numeric_limits<uint32_t>::max() - original_begin ||
+        cfg_.nvme_bytes != 0 || nvme_enabled()) return false;
+
+    // A Writer lease keeps this generation's metadata stable even if policy
+    // retires it during an incremental write. The old writer may finish and
+    // seal, then publish_write() correctly refuses to resurrect it.
+    const auto meta = repository.inspect(handle);
+    if (!meta || meta->original_begin != original_begin ||
+        meta->valid_tokens != valid_tokens ||
+        (meta->life != HistoricalKvLife::Writing &&
+         meta->life != HistoricalKvLife::Retired)) return false;
+
+    std::lock_guard<std::mutex> lk(mu_);
+    if (block_id >= blocks_.size() || !q_.empty() || inflight_ != 0) return false;
+    BlockRaw & block = blocks_[block_id];
+    if (block.gc_state != BlockRaw::GcState::None ||
+        block.layers.size() != cfg_.n_layer) return false;
+    const auto has_full_bytes = [&](size_t available, uint64_t row_bytes) {
+        return row_bytes <= std::numeric_limits<size_t>::max() /
+                                cfg_.block_tokens &&
+               available >= static_cast<size_t>(row_bytes) * cfg_.block_tokens;
+    };
+    bool populated = false;
+    for (const auto & layer : block.layers) {
+        if (layer.k_on_nvme || layer.v_on_nvme ||
+            layer.k_flushing || layer.v_flushing ||
+            layer.n_tokens != cfg_.block_tokens ||
+            (layer.k_gpu_tokens && layer.k_gpu_tokens != cfg_.block_tokens) ||
+            (layer.v_gpu_tokens && layer.v_gpu_tokens != cfg_.block_tokens) ||
+            (layer.mean_tokens && layer.mean_tokens != cfg_.block_tokens) ||
+            (!layer.k_sum.empty() &&
+             layer.mean_prefix_tokens != cfg_.block_tokens))
+            return false;
+        const bool k_ready = cfg_.k_gpu_row_bytes
+            ? layer.k_gpu_fmt && layer.k_gpu_tokens == cfg_.block_tokens &&
+              layer.k_gpu_prefix_tokens == cfg_.block_tokens &&
+              has_full_bytes(layer.k_gpu.size(), cfg_.k_gpu_row_bytes)
+            : (cfg_.n_embd_k == 0 ||
+               (layer.k_prefix_tokens == cfg_.block_tokens &&
+                has_full_bytes(layer.k.size(), k_row_bytes())) ||
+               (layer.mean_tokens == cfg_.block_tokens &&
+                layer.mean_prefix_tokens == cfg_.block_tokens &&
+                layer.k_sum.size() == cfg_.n_embd_k));
+        const bool v_ready = cfg_.v_gpu_row_bytes
+            ? layer.v_gpu_fmt && layer.v_gpu_tokens == cfg_.block_tokens &&
+              layer.v_gpu_prefix_tokens == cfg_.block_tokens &&
+              has_full_bytes(layer.v_gpu.size(), cfg_.v_gpu_row_bytes)
+            : (cfg_.n_embd_v == 0 ||
+               (layer.v_prefix_tokens == cfg_.block_tokens &&
+                layer.v.size() >= uint64_t(cfg_.block_tokens) * cfg_.n_embd_v));
+        if (!k_ready || !v_ready) return false;
+        const bool has_data = !layer.k.empty() || !layer.v.empty() ||
+                              !layer.k_gpu.empty() || !layer.v_gpu.empty() ||
+                              !layer.k_sum.empty();
+        populated |= has_data;
+    }
+    if (!populated) return false;
+    block.gc_handle = handle;
+    block.gc_repository_id = repository.repository_id();
+    block.gc_state = BlockRaw::GcState::Sealed;
+    return true;
+}
+
+RawKvStore::HistoricalGcReleaseResult RawKvStore::release_for_historical_gc(
+    const HistoricalKvRepository & repository,
+    HistoricalKvHandle handle, uint32_t block_id) noexcept {
+    if (!handle.incarnation || !handle.generation)
+        return {HistoricalGcReleaseCode::Stale, 0};
+    if (cfg_.nvme_bytes != 0 || nvme_enabled())
+        return {HistoricalGcReleaseCode::Unsupported, 0};
+
+    // Allocate only the small detached layer directory before taking mu_.
+    // All large payload allocations move out under the lock and die afterward.
+    std::vector<LayerBlk> detached;
+    try {
+        detached.resize(cfg_.n_layer);
+    } catch (...) {
+        return {HistoricalGcReleaseCode::Busy, 0};
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (block_id >= blocks_.size())
+            return {HistoricalGcReleaseCode::Stale, 0};
+        BlockRaw & block = blocks_[block_id];
+        if (block.gc_repository_id != repository.repository_id() ||
+            block.gc_handle.incarnation != handle.incarnation ||
+            block.gc_handle.slot != handle.slot ||
+            block.gc_handle.generation != handle.generation)
+            return {HistoricalGcReleaseCode::Stale, 0};
+        if (!repository.is_releasing(handle))
+            return {HistoricalGcReleaseCode::Busy, 0};
+        if (block.gc_state == BlockRaw::GcState::Released)
+            return {HistoricalGcReleaseCode::AlreadyReleased, 0};
+        if (block.gc_state == BlockRaw::GcState::Releasing)
+            return {HistoricalGcReleaseCode::Busy, 0};
+        if (block.gc_state != BlockRaw::GcState::Sealed ||
+            block.layers.size() != cfg_.n_layer || !q_.empty() || inflight_ != 0)
+            return {HistoricalGcReleaseCode::Unsupported, 0};
+        for (uint32_t il = 0; il < cfg_.n_layer; ++il) {
+            LayerBlk & layer = block.layers[il];
+            if (layer.k_on_nvme || layer.v_on_nvme ||
+                layer.k_flushing || layer.v_flushing)
+                return {HistoricalGcReleaseCode::Unsupported, 0};
+        }
+        for (uint32_t il = 0; il < cfg_.n_layer; ++il) {
+            LayerBlk & layer = block.layers[il];
+            LayerBlk & out = detached[il];
+            out.k.swap(layer.k);
+            out.v.swap(layer.v);
+            out.k_gpu.swap(layer.k_gpu);
+            out.v_gpu.swap(layer.v_gpu);
+            out.k_sum.swap(layer.k_sum);
+            layer.n_tokens = 0;
+            layer.k_gpu_tokens = 0;
+            layer.v_gpu_tokens = 0;
+            layer.mean_tokens = 0;
+            layer.k_prefix_tokens = 0;
+            layer.v_prefix_tokens = 0;
+            layer.k_gpu_prefix_tokens = 0;
+            layer.v_gpu_prefix_tokens = 0;
+            layer.mean_prefix_tokens = 0;
+            layer.k_gpu_fmt = false;
+            layer.v_gpu_fmt = false;
+        }
+        block.gc_state = BlockRaw::GcState::Releasing;
+    }
+
+    uint64_t bytes = 0;
+    for (const LayerBlk & layer : detached) {
+        bytes += layer.k.capacity() + layer.v.capacity() * sizeof(uint16_t) +
+                 layer.k_gpu.capacity() + layer.v_gpu.capacity() +
+                 layer.k_sum.capacity() * sizeof(float);
+    }
+    // Destruction is deliberately outside mu_; the tombstone prevents any
+    // positional writer from repopulating this block during physical free.
+    {
+        std::vector<LayerBlk> garbage;
+        garbage.swap(detached);
+    }
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (block_id < blocks_.size()) {
+            BlockRaw & block = blocks_[block_id];
+            if (block.gc_repository_id == repository.repository_id() &&
+                block.gc_handle.incarnation == handle.incarnation &&
+                block.gc_handle.slot == handle.slot &&
+                block.gc_handle.generation == handle.generation &&
+                block.gc_state == BlockRaw::GcState::Releasing)
+                block.gc_state = BlockRaw::GcState::Released;
+        }
+    }
+    return {HistoricalGcReleaseCode::Released, bytes};
 }
 
 bool RawKvStore::has_block(uint32_t block_id) const {
@@ -1096,6 +1315,8 @@ size_t RawKvStore::bytes_v() const {
 void RawKvStore::truncate_to(uint32_t token_pos) {
     wait_writes();
     std::lock_guard<std::mutex> lk(mu_);
+    if (has_gc_bound_blocks())
+        throw std::runtime_error("cannot truncate a historical GC-bound raw store");
     if (token_pos == 0 || cfg_.block_tokens == 0) {
         blocks_.clear();
         return;
@@ -1111,9 +1332,15 @@ void RawKvStore::truncate_to(uint32_t token_pos) {
             lb.n_tokens = std::min(lb.n_tokens, tail);
             lb.k_gpu_tokens = std::min(lb.k_gpu_tokens, tail);
             lb.v_gpu_tokens = std::min(lb.v_gpu_tokens, tail);
+            lb.k_prefix_tokens = std::min(lb.k_prefix_tokens, tail);
+            lb.v_prefix_tokens = std::min(lb.v_prefix_tokens, tail);
+            lb.k_gpu_prefix_tokens = std::min(lb.k_gpu_prefix_tokens, tail);
+            lb.v_gpu_prefix_tokens = std::min(lb.v_gpu_prefix_tokens, tail);
+            lb.mean_prefix_tokens = std::min(lb.mean_prefix_tokens, tail);
             if (lb.mean_tokens > tail) {
                 lb.k_sum.clear();
                 lb.mean_tokens = 0;
+                lb.mean_prefix_tokens = 0;
                 if (k_is_f16()) {
                     if (lb.k.empty() && lb.k_on_nvme) {
                         lb.k.resize(k_slot_bytes());
@@ -1130,11 +1357,15 @@ void RawKvStore::truncate_to(uint32_t token_pos) {
 void RawKvStore::invalidate_packed_from(uint32_t token_pos) {
     wait_writes();
     std::lock_guard<std::mutex> lk(mu_);
+    if (has_gc_bound_blocks())
+        throw std::runtime_error("cannot invalidate a historical GC-bound raw store");
     for (uint32_t bid = token_pos / cfg_.block_tokens; bid < blocks_.size(); ++bid) {
         const uint32_t keep = bid == token_pos / cfg_.block_tokens ? token_pos % cfg_.block_tokens : 0;
         for (auto & lb : blocks_[bid].layers) {
             lb.k_gpu_tokens = std::min(lb.k_gpu_tokens, keep);
             lb.v_gpu_tokens = std::min(lb.v_gpu_tokens, keep);
+            lb.k_gpu_prefix_tokens = std::min(lb.k_gpu_prefix_tokens, keep);
+            lb.v_gpu_prefix_tokens = std::min(lb.v_gpu_prefix_tokens, keep);
         }
     }
 }
@@ -1162,10 +1393,13 @@ void RawKvStore::restore_mean_checkpoint(uint32_t token_pos, const std::vector<f
     if (state.size() != cfg_.n_layer * stride) throw std::runtime_error("invalid mean-K checkpoint");
     const uint32_t bid = token_pos / cfg_.block_tokens;
     ensure_blocks(bid + 1);
+    require_writable_block(bid);
     for (uint32_t il = 0; il < cfg_.n_layer; ++il) {
         auto & lb = blocks_[bid].layers[il];
         const float * src = state.data() + il * stride;
         lb.mean_tokens = (uint32_t) src[0];
+        // Checkpoint format does not carry a write-coverage proof.
+        lb.mean_prefix_tokens = 0;
         if (lb.mean_tokens > 0) {
             lb.k_sum.assign(src + 1, src + stride);
         } else {
@@ -1177,6 +1411,8 @@ void RawKvStore::restore_mean_checkpoint(uint32_t token_pos, const std::vector<f
 void RawKvStore::clear() {
     wait_writes();
     std::lock_guard<std::mutex> lk(mu_);
+    if (has_gc_bound_blocks())
+        throw std::runtime_error("cannot clear a historical GC-bound raw store");
     blocks_.clear();
     nvme_k_bytes_ = 0;
     nvme_v_bytes_ = 0;
@@ -1210,6 +1446,8 @@ uint64_t RawKvStore::capacity_bytes(uint32_t tokens, uint32_t populated_layers) 
 void RawKvStore::snapshot_buffers(std::vector<SnapshotBuffer> & buffers) {
     wait_writes();
     std::lock_guard<std::mutex> lk(mu_);
+    if (has_gc_bound_blocks())
+        throw std::runtime_error("cannot snapshot a historical GC-bound raw store");
     if (nvme_) throw std::runtime_error("session snapshots require RAM raw stores");
     for (auto & b : blocks_) for (auto & l : b.layers) {
         // All lengths, token counts, formats and runtime identity stay in RAM.
@@ -1225,6 +1463,8 @@ void RawKvStore::snapshot_buffers(std::vector<SnapshotBuffer> & buffers) {
 void RawKvStore::snapshot_write(SnapshotWriter & out) {
     wait_writes();
     std::lock_guard<std::mutex> lk(mu_);
+    if (has_gc_bound_blocks())
+        throw std::runtime_error("cannot snapshot a historical GC-bound raw store");
     if (nvme_) throw std::runtime_error("session snapshots require RAM raw stores");
     out.scalar(uint32_t(0x31564b52));
     out.scalar(cfg_.n_layer); out.scalar(cfg_.n_embd_k); out.scalar(cfg_.n_embd_v);
@@ -1283,6 +1523,8 @@ void RawKvStore::snapshot_read(SnapshotReader & in, uint32_t max_blocks) {
     }
     wait_writes();
     std::lock_guard<std::mutex> lk(mu_);
+    if (has_gc_bound_blocks())
+        throw std::runtime_error("cannot restore over a historical GC-bound raw store");
     blocks_.swap(blocks);
 }
 

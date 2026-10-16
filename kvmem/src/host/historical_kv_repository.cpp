@@ -29,6 +29,7 @@ constexpr uint32_t kReadable = (1u << static_cast<unsigned>(Phase::Writing)) |
                                (1u << static_cast<unsigned>(Phase::Retired));
 
 std::atomic<uint64_t> next_incarnation{1};
+std::atomic<uint64_t> next_repository_id{1};
 
 uint64_t allocate_incarnation() {
     uint64_t current = next_incarnation.load(std::memory_order_relaxed);
@@ -36,6 +37,16 @@ uint64_t allocate_incarnation() {
         if (current == std::numeric_limits<uint64_t>::max())
             throw std::overflow_error("historical KV incarnation exhausted");
         if (next_incarnation.compare_exchange_weak(current, current + 1,
+                std::memory_order_acq_rel, std::memory_order_relaxed)) return current;
+    }
+}
+
+uint64_t allocate_repository_id() {
+    uint64_t current = next_repository_id.load(std::memory_order_relaxed);
+    for (;;) {
+        if (current == std::numeric_limits<uint64_t>::max())
+            throw std::overflow_error("historical KV repository IDs exhausted");
+        if (next_repository_id.compare_exchange_weak(current, current + 1,
                 std::memory_order_acq_rel, std::memory_order_relaxed)) return current;
     }
 }
@@ -70,7 +81,9 @@ struct HistoricalKvRepository::Shared {
         ReleaseCallback release;
     };
 
-    Shared(uint32_t n, uint64_t session) : capacity(n), incarnation(session), slots(new Slot[n]) {}
+    Shared(uint32_t n, uint64_t session)
+        : capacity(n), incarnation(session), repository_id(allocate_repository_id()),
+          slots(new Slot[n]) {}
 
     bool try_pin(uint32_t index, uint32_t phases) const {
         auto & control = slots[index].control;
@@ -117,6 +130,7 @@ struct HistoricalKvRepository::Shared {
 
     const uint32_t capacity;
     const uint64_t incarnation;
+    const uint64_t repository_id;
     std::unique_ptr<Slot[]> slots;
     std::atomic<uint32_t> cursor{0};
     std::atomic<bool> closing{false};
@@ -373,6 +387,25 @@ bool HistoricalKvRepository::mark_executed(const Lease & admitted, uint64_t sequ
                                       std::memory_order_relaxed)) return true;
     }
     return false;
+}
+
+bool HistoricalKvRepository::owns_writer(const Lease & writer) const noexcept {
+    return writer.shared_.get() == shared_.get() && writer.kind_ == LeaseKind::Writer;
+}
+
+uint64_t HistoricalKvRepository::repository_id() const noexcept {
+    return shared_->repository_id;
+}
+
+bool HistoricalKvRepository::is_releasing(HistoricalKvHandle handle) const noexcept {
+    const auto shared = shared_;
+    if (handle.incarnation != shared->incarnation ||
+        handle.slot >= shared->capacity || handle.generation == 0) return false;
+    const auto & slot = shared->slots[handle.slot];
+    // The release owner enters this phase only after every old lease has
+    // drained. Once it publishes Ready, the bound payload is already gone.
+    return phase_of(slot.control.load(std::memory_order_acquire)) == Phase::Releasing &&
+           slot.generation.load(std::memory_order_acquire) == handle.generation;
 }
 
 std::optional<HistoricalKvBlockMeta> HistoricalKvRepository::inspect(

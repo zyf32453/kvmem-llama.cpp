@@ -17,6 +17,8 @@
 #include <thread>
 #include <vector>
 
+#include "kvmem/historical_kv_repository.hpp"
+
 namespace kvmem {
 
 class NvmeKvTier;
@@ -39,6 +41,16 @@ struct RawKvStoreConfig {
 
 class RawKvStore {
 public:
+    enum class HistoricalGcReleaseCode {
+        Released, AlreadyReleased, Busy, Stale, Unsupported
+    };
+    struct HistoricalGcReleaseResult {
+        HistoricalGcReleaseCode code = HistoricalGcReleaseCode::Stale;
+        // Capacity of K/V/mean vectors destroyed by this call. Persistent
+        // block and layer metadata, allocator overhead, and RSS are excluded.
+        uint64_t physical_payload_bytes = 0;
+    };
+
     explicit RawKvStore(RawKvStoreConfig cfg);
     ~RawKvStore();
 
@@ -103,12 +115,43 @@ public:
     std::vector<float> mean_checkpoint(uint32_t token_pos) const;
     void restore_mean_checkpoint(uint32_t token_pos, const std::vector<float> & state);
 
+    // Restricted legacy-store bridge for a repository-owned, full positional
+    // block. Every configured layer must have full K/V payload (mean-only K
+    // is accepted only when packed K is not configured). The writer must have
+    // finished all incremental writes before seal.
+    // Only RAM stores are accepted: async NVMe jobs have no generation identity
+    // in this legacy format. Partial/nonaligned blocks and shared positional
+    // blocks require the new handle-addressed store instead. In particular,
+    // a writer cancelled while still partial cannot be reclaimed through this
+    // bridge; policy deletion of such blocks must not use this callback.
+    // Truncate, clear, and snapshots reject blocks while sealed/releasing.
+    bool seal_for_historical_gc(const HistoricalKvRepository & repository,
+                                const HistoricalKvRepository::Lease & writer,
+                                HistoricalKvHandle handle, uint32_t block_id,
+                                uint64_t original_begin, uint32_t valid_tokens);
+    // Call only from the repository's background release callback. The
+    // repository must own this binding and be in Releasing (all old leases
+    // drained). A stale handle or another repository with the same incarnation
+    // cannot release a differently bound generation. Large vector destructors
+    // run after mu_ is unlocked; no NVMe extent or GPU page is released here.
+    HistoricalGcReleaseResult release_for_historical_gc(
+        const HistoricalKvRepository & repository,
+        HistoricalKvHandle handle, uint32_t block_id) noexcept;
+
 private:
     struct LayerBlk {
         uint32_t n_tokens = 0;
         uint32_t k_gpu_tokens = 0;
         uint32_t v_gpu_tokens = 0;
         uint32_t mean_tokens = 0;
+        // Conservative proof of contiguous writes from token offset zero.
+        // Unlike n_tokens=max(off+take), these cannot mistake a tail-only
+        // write for a complete historical block.
+        uint32_t k_prefix_tokens = 0;
+        uint32_t v_prefix_tokens = 0;
+        uint32_t k_gpu_prefix_tokens = 0;
+        uint32_t v_gpu_prefix_tokens = 0;
+        uint32_t mean_prefix_tokens = 0;
         std::vector<uint8_t> k;
         std::vector<uint16_t> v;
         std::vector<uint8_t> k_gpu;
@@ -123,6 +166,10 @@ private:
     };
     struct BlockRaw {
         std::vector<LayerBlk> layers;
+        enum class GcState : uint8_t { None, Sealed, Releasing, Released };
+        HistoricalKvHandle gc_handle{};
+        uint64_t gc_repository_id = 0;
+        GcState gc_state = GcState::None;
     };
 
     uint32_t nvme_key(uint32_t block_id, uint32_t il, bool is_v) const;
@@ -140,6 +187,8 @@ private:
     bool load_v_gpu_nvme(uint32_t block_id, uint32_t il, uint8_t * dst) const;
     void enqueue_flush(uint32_t key, std::vector<uint8_t> && data, uint64_t bytes,
                        uint32_t block_id, uint32_t il, bool is_v);
+    void require_writable_block(uint32_t block_id) const;
+    bool has_gc_bound_blocks() const;
     void io_loop();
     bool io_sync_inline() const;
 

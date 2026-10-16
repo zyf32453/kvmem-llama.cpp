@@ -85,6 +85,15 @@ public:
     // Records an execution already admitted before retire_commit. Such an
     // operation may finish after retirement without reopening new admission.
     bool mark_executed(const Lease & admitted, uint64_t sequence);
+    // A callback must not accept a writer from another repository even if a
+    // caller deliberately reused the same incarnation, slot and generation.
+    bool owns_writer(const Lease & writer) const noexcept;
+    // Process-unique repository identity, independent of caller-controlled
+    // incarnation values. Storage bindings use this to reject a foreign GC.
+    uint64_t repository_id() const noexcept;
+    // Only Releasing has closed all lease admission and drained old refs.
+    // Storage callbacks may release physical payload only in this phase.
+    bool is_releasing(HistoricalKvHandle handle) const noexcept;
     std::optional<HistoricalKvBlockMeta> inspect(HistoricalKvHandle handle) const;
     // Bounded, individually guarded observations; not a global atomic instant.
     // `active` counts repository ExecLease objects, not device work; the

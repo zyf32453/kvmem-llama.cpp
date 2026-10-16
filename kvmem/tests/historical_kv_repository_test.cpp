@@ -257,6 +257,42 @@ static void test_close_blocks_new_work_but_old_lease_can_finish() {
           "close prevented draining existing work");
 }
 
+static void test_repository_identity_and_releasing_authority() {
+    HistoricalKvRepository first(1, 70);
+    HistoricalKvRepository second(1, 70);
+    bool callback_saw_releasing = false;
+    auto writer = first.begin_write(1, 0, 1, 1, 8,
+        [&](const HistoricalKvHandle & handle) {
+            callback_saw_releasing = first.is_releasing(handle);
+            return callback_saw_releasing;
+        });
+    auto foreign = second.begin_write(1, 0, 1, 1, 8,
+        [](const HistoricalKvHandle &) { return true; });
+    check(writer && foreign &&
+          writer->handle().incarnation == foreign->handle().incarnation &&
+          writer->handle().slot == foreign->handle().slot &&
+          writer->handle().generation == foreign->handle().generation,
+          "explicit equal incarnations did not reproduce a handle collision");
+    check(first.repository_id() != second.repository_id() &&
+          first.owns_writer(*writer) && !first.owns_writer(*foreign) &&
+          second.owns_writer(*foreign) && !second.owns_writer(*writer),
+          "repository identity accepted a foreign writer with the same handle");
+    const auto handle = writer->handle();
+    check(!first.is_releasing(handle), "Writing was mistaken for Releasing");
+    check(first.retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          !first.is_releasing(handle),
+          "Retired with an old writer was mistaken for Releasing");
+    writer->reset();
+    check(first.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          callback_saw_releasing && !first.is_releasing(handle),
+          "physical release did not occur only in the Releasing phase");
+    check(second.retire(foreign->handle()) == HistoricalKvRepository::RetireResult::Committed,
+          "foreign repository cleanup could not retire its writer");
+    foreign->reset();
+    check(second.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "foreign repository cleanup could not release its slot");
+}
+
 int main() {
     test_retire_closes_new_entry_but_keeps_old_reader();
     test_writing_retire_cannot_resurrect();
@@ -265,5 +301,6 @@ int main() {
     test_default_incarnation_is_unique();
     test_bounded_observation_counts_each_slot_once();
     test_close_blocks_new_work_but_old_lease_can_finish();
+    test_repository_identity_and_releasing_authority();
     std::cout << "historical KV repository checks passed\n";
 }
