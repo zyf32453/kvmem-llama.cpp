@@ -24,6 +24,10 @@
 
 生产接线的首个受限配置应是单会话、单 lane、文本、RAM 权威存储、MTP 关闭且所需注意力层与 packed V 均明确可用。会话对象需携带 `block_id → (handle, original span)`，异步 harvest job 必须在提交时捕获 exact handle 和 writer lease；完成时不能按 `pos` 查询可能已经复用的块。当前 stage-out 可能从 offset 0 重写增长中的 partial block，接线时要只提交未写的后缀。`valid_tokens` 在预约时固定，因此尾块增长/退休切换、非对齐新 span、请求级容量预约也还需要设计和验证。`score_retrieval` 在选块前读取 Mean-K，须先取得 Read 许可；stage-in/prefetch、同 query、全驻留、keep-selected 及压力换块都要取得新的执行或搬运许可，旧许可保留到 GPU/异步 D2H 真正完成。
 
+### 本阶段验收记录
+
+提交 `a23baba` 在本地 MinGW 环境通过 11 项相关 CTest；远程隔离宿主构建通过全部 20 项 CTest，新增影子目录和 Raw RAM 回收的 ASan/UBSan 两项测试通过，CUDA CLI 与 server 均完成构建。使用提供的 GGUF、单张 CUDA GPU、`--kvmem-budget 96`、`--kvmem-cpu-gb 1` 和 356-token 提示词生成 8 个 token 成功；`KVMEM_TRACE` 明确记录 9 次 `stage_out_cpu`。这只验证**原有 GPU 工作集溢出到 CPU 的路径**及新代码未破坏该路径；影子目录仍为空，后台 GC 未启动，也没有实测历史块的物理删除或 CPU 释放量。
+
 ## 已实现的迁移基础
 
 1. 以 Apache-2.0 来源文件为基础移植 `KvMemGc`（许可文本见 `kvmem/LICENSE.kvmem-qw3`）：后台增量扫描、按分数排队、观察期、shadow、块代数、不可变目录视图、工作集 lease、迟延释放回调及指标。`max_live_blocks == 0` 表示不开启；开启时由调用方创建 worker 并提供带分配代数校验的非阻塞释放回调。
