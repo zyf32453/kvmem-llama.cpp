@@ -78,12 +78,15 @@ public:
         HistoricalKvHandle handle, uint32_t layer) const;
     std::optional<BlockInfo> inspect(HistoricalKvHandle handle) const;
 
-    // Exact-generation, whole-bundle release. No large allocation is freed
+    // Exact-repository, exact-generation, whole-bundle release. The caller's
+    // repository must be in Releasing, after all old leases have drained.
+    // No large allocation is freed
     // while holding the slot lock. On Released, the returned bytes are the
     // payload vector capacity actually destroyed by this invocation. A stale
     // handle cannot free a later generation. Absent is a safe no-op (including
     // a failed reserve); Busy means another release is still finishing.
-    ReleaseResult release(HistoricalKvHandle handle) noexcept;
+    ReleaseResult release(const HistoricalKvRepository & repository,
+                          HistoricalKvHandle handle) noexcept;
     uint64_t allocated_payload_bytes() const noexcept;
     uint32_t capacity() const noexcept;
     const HistoricalKvRawStoreConfig & config() const noexcept;
@@ -98,6 +101,7 @@ private:
     };
     struct Block {
         HistoricalKvHandle handle;
+        uint64_t repository_id = 0;
         uint64_t original_begin = 0;
         uint32_t valid_tokens = 0;
         uint32_t written_layers = 0;
@@ -108,6 +112,7 @@ private:
         mutable std::mutex mu;
         std::unique_ptr<Block> block;
         HistoricalKvHandle last_released{};
+        uint64_t last_released_repository_id = 0;
         bool releasing = false;
     };
 

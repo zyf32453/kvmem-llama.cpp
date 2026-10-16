@@ -62,7 +62,8 @@ HistoricalKvRawStore::~HistoricalKvRawStore() = default;
 bool HistoricalKvRawStore::reserve(
     const HistoricalKvRepository::Lease & writer,
     HistoricalKvHandle handle, uint64_t original_begin, uint32_t valid_tokens) {
-    if (!writer || !writer.is_writer() || !same(writer.handle(), handle) ||
+    if (!writer || !writer.is_writer() || !writer.repository_id() ||
+        !same(writer.handle(), handle) ||
         !handle.incarnation || !handle.generation || handle.slot >= slots_.size() ||
         !valid_tokens || valid_tokens > config_.max_tokens_per_slot ||
         original_begin > std::numeric_limits<uint64_t>::max() - valid_tokens)
@@ -74,7 +75,8 @@ bool HistoricalKvRawStore::reserve(
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     if (slot.block || slot.releasing) return false;
-    if (slot.last_released.incarnation == handle.incarnation &&
+    if (slot.last_released_repository_id == writer.repository_id() &&
+        slot.last_released.incarnation == handle.incarnation &&
         handle.generation <= slot.last_released.generation)
         return false;
 
@@ -82,6 +84,7 @@ bool HistoricalKvRawStore::reserve(
     // repository's release callback can safely treat Absent as a no-op.
     auto block = std::make_unique<Block>();
     block->handle = handle;
+    block->repository_id = writer.repository_id();
     block->original_begin = original_begin;
     block->valid_tokens = valid_tokens;
     block->layers.resize(config_.n_layer);
@@ -114,13 +117,15 @@ bool HistoricalKvRawStore::write_layer(
     const std::vector<uint8_t> & packed_v,
     const std::vector<float> & mean_k_sum,
     uint32_t mean_tokens) {
-    if (!writer || !writer.is_writer() || !same(writer.handle(), handle) ||
+    if (!writer || !writer.is_writer() || !writer.repository_id() ||
+        !same(writer.handle(), handle) ||
         !handle.incarnation || !handle.generation || handle.slot >= slots_.size() ||
         layer >= config_.n_layer) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     Block * block = slot.block.get();
-    if (!block || !same(block->handle, handle) ||
+    if (!block || block->repository_id != writer.repository_id() ||
+        !same(block->handle, handle) ||
         mean_tokens > block->valid_tokens) return false;
     Layer & target = block->layers[layer];
     if (target.written || packed_k.size() != target.packed_k.size() ||
@@ -140,13 +145,15 @@ std::optional<HistoricalKvRawStore::LayerSnapshot>
 HistoricalKvRawStore::read_layer(
     const HistoricalKvRepository::Lease & reader,
     HistoricalKvHandle handle, uint32_t layer) const {
-    if (!reader || !same(reader.handle(), handle) ||
+    if (!reader || !reader.repository_id() ||
+        !same(reader.handle(), handle) ||
         !handle.incarnation || !handle.generation || handle.slot >= slots_.size() ||
         layer >= config_.n_layer) return std::nullopt;
     const Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const Block * block = slot.block.get();
-    if (!block || !same(block->handle, handle)) return std::nullopt;
+    if (!block || block->repository_id != reader.repository_id() ||
+        !same(block->handle, handle)) return std::nullopt;
     const Layer & source = block->layers[layer];
     if (!source.written) return std::nullopt;
     return LayerSnapshot{source.packed_k, source.packed_v,
@@ -167,7 +174,8 @@ HistoricalKvRawStore::inspect(HistoricalKvHandle handle) const {
 }
 
 HistoricalKvRawStore::ReleaseResult
-HistoricalKvRawStore::release(HistoricalKvHandle handle) noexcept {
+HistoricalKvRawStore::release(const HistoricalKvRepository & repository,
+                              HistoricalKvHandle handle) noexcept {
     if (!handle.incarnation || !handle.generation || handle.slot >= slots_.size())
         return {ReleaseCode::Stale, 0};
 
@@ -178,15 +186,22 @@ HistoricalKvRawStore::release(HistoricalKvHandle handle) noexcept {
         std::lock_guard<std::mutex> lock(slot.mu);
         if (slot.releasing) return {ReleaseCode::Busy, 0};
         if (!slot.block) {
-            if (same(slot.last_released, handle))
+            if (slot.last_released_repository_id == repository.repository_id() &&
+                same(slot.last_released, handle))
                 return {ReleaseCode::AlreadyReleased, 0};
-            if (slot.last_released.incarnation == handle.incarnation &&
+            if (slot.last_released_repository_id == repository.repository_id() &&
+                slot.last_released.incarnation == handle.incarnation &&
                 handle.generation <= slot.last_released.generation)
                 return {ReleaseCode::Stale, 0};
-            return {ReleaseCode::Absent, 0};
+            return repository.is_releasing(handle)
+                ? ReleaseResult{ReleaseCode::Absent, 0}
+                : ReleaseResult{ReleaseCode::Busy, 0};
         }
-        if (!same(slot.block->handle, handle))
+        if (slot.block->repository_id != repository.repository_id() ||
+            !same(slot.block->handle, handle))
             return {ReleaseCode::Stale, 0};
+        if (!repository.is_releasing(handle))
+            return {ReleaseCode::Busy, 0};
         retired = std::move(slot.block);
         bytes = retired->payload_bytes;
         slot.releasing = true;
@@ -200,6 +215,7 @@ HistoricalKvRawStore::release(HistoricalKvHandle handle) noexcept {
     {
         std::lock_guard<std::mutex> lock(slot.mu);
         slot.last_released = handle;
+        slot.last_released_repository_id = repository.repository_id();
         slot.releasing = false;
     }
     return {ReleaseCode::Released, bytes};

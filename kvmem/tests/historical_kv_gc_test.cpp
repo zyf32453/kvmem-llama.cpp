@@ -283,9 +283,12 @@ void test_manager_reclaims_real_ram_payload() {
     raw_cfg.packed_k_bytes_per_token = 1;
     raw_cfg.packed_v_bytes_per_token = 1;
     auto raw = std::make_shared<HistoricalKvRawStore>(raw_cfg, 2);
+    std::weak_ptr<HistoricalKvRepository> weak_repo = repo;
     auto writer = repo->begin_write(21, 713, 2, 1, 4,
-        [raw](const HistoricalKvHandle & handle) {
-            const auto result = raw->release(handle);
+        [raw, weak_repo](const HistoricalKvHandle & handle) {
+            auto owner = weak_repo.lock();
+            if (!owner) return false;
+            const auto result = raw->release(*owner, handle);
             return result.code == HistoricalKvRawStore::ReleaseCode::Released ||
                    result.code == HistoricalKvRawStore::ReleaseCode::AlreadyReleased ||
                    result.code == HistoricalKvRawStore::ReleaseCode::Absent;

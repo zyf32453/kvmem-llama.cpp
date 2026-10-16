@@ -171,6 +171,10 @@ std::optional<HistoricalKvBlockMeta> HistoricalKvRepository::Lease::metadata() c
     return shared_->copy_meta(handle_.slot, control);
 }
 
+uint64_t HistoricalKvRepository::Lease::repository_id() const noexcept {
+    return shared_ ? shared_->repository_id : 0;
+}
+
 void HistoricalKvRepository::Lease::reset() noexcept {
     if (shared_) {
         if (counted_exec_)

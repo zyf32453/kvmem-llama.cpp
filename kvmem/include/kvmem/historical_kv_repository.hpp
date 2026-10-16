@@ -45,6 +45,7 @@ public:
         HistoricalKvHandle handle() const { return handle_; }
         LeaseKind kind() const { return kind_; }
         bool is_writer() const { return kind_ == LeaseKind::Writer; }
+        uint64_t repository_id() const noexcept;
         std::optional<HistoricalKvBlockMeta> metadata() const;
         void reset() noexcept;
 

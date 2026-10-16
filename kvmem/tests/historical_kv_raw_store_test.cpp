@@ -36,7 +36,7 @@ static void test_exact_generation_ram_reclamation() {
     HistoricalKvRawStore::ReleaseResult release_result;
     auto release = [&](const HistoricalKvHandle & handle) {
         release_thread = std::this_thread::get_id();
-        release_result = store->release(handle);
+        release_result = store->release(repo, handle);
         callbacks.fetch_add(1, std::memory_order_relaxed);
         return callback_succeeded(release_result.code);
     };
@@ -72,6 +72,34 @@ static void test_exact_generation_ram_reclamation() {
           info->written_layers == 2 && info->payload_bytes == old_bytes,
           "explicit original span or byte accounting was lost");
     check(repo.publish_write(*writer), "complete RAM payload did not publish");
+    check(store->release(repo, old).code == HistoricalKvRawStore::ReleaseCode::Busy &&
+          store->allocated_payload_bytes() == old_bytes,
+          "public release freed a Live block before repository reclamation");
+
+    HistoricalKvRepository foreign(1, 83);
+    HistoricalKvRawStore::ReleaseResult foreign_release;
+    auto foreign_writer = foreign.begin_write(901, 713, 3, 1, old_min_bytes,
+        [&](const HistoricalKvHandle & handle) {
+            foreign_release = store->release(foreign, handle);
+            return foreign_release.code == HistoricalKvRawStore::ReleaseCode::Stale;
+        });
+    check(foreign_writer &&
+          foreign_writer->handle().incarnation == old.incarnation &&
+          foreign_writer->handle().slot == old.slot &&
+          foreign_writer->handle().generation == old.generation,
+          "foreign repository did not reproduce an equal external handle");
+    check(!store->read_layer(*foreign_writer, old, 0) &&
+          !store->write_layer(*foreign_writer, old, 0,
+              {1, 2, 3, 4, 5, 6, 7, 8, 9}, {10, 11, 12, 13, 14, 15},
+              {1.0f, 2.0f, 3.0f, 4.0f}, 3),
+          "foreign lease accessed the owner's RAM payload");
+    check(foreign.retire(old) == HistoricalKvRepository::RetireResult::Committed,
+          "foreign block retirement failed");
+    foreign_writer->reset();
+    check(foreign.try_reclaim(old) == HistoricalKvRepository::ReclaimResult::Complete &&
+          foreign_release.code == HistoricalKvRawStore::ReleaseCode::Stale &&
+          store->allocated_payload_bytes() == old_bytes,
+          "foreign repository released the owner's RAM payload");
 
     auto reader = repo.acquire_read(old);
     check(reader.has_value(), "reader lease was not acquired");
@@ -114,6 +142,40 @@ static void test_exact_generation_ram_reclamation() {
           store->allocated_payload_bytes() == 0 && !store->inspect(old),
           "physical payload bytes were not returned after reclaim");
 
+    // A different repository may use the same externally chosen incarnation
+    // and first-generation handle after the old allocation has gone. The
+    // previous repository must not be able to release the new owner's bytes.
+    HistoricalKvRepository replacement(1, 83);
+    HistoricalKvRawStore::ReleaseResult replacement_release;
+    auto replacement_writer = replacement.begin_write(903, 1500, 2, 1, 8,
+        [&](const HistoricalKvHandle & handle) {
+            replacement_release = store->release(replacement, handle);
+            return callback_succeeded(replacement_release.code);
+        });
+    check(replacement_writer &&
+          replacement_writer->handle().incarnation == old.incarnation &&
+          replacement_writer->handle().slot == old.slot &&
+          replacement_writer->handle().generation == old.generation,
+          "replacement did not reuse the same external handle");
+    check(store->reserve(*replacement_writer, old, 1500, 2) &&
+          store->write_layer(*replacement_writer, old, 0,
+              {1, 2, 3, 4, 5, 6}, {7, 8, 9, 10}, {1, 1, 1, 1}, 2) &&
+          store->write_layer(*replacement_writer, old, 1,
+              {11, 12, 13, 14, 15, 16}, {17, 18, 19, 20}, {2, 2, 2, 2}, 2) &&
+          replacement.publish_write(*replacement_writer),
+          "replacement repository could not own freed physical storage");
+    const uint64_t replacement_bytes = store->allocated_payload_bytes();
+    check(store->release(repo, old).code == HistoricalKvRawStore::ReleaseCode::Stale &&
+          store->allocated_payload_bytes() == replacement_bytes,
+          "old repository released replacement repository's data");
+    check(replacement.retire(old) == HistoricalKvRepository::RetireResult::Committed,
+          "replacement retirement failed");
+    replacement_writer->reset();
+    check(replacement.try_reclaim(old) == HistoricalKvRepository::ReclaimResult::Complete &&
+          replacement_release.code == HistoricalKvRawStore::ReleaseCode::Released &&
+          store->allocated_payload_bytes() == 0,
+          "replacement's own callback did not release its data");
+
     constexpr uint64_t new_min_bytes = 2 * (2 * 3 + 2 * 2 + 4 * sizeof(float));
     auto new_writer = repo.begin_write(902, 1427, 2, 2, new_min_bytes, release);
     check(new_writer && new_writer->handle().slot == old.slot &&
@@ -130,7 +192,7 @@ static void test_exact_generation_ram_reclamation() {
           repo.publish_write(*new_writer), "new generation did not publish");
 
     HistoricalKvRawStore::ReleaseResult stale_release;
-    std::thread stale_reclaimer([&] { stale_release = store->release(old); });
+    std::thread stale_reclaimer([&] { stale_release = store->release(repo, old); });
     stale_reclaimer.join();
     check(stale_release.code == HistoricalKvRawStore::ReleaseCode::Stale &&
           stale_release.physical_payload_bytes == 0 &&
