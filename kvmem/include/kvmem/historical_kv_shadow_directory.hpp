@@ -46,6 +46,11 @@ public:
         HistoricalKvRepository::Lease writer_;
     };
 
+    // The admitting request owns this until every producer task has captured
+    // its context, then returns it. Only those actual tasks keep the writer
+    // alive thereafter. The directory never owns a producer reference.
+    using Producer = std::shared_ptr<WriterContext>;
+
     struct Binding {
         uint32_t block_id = 0;
         HistoricalKvHandle handle;
@@ -78,13 +83,16 @@ public:
         }
     };
 
-    // On success moves writer into a shared context. On failure leaves writer
-    // with the caller, including on allocation failure. One repository owns
+    // On success moves writer into the empty producer output. On failure
+    // leaves both outputs with the caller, including on allocation failure.
+    // Producer must be kept until all admitted tasks have captured it, then
+    // reset (also on cancellation). One repository owns
     // this directory for the lifetime of its runtime, even when it is empty.
     bool bind_full_block(const KvMemStore & store, uint32_t block_id,
                          std::shared_ptr<HistoricalKvRepository> repository,
                          HistoricalKvHandle handle,
                          HistoricalKvRepository::Lease & writer,
+                         Producer & producer,
                          std::shared_ptr<HistoricalKvRawStore> storage = {});
     // Bind an immutable admitted span, including a short/non-aligned tail.
     // Such spans require handle-addressed storage: positional legacy Raw
@@ -94,6 +102,7 @@ public:
                     std::shared_ptr<HistoricalKvRepository> repository,
                     HistoricalKvHandle handle,
                     HistoricalKvRepository::Lease & writer,
+                    Producer & producer,
                     std::shared_ptr<HistoricalKvRawStore> storage);
     bool fixes_span(uint32_t block_id) const noexcept;
     // Atomically append already admitted, payload-backed spans and install
@@ -103,7 +112,10 @@ public:
     bool append_blocks(KvMemStore & store,
                        std::shared_ptr<HistoricalKvRepository> repository,
                        std::shared_ptr<HistoricalKvRawStore> storage,
-                       std::vector<HistoricalKvRepository::Lease> & writers);
+                       std::vector<HistoricalKvRepository::Lease> & writers,
+                       std::vector<Producer> & producers);
+    // A bound entry survives task completion. Its writer_context is null
+    // once the request and all producer tasks have returned their references.
     std::optional<Binding> find(uint32_t block_id) const;
     // Unlike find(), this preserves a retired generation's identity even
     // after physical release. Retired and Reclaimed are both closed to new
@@ -122,8 +134,8 @@ public:
 
     // This does NOT call retire. A separately coordinated owner must first
     // retire the exact generation and ensure all production reads are gated.
-    // Drops this directory's writer lease but retains a retired tombstone.
-    // Existing async owners can keep WriterContext until their work finishes.
+    // Optional foreground observation only; never drops a task's writer.
+    // Reclamation does not depend on calling this, or on another active.
     bool unbind_retired(uint32_t block_id);
     // Marks the tombstone Reclaimed only after this repository confirms the
     // exact generation's release callback completed. It remains fail-closed
@@ -146,8 +158,11 @@ private:
     bool tail_span_matches(const KvMemStore & store) const;
 
     struct Entry {
+        // binding.writer_context is always empty in the stored descriptor.
         Binding binding;
+        std::weak_ptr<WriterContext> producer;
         std::shared_ptr<HistoricalKvRepository> repository;
+        std::shared_ptr<HistoricalKvRawStore> storage;
         uint64_t repository_id = 0;
         State state = State::Bound;
     };

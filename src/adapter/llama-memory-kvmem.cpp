@@ -2593,8 +2593,8 @@ llama_memory_kvmem::CaptureBatch llama_memory_kvmem::capture_batch(
             range.route = MeanWriteRange::Route::Legacy;
         } else if (const auto binding = directory.find(bid)) {
             const auto & context = binding->writer_context;
-            const auto meta = context->writer().metadata();
-            if (context->storage() && context->storage()->config().mean_k_elements &&
+            const auto meta = context ? context->writer().metadata() : std::nullopt;
+            if (context && context->storage() && context->storage()->config().mean_k_elements &&
                     meta && meta->life == kvmem::HistoricalKvLife::Writing &&
                     !context->repository().closed()) {
                 if (range.original_begin < binding->original_begin ||
@@ -3769,7 +3769,7 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
         writer = binding->writer_context;
         // Legacy Raw bindings are already sealed and immutable. New payload
         // bindings may accept only the original unfinished writer's ranges.
-        if (!writer->storage()) return;
+        if (!writer || !writer->storage()) return;
         const auto meta = writer->writer().metadata();
         if (!meta || meta->life != kvmem::HistoricalKvLife::Writing) return;
     }

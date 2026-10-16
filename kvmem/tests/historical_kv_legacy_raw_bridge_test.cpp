@@ -145,8 +145,10 @@ void test_directory_reads_hold_real_payload_until_last_transfer_finishes() {
     check(raw->seal_for_historical_gc(*repository, *writer, handle, 0, 0, 4),
           "could not seal packed raw block");
     check(repository->publish_write(*writer), "could not publish packed raw block");
-    check(runtime.bind_historical_full_block(0, repository, handle, *writer),
+    HistoricalKvShadowDirectory::Producer producer;
+    check(runtime.bind_historical_full_block(0, repository, handle, *writer, producer),
           "could not bind published raw block");
+    producer.reset(); // Sealed producer work is already complete.
     auto read = directory.acquire_read(0);
     auto transfer = directory.acquire_transfer(0);
     check(read && transfer && read.lease && transfer.lease,

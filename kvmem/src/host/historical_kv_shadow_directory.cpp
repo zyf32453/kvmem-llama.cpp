@@ -31,10 +31,11 @@ bool HistoricalKvShadowDirectory::bind_full_block(
         std::shared_ptr<HistoricalKvRepository> repository,
         HistoricalKvHandle handle,
         HistoricalKvRepository::Lease & writer,
+        Producer & producer,
         std::shared_ptr<HistoricalKvRawStore> storage) {
     if (block_id >= store.block_count() ||
         store.blocks()[block_id].n_tokens != store.config().block_tokens) return false;
-    return bind_block(store, block_id, std::move(repository), handle, writer, std::move(storage));
+    return bind_block(store, block_id, std::move(repository), handle, writer, producer, std::move(storage));
 }
 
 bool HistoricalKvShadowDirectory::bind_block(
@@ -42,8 +43,9 @@ bool HistoricalKvShadowDirectory::bind_block(
         std::shared_ptr<HistoricalKvRepository> repository,
         HistoricalKvHandle handle,
         HistoricalKvRepository::Lease & writer,
+        Producer & producer,
         std::shared_ptr<HistoricalKvRawStore> storage) {
-    if (!repository || repository->closed() || !writer ||
+    if (producer || !repository || repository->closed() || !writer ||
         !repository->owns_writer(writer) ||
         !same_handle(handle, writer.handle()) ||
         writer.repository_id() != repository->repository_id() ||
@@ -71,15 +73,18 @@ bool HistoricalKvShadowDirectory::bind_block(
 
     // Allocate every potentially throwing object before moving the sole
     // writer. Failed binding must not silently abandon a Writing generation.
-    auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, std::move(storage)));
+    auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, storage));
     Entry entry;
     entry.binding = {block_id, handle, block.orig_pos_start,
-                     block.n_tokens, std::move(context)};
+                     block.n_tokens, {}};
+    entry.producer = context;
+    entry.storage = std::move(storage);
     entry.repository = std::move(repository);
     entry.repository_id = entry.repository->repository_id();
     const auto inserted = entries_.emplace(block_id, std::move(entry));
     if (!inserted.second) return false;
-    inserted.first->second.binding.writer_context->writer_ = std::move(writer);
+    context->writer_ = std::move(writer);
+    producer = std::move(context);
     repository_id_ = inserted.first->second.repository_id;
     return true;
 }
@@ -91,10 +96,11 @@ bool HistoricalKvShadowDirectory::fixes_span(uint32_t block_id) const noexcept {
 bool HistoricalKvShadowDirectory::append_blocks(
         KvMemStore & store, std::shared_ptr<HistoricalKvRepository> repository,
         std::shared_ptr<HistoricalKvRawStore> storage,
-        std::vector<HistoricalKvRepository::Lease> & writers) {
+        std::vector<HistoricalKvRepository::Lease> & writers,
+        std::vector<Producer> & producers) {
     static_assert(std::is_trivially_copyable<KvMemBlock>::value,
                   "historical append commit requires nonthrowing block copies");
-    if (!repository || repository->closed() || !storage ||
+    if (!producers.empty() || !repository || repository->closed() || !storage ||
         store.historical_shadow_directory_ != this || store.gc_ ||
         (repository_id_ && repository_id_ != repository->repository_id()) ||
         !tail_span_matches(store) || store.append_tail_room() != 0 ||
@@ -105,6 +111,8 @@ bool HistoricalKvShadowDirectory::append_blocks(
     // Prepare all fallible metadata allocations before moving any writer or
     // publishing any position. No rollback frees a historical payload here.
     std::map<uint32_t, Entry> pending;
+    std::vector<Producer> contexts;
+    contexts.reserve(writers.size());
     std::vector<KvMemBlock> blocks;
     blocks.reserve(writers.size());
     uint64_t position = store.total_tokens();
@@ -123,7 +131,10 @@ bool HistoricalKvShadowDirectory::append_blocks(
             payload->valid_tokens != meta->valid_tokens) return false;
         auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, storage));
         Entry entry;
-        entry.binding = {id, writer.handle(), position, meta->valid_tokens, std::move(context)};
+        entry.binding = {id, writer.handle(), position, meta->valid_tokens, {}};
+        entry.producer = context;
+        entry.storage = storage;
+        contexts.push_back(std::move(context));
         entry.repository = repository;
         entry.repository_id = repository->repository_id();
         pending.emplace(id, std::move(entry));
@@ -140,13 +151,14 @@ bool HistoricalKvShadowDirectory::append_blocks(
         store.blocks_.reserve(std::max(count, std::min<size_t>(INT32_MAX,
             std::max<size_t>(1, store.blocks_.capacity()) * 2)));
     size_t i = 0;
-    for (auto & pair : pending) pair.second.binding.writer_context->writer_ = std::move(writers[i++]);
+    for (auto & context : contexts) context->writer_ = std::move(writers[i++]);
     // map node transfer uses the same allocator and a nonthrowing integer
     // comparator. The reserved vector only copies plain block descriptors.
     entries_.merge(pending);
     store.blocks_.insert(store.blocks_.end(), blocks.begin(), blocks.end());
     store.total_tokens_ = static_cast<uint32_t>(position);
     repository_id_ = repository->repository_id();
+    producers = std::move(contexts);
     return true;
 }
 
@@ -154,7 +166,9 @@ std::optional<HistoricalKvShadowDirectory::Binding>
 HistoricalKvShadowDirectory::find(uint32_t block_id) const {
     const auto it = entries_.find(block_id);
     if (it == entries_.end() || it->second.state != State::Bound) return std::nullopt;
-    return it->second.binding;
+    auto binding = it->second.binding;
+    binding.writer_context = it->second.producer.lock();
+    return binding;
 }
 
 HistoricalKvShadowDirectory::Observation
@@ -203,28 +217,26 @@ HistoricalKvShadowDirectory::Access HistoricalKvShadowDirectory::acquire(
         : entry.repository->acquire_transfer(entry.binding.handle);
     if (!lease) return {};
     return {Access::Status::Acquired, std::move(*lease),
-            entry.binding.writer_context->storage()};
+            entry.storage};
 }
 
 bool HistoricalKvShadowDirectory::unbind_retired(uint32_t block_id) {
     const auto it = entries_.find(block_id);
     if (it == entries_.end() || it->second.state != State::Bound) return false;
     auto & entry = it->second;
-    const auto & context = *entry.binding.writer_context;
-    const auto meta = context.repository().inspect(entry.binding.handle);
-    // The retained writer prevents Releasing while this entry exists. A
-    // future directory that drops its writer earlier must handle that phase
-    // explicitly; never erase a non-Retired entry on an ambiguous observation.
-    if (!meta || !same_handle(meta->handle, entry.binding.handle) ||
-        meta->life != HistoricalKvLife::Retired) return false;
+    const auto meta = entry.repository->inspect(entry.binding.handle);
+    // Releasing is unreadable. Leave it alone until exact-generation release
+    // acknowledgement is available; there is no writer to detach here.
+    if (!entry.repository->reclaim_completed(entry.binding.handle, entry.repository_id) &&
+        (!meta || !same_handle(meta->handle, entry.binding.handle) ||
+         meta->life != HistoricalKvLife::Retired)) return false;
     entry.state = State::Retired;
-    entry.binding.writer_context.reset();
     return true;
 }
 
 bool HistoricalKvShadowDirectory::confirm_reclaimed(uint32_t block_id) {
     const auto it = entries_.find(block_id);
-    if (it == entries_.end() || it->second.state != State::Retired) return false;
+    if (it == entries_.end() || it->second.state == State::Reclaimed) return false;
     auto & entry = it->second;
     if (!entry.repository || entry.repository->repository_id() != entry.repository_id ||
         !entry.repository->reclaim_completed(entry.binding.handle,
@@ -238,10 +250,7 @@ bool HistoricalKvShadowDirectory::tail_span_matches(const KvMemStore & store) co
     const auto & record = entries_.rbegin()->second;
     const auto & entry = record.binding;
     return entry.block_id < store.block_count() &&
-           same_span(entry, store.blocks()[entry.block_id]) &&
-           (record.state == State::Retired || record.state == State::Reclaimed ||
-            (entry.writer_context && entry.writer_context->writer() &&
-             same_handle(entry.handle, entry.writer_context->handle())));
+           same_span(entry, store.blocks()[entry.block_id]);
 }
 
 void HistoricalKvShadowDirectory::validate_append(

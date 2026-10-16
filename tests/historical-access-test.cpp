@@ -7,8 +7,10 @@
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
 #include "kvmem/historical_kv_raw_store.hpp"
+#include "kvmem/historical_kv_gc.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
@@ -76,6 +78,16 @@ struct kvmem_transfer_test_access {
 static void require(bool ok, const char * message) {
     if (!ok) throw std::runtime_error(message);
 }
+
+// Retirement in the controlled fixture is explicit; the real GC worker must
+// still drain retired slots without any further foreground directory action.
+class ObserveOnlyPolicy final : public kvmem::HistoricalKvPolicy {
+    kvmem::HistoricalKvStepResult step(const kvmem::HistoricalKvSnapshot &,
+            const kvmem::HistoricalKvPressure &, kvmem::HistoricalKvWorkBudget,
+            kvmem::HistoricalKvDecisionBuffer &) override {
+        return {kvmem::HistoricalKvStepStatus::NoCandidate, 0, 0};
+    }
+};
 
 static std::vector<uint8_t> pattern(size_t size, unsigned seed) {
     std::vector<uint8_t> bytes(size);
@@ -218,8 +230,10 @@ static void check_access(llama_memory_kvmem & mem) {
     require(raw.seal_for_historical_gc(*repository, *writer, handle, 0, 0, block),
             "could not seal all attention layers");
     require(repository->publish_write(*writer), "could not publish completed block");
-    require(runtime.bind_historical_full_block(0, repository, handle, *writer),
+    kvmem::HistoricalKvShadowDirectory::Producer producer;
+    require(runtime.bind_historical_full_block(0, repository, handle, *writer, producer),
             "could not bind adapter block identity");
+    producer.reset(); // The completed producer is not a permanent directory pin.
 
     kvmem_transfer_test_access::score(mem);
     require(store.blocks()[0].retrieval_score > 0.9 &&
@@ -235,7 +249,7 @@ static void check_access(llama_memory_kvmem & mem) {
         }
     };
     compare_gpu();
-    require(repository->inspect(handle)->references == 1,
+    require(repository->inspect(handle)->references == 0,
             "adapter leaked a read or transfer lease after completion");
 
     auto old_read = runtime.historical_shadow_directory().acquire_read(0);
@@ -353,7 +367,8 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                                      cell0 * cfg.packed_v_bytes_per_token, check.v.size());
             checks.push_back(std::move(check));
         }
-        require(runtime.bind_historical_full_block(0, repository, handle, *writer, payload),
+        kvmem::HistoricalKvShadowDirectory::Producer producer;
+        require(runtime.bind_historical_full_block(0, repository, handle, *writer, producer, payload),
                 "managed payload directory binding failed");
         MeanTensors means(mem, 0, block, round == 3, round < 2 ? GGML_TYPE_F16 : GGML_TYPE_F32);
         kvmem_transfer_test_access::mean_inputs(mem, means.layers, 0, block);
@@ -371,6 +386,7 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         kvmem_transfer_test_access::capture(mem, 0);
         require(kvmem_transfer_test_access::pending(mem) > 0, "test did not enqueue asynchronous packed writes");
         const bool retire_in_flight = round == 1 || round == 4;
+        std::unique_ptr<kvmem::HistoricalKvGc> background_gc;
         auto reclaim = [&] {
             auto result = Repository::ReclaimResult::Stale;
             std::thread worker([&] { result = repository->try_reclaim(handle); });
@@ -378,8 +394,11 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
             return result;
         };
         if (retire_in_flight) {
-            require(repository->retire(handle) == Repository::RetireResult::Committed &&
-                    runtime.unbind_retired_historical_block(0), "in-flight writer retirement failed");
+            producer.reset(); // Only the queued DMA/Mean-K tasks now hold the writer.
+            require(repository->retire(handle) == Repository::RetireResult::Committed,
+                    "in-flight writer retirement failed");
+            if (round != 1) require(runtime.unbind_retired_historical_block(0),
+                                   "retired writer observation failed");
             require(reclaim() == Repository::ReclaimResult::Deferred,
                     "queued DMA writer failed to retain its allocation");
         }
@@ -387,7 +406,32 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         if (retire_in_flight) require(reclaim() == Repository::ReclaimResult::Deferred,
                 "Mean-K task/accumulator lost its writer after packed completion");
         if (round < 2) {
-            mem.harvest_flush();
+            if (round == 1) {
+                kvmem::HistoricalKvGc::Config gc_cfg;
+                gc_cfg.mode = kvmem::HistoricalKvGc::Mode::Delete;
+                gc_cfg.scan_blocks = gc_cfg.batch_blocks = gc_cfg.reclaim_blocks = 1;
+                gc_cfg.poll_ms = 1;
+                background_gc = std::make_unique<kvmem::HistoricalKvGc>(
+                    repository, std::make_unique<ObserveOnlyPolicy>(), gc_cfg);
+                background_gc->start();
+                std::exception_ptr failure;
+                // Drain the real CUDA event and captured Mean-K on another
+                // thread. This is task completion, not another active/query.
+                std::thread completion([&] {
+                    try { mem.harvest_flush(); } catch (...) { failure = std::current_exception(); }
+                });
+                completion.join();
+                if (failure) std::rethrow_exception(failure);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                while (!repository->reclaim_completed(handle, repository->repository_id()) &&
+                        std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                background_gc->stop();
+                require(background_gc->stats().reclaimed == 1 &&
+                        directory.observe(0).state == kvmem::HistoricalKvShadowDirectory::State::Bound,
+                        "CUDA producer completion required a foreground unbind to reclaim");
+                std::puts("PASS managed task lifetime: late CUDA Mean-K completed, background CPU release, no unbind/next active");
+            } else mem.harvest_flush();
             if (round == 0) {
                 // Replaying an already committed capture while still Writing
                 // must not count its tokens again.
@@ -412,6 +456,7 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         if (!retire_in_flight) {
             require(payload->publish_complete(*repository, directory.find(0)->writer_context->writer(), handle),
                     "completed managed capture could not publish");
+            producer.reset();
             {
                 auto read = directory.acquire_read(0);
                 require(read && read.storage == payload, "managed read resolved wrong allocation");
@@ -449,7 +494,10 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
             require(repository->retire(handle) == Repository::RetireResult::Committed &&
                     runtime.unbind_retired_historical_block(0), "completed capture retirement failed");
         }
-        require(reclaim() == Repository::ReclaimResult::Complete && payload->allocated_payload_bytes() == 0 &&
+        const bool reclaimed = background_gc
+            ? repository->reclaim_completed(handle, repository->repository_id())
+            : reclaim() == Repository::ReclaimResult::Complete;
+        require(reclaimed && payload->allocated_payload_bytes() == 0 &&
                 runtime.confirm_reclaimed_historical_block(0), "captured generation did not fully reclaim");
         const auto queued_before = kvmem_transfer_test_access::pending(mem);
         kvmem_transfer_test_access::capture(mem, 0);
@@ -538,11 +586,12 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
                     "slot mapping used aligned original positions");
         }
     };
+    std::vector<kvmem::HistoricalKvShadowDirectory::Producer> producers;
     std::vector<Repository::Lease> writers;
     writers.push_back(make_writer(0, 0, 3));
     writers.push_back(make_writer(1, 3, 5));
     const auto old = writers[1].handle();
-    require(runtime.register_historical_append(repository, payload, writers), "short spans append failed");
+    require(runtime.register_historical_append(repository, payload, writers, producers), "short spans append failed");
     place(0);
     place(1);
     prepare(0, 8);
@@ -554,6 +603,8 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
     kvmem_transfer_test_access::capture_fixed_spans(mem);
     require(kvmem_transfer_test_access::pending(mem) > 0, "short packed spans were skipped");
     auto late = directory.find(1);
+    auto first_producer = producers[0];
+    producers.clear();
     require(repository->retire(old) == Repository::RetireResult::Committed &&
             runtime.unbind_retired_historical_block(1), "short Writing tail retirement failed");
     require(reclaim(old) == Repository::ReclaimResult::Deferred, "short writer not retained");
@@ -576,7 +627,7 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
     writers.push_back(make_writer(2, 8, 27));
     const auto fresh = writers[0].handle();
     require(fresh.slot == old.slot && fresh.generation > old.generation, "tail slot generation not advanced");
-    require(runtime.register_historical_append(repository, payload, writers), "rollover append failed");
+    require(runtime.register_historical_append(repository, payload, writers, producers), "rollover append failed");
     place(2);
     prepare(8, 27);
     mem.occupy_in(mem.get_kv(), 2);
@@ -633,6 +684,8 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
             rejects_legacy([&] { kvmem_transfer_test_access::restore(mem, 3); }) &&
             rejects_legacy([&] { kvmem_transfer_test_access::mean_positions(mem, {35}); }),
             "unbound non-aligned span fell back to positional legacy storage");
+    first_producer.reset();
+    producers.clear();
     for (uint32_t id : {0u, 2u}) {
         const auto handle = directory.find(id)->handle;
         require(repository->retire(handle) == Repository::RetireResult::Committed &&

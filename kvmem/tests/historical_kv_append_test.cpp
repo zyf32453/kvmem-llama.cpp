@@ -53,11 +53,12 @@ struct Fixture {
 
 static void append_transaction_and_tail_rollover() {
     Fixture f;
+    std::vector<HistoricalKvShadowDirectory::Producer> producers;
     std::vector<Repo::Lease> writers;
     writers.push_back(f.write(0, 0, 3));
     writers.push_back(f.write(1, 4, 2)); // Gap: must reject the entire append.
     const auto bad = writers.back().handle();
-    check(!f.runtime.register_historical_append(f.repo, f.payload, writers), "accepted gap");
+    check(!f.runtime.register_historical_append(f.repo, f.payload, writers, producers), "accepted gap");
     check(writers[0] && writers[1] && f.runtime.store().total_tokens() == 0 &&
           f.runtime.historical_shadow_directory().size() == 0, "partial append leaked");
     check(f.repo->retire(bad) == Repo::RetireResult::Committed, "retire bad admission");
@@ -68,17 +69,18 @@ static void append_transaction_and_tail_rollover() {
     // Already admitted work remains legal even if policy retires before its
     // metadata transaction. No new execution permission follows from append.
     check(f.repo->retire(old) == Repo::RetireResult::Committed, "retire Writing tail");
-    check(f.runtime.register_historical_append(f.repo, f.payload, writers), "append admitted spans");
+    check(f.runtime.register_historical_append(f.repo, f.payload, writers, producers), "append admitted spans");
     check(!writers[0] && !writers[1], "transaction did not consume writers");
     const auto & directory = f.runtime.historical_shadow_directory();
     auto late = directory.find(1);
     check(late && f.runtime.unbind_retired_historical_block(1), "tail unbind");
     check(f.reclaim(old) == Repo::ReclaimResult::Deferred, "late producer lost old allocation");
 
+    producers.clear();
     writers.clear();
     writers.push_back(f.write(2, 5, 4));
     writers.push_back(f.write(3, 9, 1));
-    check(f.runtime.register_historical_append(f.repo, f.payload, writers), "non-aligned rollover");
+    check(f.runtime.register_historical_append(f.repo, f.payload, writers, producers), "non-aligned rollover");
     const auto & store = f.runtime.store();
     check(store.total_tokens() == 10 && store.block_count() == 4 &&
           store.blocks()[1].orig_pos_start == 3 && store.blocks()[1].n_tokens == 2 &&
@@ -120,18 +122,20 @@ static void append_transaction_and_tail_rollover() {
 static void partial_binding_and_media_ranges() {
     Fixture f;
     f.runtime.register_append(3);
+    HistoricalKvShadowDirectory::Producer producer;
     auto first = f.write(0, 0, 3);
     const auto handle = first.handle();
-    check(!f.runtime.bind_historical_full_block(0, f.repo, handle, first, f.payload),
+    check(!f.runtime.bind_historical_full_block(0, f.repo, handle, first, producer, f.payload),
           "full-only compatibility API accepted short block");
-    check(!f.runtime.bind_historical_block(0, f.repo, handle, first, {}),
+    check(!f.runtime.bind_historical_block(0, f.repo, handle, first, producer, {}),
           "short span accepted positional legacy storage");
-    check(f.runtime.bind_historical_block(0, f.repo, handle, first, f.payload), "partial bind");
+    check(f.runtime.bind_historical_block(0, f.repo, handle, first, producer, f.payload), "partial bind");
+    std::vector<HistoricalKvShadowDirectory::Producer> producers;
     std::vector<Repo::Lease> writers;
     writers.push_back(f.write(1, 3, 2));
     writers.push_back(f.write(2, 5, 4));
     writers.push_back(f.write(3, 9, 1));
-    check(f.runtime.register_historical_append(f.repo, f.payload, writers), "media spans append");
+    check(f.runtime.register_historical_append(f.repo, f.payload, writers, producers), "media spans append");
     auto & store = f.runtime.store();
     store.set_retrieval_scores({100.0, 0.0, 50.0, 1.0});
     store.set_media_ranges({{3, 6}});
@@ -153,8 +157,9 @@ static void fragmented_capacity_and_overflow() {
     f.runtime.store().attach_gc(gc);
     for (uint32_t id = 0; id < 2; ++id) {
         f.runtime.register_append(1);
+        HistoricalKvShadowDirectory::Producer producer;
         auto writer = f.write(id, id, 1);
-        check(f.runtime.bind_historical_block(id, f.repo, writer.handle(), writer, f.payload),
+        check(f.runtime.bind_historical_block(id, f.repo, writer.handle(), writer, producer, f.payload),
               "fragment binding failed");
     }
     bool rejected = false;

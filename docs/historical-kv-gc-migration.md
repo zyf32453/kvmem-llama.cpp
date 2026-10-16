@@ -24,7 +24,7 @@
 
 对真实采集路径的审查发现，Mean-K、packed K 和 packed V 会由不同的调用或异步任务分别到达。按句柄存储因此增加 `write_mean_k_slice`、`write_packed_k_slice` 和 `write_packed_v_slice`：每个分量独立记录连续前缀，顺序可以不同；所有必需分量和所有配置层写满以前，整层读取与 `publish_complete` 均拒绝。原 `write_slice` 仍在同一 slot 锁下验证并一次提交全部分量，不会因后一分量错误而留下半次写入。测试覆盖错序完成、缺分量/缺层、洞与重复、非对齐短 span、退休后旧 writer 完成、旧 reader 阻止回收，以及跨仓库同值句柄。
 
-`KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。早期接口只绑定完整块；现在 `bind_historical_block` 也接受由 `HistoricalKvRawStore` 承载的短块和非对齐 span，legacy Raw 桥接仍限于完整对齐块。绑定验证同一仓库、精确 writer/handle/span 和实际 payload，失败不会消耗 writer；异步任务及读写许可保留原存储 owner。绑定后的范围固定，追加转到新块，截断不能缩短尚未安全回收的旧块。目录绑定长期持有 writer lease，因此退休后若不解除绑定并等待异步 writer 退出，后台释放会一直延后。解绑仅把目录状态改为 `Retired` 并放掉目录 writer；仓库确认同代物理释放后，目录才可改为 `Reclaimed`。两个状态都保留关闭墓碑，`find()` 不返回可用绑定；只有运行时实际截断并移走旧密集块后，才删除墓碑并允许编号重用。该状态机避免“payload 已释放而旧块尚在目录”时把它误认为未托管块。
+`KvMemRuntime` 现有一个默认空的 `HistoricalKvShadowDirectory`，随 runtime 一起归属和移动到对应会话。早期接口只绑定完整块；现在 `bind_historical_block` 也接受由 `HistoricalKvRawStore` 承载的短块和非对齐 span，legacy Raw 桥接仍限于完整对齐块。绑定验证同一仓库、精确 writer/handle/span 和实际 payload，失败不会消耗 writer；异步任务及读写许可保留原存储 owner。绑定后的范围固定，追加转到新块，截断不能缩短尚未安全回收的旧块。目录现仅保留 producer 的弱引用，创建 writer 通过显式 `Producer` 输出交给请求方。请求方把它交给实际任务后归还自己的引用，物理回收只等待这些任务及已获准读/搬运/执行许可结束，不再等待前台解绑。目录独立持有存储 owner，writer 完成后 Live 数据仍能获得读取许可。`unbind_retired` 仅是可选的退休状态记录；即使未调用它，仓库确认同代物理释放后也可直接确认 `Reclaimed`。退休或回收完成的代数始终拒绝新读取，`find()` 的存在及其中 writer 是否为空都不能作为读取许可；只有运行时实际截断并移走旧密集块后，才删除墓碑并允许编号重用。该状态机避免“payload 已释放而旧块尚在目录”时把它误认为未托管块。
 
 宿主 `KvMemStore` 的现有选块入口现可查询这个目录：仓库刚提交退休、尚未由前台解绑时，下一轮 top-k、prefill pressure、显式选块和必需前缀检查已把该代看作不可选；解绑后及确认回收后的墓碑也继续阻止重新选中。此检查只是**选块预过滤**，不会取得覆盖 GPU 执行的 ExecLease，也不阻止尚未接入目录的 adapter 快捷路径直接访问 Raw；目录尚未由生产适配器绑定或启动后台删除。追加/截断预检现已下沉到 `KvMemStore`，直接调用 `runtime.store().truncate_to()` 也不能绕过原代数的保护；确认释放后，实际删除密集块时才清除墓碑。截断结果的容量在修改块表前预约，避免返回列表分配失败造成块表已删、墓碑未更新。生产操作仍应走 runtime，由它排空预取并清理 tier 槽位；store 的直接方法只处理元数据。仓库/worker、异步 writer 与 Raw 存储还需统一销毁顺序，不能让后台释放回调捕获先于其销毁的裸 `RawKvStore` 指针。
 
@@ -68,7 +68,7 @@ Mean-K 与 packed K/V 一样只写原代数尚缺失的连续后缀；重复采�
 
 ### 短尾块与非对齐追加
 
-新增 `register_historical_append(repository, storage, writers)`：调用方先取得已有 writer 和实际 payload，该入口验证连续原始位置、逻辑编号、仓库/代数和有效长度，再把块表与身份目录一起登记。所有可能失败的元数据分配先完成，成功才移动 writer；中间一个 span 无效不会留下半张块表或消耗先前 writer。它不分配历史 payload、不代替请求准入、不启动 GC，也不在失败时由前台回收历史存储。退休前已取得的 writer 仍可登记其获准范围，但不能因此重新获得历史可选资格。
+新增 `register_historical_append(repository, storage, writers, producers)`：调用方先取得已有 writer 和实际 payload，该入口验证连续原始位置、逻辑编号、仓库/代数和有效长度，再把块表与身份目录一起登记。所有可能失败的元数据分配先完成，成功才移动 writer；中间一个 span 无效不会留下半张块表或消耗先前 writer。它不分配历史 payload、不代替请求准入、不启动 GC，也不在失败时由前台回收历史存储。退休前已取得的 writer 仍可登记其获准范围，但不能因此重新获得历史可选资格。
 
 已绑定的短尾块不再随 `register_append` 增长；Writing、Live、Retired 和 Reclaimed 都保持原范围。新块从旧范围末端继续，原位置不补齐、不重排。例如 `[0,3)`、`[3,8)` 后，后一块退休，后续可写入新 handle 的 `[8,35)`。当前选择是绑定即固定范围，尚未实现同代可增长尾块的优化；小批次可能产生更多块，必须由后续整请求预约计入真实碎片上界。
 
@@ -90,13 +90,25 @@ Mean-K 与 packed K/V 一样只写原代数尚缺失的连续后缀；重复采�
 
 新增 `HistoricalKvRamReservation` 组合真实槽位、full-slot payload 与实际 scratch 分配。设总输入/最大接受输出 token 为 T，最多非空追加次数为 k=`min(T,max_append_boundaries)`，固定 span 所需槽位的最坏上界为 `k + floor((T-k)/B)`，另加未来额外 in-flight 分配；它不借用旧尾块剩余位置，也不把未来 GC 回收算进可用空间。测试穷举小规模 token 分拆与公式对照，每 token 删除尾块时会按 T 个槽位预约。未确定输出上限、缺少追加次数上限和 streaming 均由该 API 明确拒绝。
 
-这只是**整请求准入的 RAM 资源组件**，尚未接成 CLI/server 的 `try_reserve_request` 总入口。调用方还必须预留 GPU 页、目录/队列元数据及各后端实际 scratch/rollback/extent，限制资源预算与 token/追加次数，并统一失败清理。不能据此宣称正常模型请求已不依赖 GC，或整个进程的元数据已经有界。下一步的生产 owner 还必须取消目录永久持有 creation writer 的做法：只保留真实已提交生产任务的依赖，使后台在它们完成后即可释放，不等下一次前台 active 来解绑。
+这只是**整请求准入的 RAM 资源组件**，尚未接成 CLI/server 的 `try_reserve_request` 总入口。调用方还必须预留 GPU 页、目录/队列元数据及各后端实际 scratch/rollback/extent，限制资源预算与 token/追加次数，并统一失败清理。不能据此宣称正常模型请求已不依赖 GC，或整个进程的元数据已经有界。目录永久持有 creation writer 的问题已在下节修正；正常请求仍须把这些 producer 交接规则接入完整的请求 owner、任务调度与完成发布。
 
 新增预约测试通过逐分配点故障注入检查全量回滚；已存在历史没有被回收，槽位与 payload 容量没有泄漏。另在禁止后续普通堆分配、暂停物理回收的条件下，消费 8 个预约槽位完成每 token 退休的短尾块写入；请求结束后在途 writer 仍持有 payload，最后由后台归还。覆盖 move、跨 owner、短 span 容量、关闭及对象寿命，并在两个申请线程和一个观察线程之间完成 400 次预约/取消/写入/回收。该长循环仅验证固定仓库资源，不替代完整生产目录至少 10×容量的验收。
 
 本轮预约实现通过本地相关 CTest **13/13**、Linux 宿主 CTest **22/22**、宿主 ASan/UBSan **10/10**。独立 TSan 构建的 repository、GC、reservation 三项 **3/3** 通过：主机默认随机地址布局会在测试启动前触发 `unexpected memory mapping`，使用 `setarch x86_64 -R env TSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-tsan-reservation --output-on-failure -R 'historical_kv_(reservation|repository|gc)_test'` 仅调整测试进程即可正常运行，未改变系统设置。这些检查不覆盖 CUDA adapter 的完整并发执行。
 
 CUDA CLI 和定向测试重新编译通过；实际 GGUF 布局上的完整块 5 代复用与短尾块 GPU 测试均通过。本轮没有再次运行默认模型生成对照，因为普通路径未使用新增 RAM 预约组件；这也不构成生产请求预约验收。原始日志位于同一远程隔离目录的 `historical-reservation-{host,asan,gpu}-test.log`、`historical-reservation-tsan-test.log`（初始运行时失败）和 `historical-reservation-tsan-noaslr.log`（成功运行）。
+
+### Producer 随实际任务归还
+
+绑定单块接口新增必填的空 `Producer` 输出，批量追加新增必填的空 `vector<Producer>` 输出；成功时才移走调用方 writer，输出已被占用或其它验证失败均不覆盖原任务。目录内部只保存弱引用与独立的 repository/storage owner。请求方必须在任务全部捕获原 handle 后归还自己的 producer，取消时也必须归还；后续写入使用任务捕获的上下文，不能通过新块号猜测原存储。`find()` 在生产任务结束后可以返回没有 writer 的身份描述，Mean-K / packed 采集已处理这种情况，不会解引用空指针或回退 legacy 写入。读取和搬运从独立 storage owner 获得真实 lease，因此已发布内容不会因 writer 退出而失去可读性。
+
+`unbind_retired` 不再释放 writer，也不是后台回收的前置步骤。目录可能暂时仍记录 Bound，实际选块与读/搬运准入继续以仓库的精确代数状态为准。`confirm_reclaimed` 可直接接受仓库的同代释放确认；旧物理槽已变成新 generation 时也不会开放旧块。确认后才允许删除旧密集块，固定尾部范围的校验不再依赖 writer 是否还活着。
+
+新增宿主并发用例：分别在 Writing 分量采集和 Live 读/搬运尚未结束时启动真实 GC worker；退休立即拒绝新请求，旧任务在独立线程完成，最后一个引用归还后 worker 自动释放全部 CPU payload。主线程没有解绑、没有 manual tick、没有下一轮 active，释放回调也不在主线程执行。随后复用原槽并验证旧代身份仍关闭。GPU 用例保留原有完整块 5 代复用和短尾块检查，并增加真实 CUDA Mean-K 迟到完成后，由 GC worker 自主释放的检查；测试输入仍是已知 fixture 张量。
+
+本轮本地相关 CTest **13/13**、Linux 宿主 **22/22**、宿主 ASan/UBSan **10/10** 和独立 TSan 的 directory/append/legacy-bridge **3/3** 均通过。TSan 仍采用仅限测试子进程的 `setarch x86_64 -R`。CUDA CLI/定向测试重新编译通过，48 层 GPU 验收包含 `PASS managed task lifetime: late CUDA Mean-K completed, background CPU release, no unbind/next active`。原始日志位于远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-producer-{host,asan,tsan,gpu}-test.log`。没有再次运行普通模型生成对照；本次目录仍由受控验收显式绑定，默认路径未启用托管 GC。
+
+这一步消除了目录的永久 writer 依赖，尚不等于正常 CLI/server 已具备完整请求调度。完整生产 owner 仍需预先安排全部 Mean-K/packed 任务、协调完成发布/错误取消、持有实际 GPU 完成许可，并将 RAM 预约与元数据/GPU 预约统一。密集块表及墓碑长期有界和至少 10×容量的完整生产验收仍未完成。
 
 在正式绑定异步 writer 前，已修正两个现有错误路径：D2H 提交失败时保留位置队列供同步回退，并在回退读图张量前完成 scheduler 同步；CUDA stage-in 的直接 H2D fallback 等待 stream 拷贝完成才返回，避免调用者的局部 packed 缓冲区先析构。这些修复不构成 GC 生产接入。
 

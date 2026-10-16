@@ -50,9 +50,10 @@ public:
         uint32_t block_id, std::shared_ptr<HistoricalKvRepository> repository,
         HistoricalKvHandle handle,
         HistoricalKvRepository::Lease & writer,
+        HistoricalKvShadowDirectory::Producer & producer,
         std::shared_ptr<HistoricalKvRawStore> storage = {}) {
         return historical_shadow_directory_.bind_full_block(
-            store_, block_id, std::move(repository), handle, writer, std::move(storage));
+            store_, block_id, std::move(repository), handle, writer, producer, std::move(storage));
     }
     bool unbind_retired_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.unbind_retired(block_id);
@@ -60,16 +61,18 @@ public:
     bool bind_historical_block(
         uint32_t block_id, std::shared_ptr<HistoricalKvRepository> repository,
         HistoricalKvHandle handle, HistoricalKvRepository::Lease & writer,
+        HistoricalKvShadowDirectory::Producer & producer,
         std::shared_ptr<HistoricalKvRawStore> storage) {
         return historical_shadow_directory_.bind_block(
-            store_, block_id, std::move(repository), handle, writer, std::move(storage));
+            store_, block_id, std::move(repository), handle, writer, producer, std::move(storage));
     }
     bool register_historical_append(
         std::shared_ptr<HistoricalKvRepository> repository,
         std::shared_ptr<HistoricalKvRawStore> storage,
-        std::vector<HistoricalKvRepository::Lease> & writers) {
+        std::vector<HistoricalKvRepository::Lease> & writers,
+        std::vector<HistoricalKvShadowDirectory::Producer> & producers) {
         return historical_shadow_directory_.append_blocks(
-            store_, std::move(repository), std::move(storage), writers);
+            store_, std::move(repository), std::move(storage), writers, producers);
     }
     bool confirm_reclaimed_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.confirm_reclaimed(block_id);
