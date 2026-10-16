@@ -56,6 +56,9 @@ public:
     bool unbind_retired_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.unbind_retired(block_id);
     }
+    bool confirm_reclaimed_historical_block(uint32_t block_id) {
+        return historical_shadow_directory_.confirm_reclaimed(block_id);
+    }
     // True while a prepared plan has not been applied yet (prepare_selection /
     // prepare_prefill_pressure set it, admit_incoming clears it).
     bool pending() const { return pending_; }

@@ -20,6 +20,8 @@ class KvMemStore;
 // bypasses these guards and is unsupported while bindings exist.
 class HistoricalKvShadowDirectory {
 public:
+    enum class State { Unmanaged, Bound, Retired, Reclaimed };
+
     class WriterContext {
     public:
         WriterContext(const WriterContext &) = delete;
@@ -49,6 +51,14 @@ public:
         std::shared_ptr<WriterContext> writer_context;
     };
 
+    struct Observation {
+        State state = State::Unmanaged;
+        HistoricalKvHandle handle{};
+        uint64_t repository_id = 0;
+        uint64_t original_begin = 0;
+        uint32_t valid_tokens = 0;
+    };
+
     // On success moves writer into a shared context. On failure leaves writer
     // with the caller, including on allocation failure. One repository owns
     // this directory for the lifetime of its runtime, even when it is empty.
@@ -57,16 +67,28 @@ public:
                          HistoricalKvHandle handle,
                          HistoricalKvRepository::Lease & writer);
     std::optional<Binding> find(uint32_t block_id) const;
+    // Unlike find(), this preserves a retired generation's identity even
+    // after physical release. Retired and Reclaimed are both closed to new
+    // reads; neither is an unmanaged legacy block.
+    Observation observe(uint32_t block_id) const;
 
     // This does NOT call retire. A separately coordinated owner must first
     // retire the exact generation and ensure all production reads are gated.
+    // Drops this directory's writer lease but retains a retired tombstone.
     // Existing async owners can keep WriterContext until their work finishes.
     bool unbind_retired(uint32_t block_id);
+    // Marks the tombstone Reclaimed only after this repository confirms the
+    // exact generation's release callback completed. It remains fail-closed
+    // until the runtime actually drops the dense block on truncate.
+    bool confirm_reclaimed(uint32_t block_id);
 
-    // Called before runtime mutations. A bound block may not be extended,
-    // shrunk, dropped, or reused without explicit safe unbinding.
+    // Called before runtime mutations. A bound or retired block may not be
+    // extended, shrunk, dropped, or reused before confirmed reclamation.
     void validate_append(const KvMemStore & store, uint32_t n_tokens) const;
     void validate_truncate(const KvMemStore & store, uint32_t token_pos) const;
+    // Called by KvMemRuntime after a successful truncate. Only tombstones
+    // whose old dense blocks no longer exist may be removed.
+    void prune_dropped(const KvMemStore & store);
 
     size_t size() const noexcept { return entries_.size(); }
     size_t allocated_bytes() const noexcept;
@@ -74,9 +96,16 @@ public:
 private:
     bool tail_span_matches(const KvMemStore & store) const;
 
+    struct Entry {
+        Binding binding;
+        std::shared_ptr<HistoricalKvRepository> repository;
+        uint64_t repository_id = 0;
+        State state = State::Bound;
+    };
+
     // KvMemStore appends monotonically, so the greatest bound ID also has
     // the greatest original span. Mutation guards inspect only that tail.
-    std::map<uint32_t, Binding> entries_;
+    std::map<uint32_t, Entry> entries_;
     uint64_t repository_id_ = 0;
 };
 

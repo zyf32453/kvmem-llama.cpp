@@ -38,6 +38,8 @@ static void test_retire_closes_new_entry_but_keeps_old_reader() {
     writer->reset();
     check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred,
           "resource freed while an old execution still held its lease");
+    check(!repo.reclaim_completed(handle, repo.repository_id()),
+          "deferred release was reported as complete");
     check(repo.ready_count() == 0 && releases.load() == 0,
           "retired slot became ready before physical release");
     check(!repo.begin_write(43, 543, 5, 2, 64, successful_release(releases)),
@@ -55,11 +57,16 @@ static void test_retire_closes_new_entry_but_keeps_old_reader() {
     check(callback_thread != foreground_thread && releases.load() == 1,
           "release callback did not run exactly once on the reclaimer");
     check(repo.ready_count() == 1, "reclaimed slot was not returned to Ready");
+    check(repo.reclaim_completed(handle, repo.repository_id()),
+          "completed generation had no exact release acknowledgement");
 
     auto next = repo.begin_write(43, 543, 5, 2, 64, successful_release(releases));
     check(next && next->handle().slot == handle.slot &&
           next->handle().generation == handle.generation + 1,
           "Ready slot did not get a new generation");
+    check(repo.reclaim_completed(handle, repo.repository_id()) &&
+          !repo.reclaim_completed(next->handle(), repo.repository_id()),
+          "new generation confused the old release acknowledgement");
     check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Stale,
           "stale handle retired a reused slot");
     check(!repo.acquire_new(handle), "stale handle acquired a reused slot");
@@ -111,6 +118,8 @@ static void test_failed_release_stays_closed_and_retries() {
           "throwing callback was treated as complete");
     check(repo.ready_count() == 0 && !repo.inspect(handle) && !repo.acquire_new(handle),
           "partially released block became visible");
+    check(!repo.reclaim_completed(handle, repo.repository_id()),
+          "unreadable Releasing generation was reported as complete");
     const auto releasing = repo.snapshot();
     check(releasing.size() == 1 && releasing[0].life == HistoricalKvLife::Releasing &&
           releasing[0].handle.generation == handle.generation,
@@ -124,6 +133,8 @@ static void test_failed_release_stays_closed_and_retries() {
           "third release attempt failed");
     check(attempts.load() == 3 && repo.ready_count() == 1,
           "callback retry/Ready accounting incorrect");
+    check(repo.reclaim_completed(handle, repo.repository_id()),
+          "successful callback was not acknowledged");
     check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Stale,
           "completed release was repeated");
 }
@@ -278,6 +289,9 @@ static void test_repository_identity_and_releasing_authority() {
           second.owns_writer(*foreign) && !second.owns_writer(*writer),
           "repository identity accepted a foreign writer with the same handle");
     const auto handle = writer->handle();
+    check(!first.reclaim_completed(handle, second.repository_id()) &&
+          !second.reclaim_completed(handle, first.repository_id()),
+          "equal-looking foreign handle was accepted as a release acknowledgement");
     check(!first.is_releasing(handle), "Writing was mistaken for Releasing");
     check(first.retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
           !first.is_releasing(handle),
@@ -286,11 +300,17 @@ static void test_repository_identity_and_releasing_authority() {
     check(first.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
           callback_saw_releasing && !first.is_releasing(handle),
           "physical release did not occur only in the Releasing phase");
+    check(first.reclaim_completed(handle, first.repository_id()) &&
+          !first.reclaim_completed(handle, second.repository_id()) &&
+          !second.reclaim_completed(handle, second.repository_id()),
+          "one repository's release completed the other's equal-looking handle");
     check(second.retire(foreign->handle()) == HistoricalKvRepository::RetireResult::Committed,
           "foreign repository cleanup could not retire its writer");
     foreign->reset();
     check(second.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
           "foreign repository cleanup could not release its slot");
+    check(second.reclaim_completed(handle, second.repository_id()),
+          "second repository did not acknowledge its own release");
 }
 
 int main() {

@@ -95,6 +95,12 @@ public:
     // Only Releasing has closed all lease admission and drained old refs.
     // Storage callbacks may release physical payload only in this phase.
     bool is_releasing(HistoricalKvHandle handle) const noexcept;
+    // True only after the exact generation's release callback completed and
+    // its slot crossed to Ready. A later generation also proves completion.
+    // The repository ID prevents equal-looking handles from another owner
+    // from being used as a reclaim acknowledgement.
+    bool reclaim_completed(HistoricalKvHandle handle,
+                           uint64_t expected_repository_id) const noexcept;
     std::optional<HistoricalKvBlockMeta> inspect(HistoricalKvHandle handle) const;
     // Bounded, individually guarded observations; not a global atomic instant.
     // `active` counts repository ExecLease objects, not device work; the

@@ -97,6 +97,7 @@ std::vector<KvMemDroppedBlock> KvMemRuntime::truncate_to(uint32_t token_pos) {
     wait_prefetch();
     prefetch_buf_.clear();
     auto dropped = store_.truncate_to(token_pos);
+    historical_shadow_directory_.prune_dropped(store_);
     for (const auto &d : dropped) {
         if (cpu_tier_ && d.cpu_slot >= 0) {
             cpu_tier_->release_block(d.block_id);

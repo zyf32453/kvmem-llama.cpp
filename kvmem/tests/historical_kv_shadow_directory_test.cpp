@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 using namespace kvmem;
@@ -83,15 +84,31 @@ static void test_full_block_binding_and_runtime_owner_move() {
 
     CHECK(repo->retire(handle) == HistoricalKvRepository::RetireResult::Committed);
     CHECK(moved->unbind_retired_historical_block(0));
-    moved->truncate_to(0);
-    CHECK(moved->historical_shadow_directory().size() == 0);
-    CHECK(moved->store().total_tokens() == 0);
+    CHECK(!moved->historical_shadow_directory().find(0));
+    const auto retired = moved->historical_shadow_directory().observe(0);
+    CHECK(retired.state == HistoricalKvShadowDirectory::State::Retired &&
+          retired.repository_id == repo->repository_id() &&
+          retired.handle.generation == handle.generation &&
+          retired.original_begin == 0 && retired.valid_tokens == 4);
+    CHECK(!moved->confirm_reclaimed_historical_block(0));
+    CHECK(throws_logic([&] { moved->truncate_to(0); }));
+    CHECK(moved->historical_shadow_directory().size() == 1);
     // External harvest may still hold the old writer after the directory
     // unbinds. No release is attempted until all copies go away.
     CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred);
     after_move.reset();
     binding.reset();
     CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(moved->confirm_reclaimed_historical_block(0));
+    CHECK(moved->historical_shadow_directory().observe(0).state ==
+          HistoricalKvShadowDirectory::State::Reclaimed);
+    CHECK(!moved->historical_shadow_directory().find(0) &&
+          moved->store().block_count() == 2);
+    moved->truncate_to(0);
+    CHECK(moved->historical_shadow_directory().size() == 0 &&
+          moved->store().total_tokens() == 0 &&
+          moved->historical_shadow_directory().observe(0).state ==
+              HistoricalKvShadowDirectory::State::Unmanaged);
 }
 
 static void test_truncate_then_reuse_dense_id() {
@@ -113,9 +130,20 @@ static void test_truncate_then_reuse_dense_id() {
     CHECK(!runtime.unbind_retired_historical_block(1));
     CHECK(repo->retire(old) == HistoricalKvRepository::RetireResult::Committed);
     CHECK(runtime.unbind_retired_historical_block(1));
+    CHECK(!runtime.historical_shadow_directory().find(1));
+    CHECK(runtime.historical_shadow_directory().observe(1).state ==
+          HistoricalKvShadowDirectory::State::Retired);
+    CHECK(!runtime.confirm_reclaimed_historical_block(1));
+    CHECK(throws_logic([&] { runtime.truncate_to(4); }));
     CHECK(repo->try_reclaim(old) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(runtime.confirm_reclaimed_historical_block(1));
+    CHECK(runtime.historical_shadow_directory().observe(1).state ==
+          HistoricalKvShadowDirectory::State::Reclaimed);
+    CHECK(throws_logic([&] { runtime.truncate_to(6); }));
     const auto dropped = runtime.truncate_to(4);
-    CHECK(dropped.size() == 1 && dropped[0].block_id == 1);
+    CHECK(dropped.size() == 1 && dropped[0].block_id == 1 &&
+          runtime.historical_shadow_directory().observe(1).state ==
+              HistoricalKvShadowDirectory::State::Unmanaged);
     runtime.register_append(4);
     CHECK(runtime.store().blocks()[1].block_id == 1);
 
@@ -144,6 +172,8 @@ static void test_truncate_then_reuse_dense_id() {
           HistoricalKvRepository::ReclaimResult::Complete);
     CHECK(repo->try_reclaim(replacement_handle) ==
           HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(runtime.confirm_reclaimed_historical_block(0));
+    CHECK(runtime.confirm_reclaimed_historical_block(1));
     runtime.truncate_to(0);
 }
 
@@ -199,12 +229,17 @@ static void test_reject_partial_foreign_and_mismatched_writer() {
     CHECK(foreign->retire(bound->handle) ==
           HistoricalKvRepository::RetireResult::Committed);
     CHECK(runtime.unbind_retired_historical_block(0));
+    CHECK(!runtime.historical_shadow_directory().find(0) &&
+          runtime.historical_shadow_directory().observe(0).state ==
+              HistoricalKvShadowDirectory::State::Retired);
+    CHECK(!runtime.confirm_reclaimed_historical_block(0));
     CHECK(foreign->try_reclaim(bound->handle) ==
           HistoricalKvRepository::ReclaimResult::Deferred);
     const auto bound_handle = bound->handle;
     bound.reset();
     CHECK(foreign->try_reclaim(bound_handle) ==
           HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(runtime.confirm_reclaimed_historical_block(0));
     runtime.truncate_to(0);
 }
 
@@ -241,6 +276,56 @@ static void test_wrong_expected_generation_keeps_writer() {
     CHECK(repo->retire(exact) == HistoricalKvRepository::RetireResult::Committed);
     CHECK(runtime.unbind_retired_historical_block(0));
     CHECK(repo->try_reclaim(exact) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(runtime.confirm_reclaimed_historical_block(0));
+}
+
+static void test_tombstone_survives_deferred_and_releasing_retry() {
+    auto repo = std::make_shared<HistoricalKvRepository>(1, 86);
+    KvMemRuntime runtime(config());
+    runtime.register_append(4);
+    unsigned attempts = 0;
+    auto writer = repo->begin_write(0, 0, 4, 1, 8,
+        [&attempts](const HistoricalKvHandle &) { return ++attempts > 1; });
+    CHECK(writer.has_value());
+    if (!writer) return;
+    const auto handle = writer->handle();
+    CHECK(runtime.bind_historical_full_block(0, repo, handle, *writer));
+    auto in_flight = runtime.historical_shadow_directory().find(0);
+    CHECK(in_flight.has_value());
+    CHECK(repo->retire(handle) == HistoricalKvRepository::RetireResult::Committed);
+    CHECK(runtime.unbind_retired_historical_block(0));
+    CHECK(!runtime.historical_shadow_directory().find(0));
+    CHECK(runtime.historical_shadow_directory().observe(0).state ==
+          HistoricalKvShadowDirectory::State::Retired);
+
+    HistoricalKvRepository::ReclaimResult result =
+        HistoricalKvRepository::ReclaimResult::Stale;
+    std::thread deferred_worker([&] { result = repo->try_reclaim(handle); });
+    deferred_worker.join();
+    CHECK(result == HistoricalKvRepository::ReclaimResult::Deferred);
+    CHECK(!runtime.confirm_reclaimed_historical_block(0));
+    in_flight.reset();
+
+    std::thread retry_worker([&] { result = repo->try_reclaim(handle); });
+    retry_worker.join();
+    CHECK(result == HistoricalKvRepository::ReclaimResult::Retry);
+    CHECK(!repo->inspect(handle)); // Releasing is intentionally unreadable.
+    CHECK(!repo->reclaim_completed(handle, repo->repository_id()));
+    CHECK(!runtime.confirm_reclaimed_historical_block(0));
+    CHECK(throws_logic([&] { runtime.truncate_to(0); }));
+
+    std::thread complete_worker([&] { result = repo->try_reclaim(handle); });
+    complete_worker.join();
+    CHECK(result == HistoricalKvRepository::ReclaimResult::Complete && attempts == 2);
+    CHECK(repo->reclaim_completed(handle, repo->repository_id()));
+    CHECK(runtime.confirm_reclaimed_historical_block(0));
+    CHECK(!runtime.historical_shadow_directory().find(0) &&
+          runtime.historical_shadow_directory().observe(0).state ==
+              HistoricalKvShadowDirectory::State::Reclaimed);
+    CHECK(throws_logic([&] { runtime.truncate_to(2); }));
+    runtime.truncate_to(0);
+    CHECK(runtime.historical_shadow_directory().observe(0).state ==
+          HistoricalKvShadowDirectory::State::Unmanaged);
 }
 
 int main() {
@@ -249,6 +334,7 @@ int main() {
     test_reject_partial_foreign_and_mismatched_writer();
     test_closed_session_keeps_writer_with_caller();
     test_wrong_expected_generation_keeps_writer();
+    test_tombstone_survives_deferred_and_releasing_retry();
     if (failures != 0) {
         std::printf("FAILED: %d check(s)\n", failures);
         return 1;

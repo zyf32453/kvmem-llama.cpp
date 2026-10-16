@@ -412,6 +412,26 @@ bool HistoricalKvRepository::is_releasing(HistoricalKvHandle handle) const noexc
            slot.generation.load(std::memory_order_acquire) == handle.generation;
 }
 
+bool HistoricalKvRepository::reclaim_completed(
+        HistoricalKvHandle handle, uint64_t expected_repository_id) const noexcept {
+    const auto shared = shared_;
+    if (expected_repository_id != shared->repository_id ||
+        handle.incarnation != shared->incarnation ||
+        handle.slot >= shared->capacity || handle.generation == 0) return false;
+    const auto & slot = shared->slots[handle.slot];
+    // A newer generation can only have been reserved after the old callback
+    // returned true and Ready was published. Generation never wraps.
+    const auto generation = slot.generation.load(std::memory_order_acquire);
+    if (generation > handle.generation) return true;
+    if (generation != handle.generation) return false;
+    // Ready is published with release ordering after the callback completes.
+    // Reserving is reachable only by claiming that Ready state. Reading the
+    // phase alone, rather than inspect()==null, avoids mistaking Releasing or
+    // a bounded pin failure for a completed physical release.
+    const Phase phase = phase_of(slot.control.load(std::memory_order_acquire));
+    return phase == Phase::Ready || phase == Phase::Reserving;
+}
+
 std::optional<HistoricalKvBlockMeta> HistoricalKvRepository::inspect(
     HistoricalKvHandle handle) const {
     const auto shared = shared_;
