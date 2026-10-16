@@ -67,7 +67,7 @@ static void test_exact_generation_ram_reclamation() {
                               {30, 31, 32, 33, 34, 35},
                               {5.0f, 6.0f, 7.0f, 8.0f}, 3),
           "write-once layer was overwritten");
-    auto info = store->inspect(old);
+    auto info = store->inspect(repo, old);
     check(info && info->original_begin == 713 && info->valid_tokens == 3 &&
           info->written_layers == 2 && info->payload_bytes == old_bytes,
           "explicit original span or byte accounting was lost");
@@ -88,7 +88,8 @@ static void test_exact_generation_ram_reclamation() {
           foreign_writer->handle().slot == old.slot &&
           foreign_writer->handle().generation == old.generation,
           "foreign repository did not reproduce an equal external handle");
-    check(!store->read_layer(*foreign_writer, old, 0) &&
+    check(!store->inspect(foreign, old) &&
+          !store->read_layer(*foreign_writer, old, 0) &&
           !store->write_layer(*foreign_writer, old, 0,
               {1, 2, 3, 4, 5, 6, 7, 8, 9}, {10, 11, 12, 13, 14, 15},
               {1.0f, 2.0f, 3.0f, 4.0f}, 3),
@@ -139,7 +140,7 @@ static void test_exact_generation_ram_reclamation() {
           "RAM release did not run once on the background reclaimer");
     check(release_result.code == HistoricalKvRawStore::ReleaseCode::Released &&
           release_result.physical_payload_bytes == old_bytes &&
-          store->allocated_payload_bytes() == 0 && !store->inspect(old),
+          store->allocated_payload_bytes() == 0 && !store->inspect(repo, old),
           "physical payload bytes were not returned after reclaim");
 
     // A different repository may use the same externally chosen incarnation

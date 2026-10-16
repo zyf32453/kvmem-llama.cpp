@@ -314,7 +314,7 @@ void test_manager_reclaims_real_ram_payload() {
     reader->reset();
     gc.manual_tick();
     check(raw->allocated_payload_bytes() == 0 && repo->ready_count() == 2 &&
-          !raw->inspect(handle), "manager did not release real RAM bytes");
+          !raw->inspect(*repo, handle), "manager did not release real RAM bytes");
 }
 
 } // namespace

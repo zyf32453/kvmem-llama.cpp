@@ -76,7 +76,10 @@ public:
     std::optional<LayerSnapshot> read_layer(
         const HistoricalKvRepository::Lease & reader,
         HistoricalKvHandle handle, uint32_t layer) const;
-    std::optional<BlockInfo> inspect(HistoricalKvHandle handle) const;
+    // Repository identity is required even for metadata observations: an
+    // external incarnation can be deliberately reused by another owner.
+    std::optional<BlockInfo> inspect(const HistoricalKvRepository & repository,
+                                     HistoricalKvHandle handle) const;
 
     // Exact-repository, exact-generation, whole-bundle release. The caller's
     // repository must be in Releasing, after all old leases have drained.

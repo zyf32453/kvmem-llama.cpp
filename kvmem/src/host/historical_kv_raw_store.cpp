@@ -161,13 +161,15 @@ HistoricalKvRawStore::read_layer(
 }
 
 std::optional<HistoricalKvRawStore::BlockInfo>
-HistoricalKvRawStore::inspect(HistoricalKvHandle handle) const {
+HistoricalKvRawStore::inspect(const HistoricalKvRepository & repository,
+                              HistoricalKvHandle handle) const {
     if (!handle.incarnation || !handle.generation || handle.slot >= slots_.size())
         return std::nullopt;
     const Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const Block * block = slot.block.get();
-    if (!block || !same(block->handle, handle)) return std::nullopt;
+    if (!block || block->repository_id != repository.repository_id() ||
+        !same(block->handle, handle)) return std::nullopt;
     return BlockInfo{block->handle, block->original_begin,
                      block->valid_tokens, block->written_layers,
                      block->payload_bytes};
