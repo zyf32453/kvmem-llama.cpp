@@ -86,6 +86,22 @@ public:
                      const std::vector<uint8_t> & packed_v,
                      const std::vector<float> & mean_k_sum,
                      uint32_t mean_tokens);
+    // Harvest may deliver K, V and the mean-K sum independently and in a
+    // different order. Each component has its own contiguous token prefix.
+    // A layer is complete only after every configured component covers the
+    // reserved span; no partial layer can be published or read as complete.
+    bool write_packed_k_slice(const HistoricalKvRepository::Lease & writer,
+                              HistoricalKvHandle handle, uint32_t layer,
+                              uint32_t token_offset, uint32_t token_count,
+                              const std::vector<uint8_t> & packed_k);
+    bool write_packed_v_slice(const HistoricalKvRepository::Lease & writer,
+                              HistoricalKvHandle handle, uint32_t layer,
+                              uint32_t token_offset, uint32_t token_count,
+                              const std::vector<uint8_t> & packed_v);
+    bool write_mean_k_slice(const HistoricalKvRepository::Lease & writer,
+                            HistoricalKvHandle handle, uint32_t layer,
+                            uint32_t token_offset, uint32_t token_count,
+                            const std::vector<float> & mean_k_sum);
     // Publish only when every layer has its full reserved span. The slot lock
     // serializes this transition with write_slice/write_layer in this store.
     // A strategy may still retire the writer; then publication fails.
@@ -119,7 +135,9 @@ private:
         std::vector<uint8_t> packed_v;
         std::vector<float> mean_k_sum;
         uint32_t mean_tokens = 0;
-        uint32_t written_tokens = 0;
+        uint32_t k_written_tokens = 0;
+        uint32_t v_written_tokens = 0;
+        uint32_t mean_written_tokens = 0;
         bool written = false;
     };
     struct Block {
@@ -140,6 +158,7 @@ private:
     };
 
     static bool same(HistoricalKvHandle a, HistoricalKvHandle b) noexcept;
+    void mark_layer_complete(Block & block, Layer & layer) const noexcept;
     HistoricalKvRawStoreConfig config_;
     std::vector<std::unique_ptr<Slot>> slots_;
     std::atomic<uint64_t> allocated_payload_bytes_{0};

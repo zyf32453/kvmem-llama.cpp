@@ -97,7 +97,13 @@ static void test_exact_generation_ram_reclamation() {
           !store->read_layer(*foreign_writer, old, 0) &&
           !store->write_layer(*foreign_writer, old, 0,
               {1, 2, 3, 4, 5, 6, 7, 8, 9}, {10, 11, 12, 13, 14, 15},
-              {1.0f, 2.0f, 3.0f, 4.0f}, 3),
+              {1.0f, 2.0f, 3.0f, 4.0f}, 3) &&
+          !store->write_packed_k_slice(*foreign_writer, old, 0, 0, 1,
+                                       {1, 2, 3}) &&
+          !store->write_packed_v_slice(*foreign_writer, old, 0, 0, 1,
+                                       {10, 11}) &&
+          !store->write_mean_k_slice(*foreign_writer, old, 0, 0, 1,
+                                     {1.0f, 2.0f, 3.0f, 4.0f}),
           "foreign lease accessed the owner's RAM payload");
     check(foreign.retire(old) == HistoricalKvRepository::RetireResult::Committed,
           "foreign block retirement failed");
@@ -370,10 +376,225 @@ static void test_published_writer_cannot_mutate_payload() {
           "publication test payload did not reclaim");
 }
 
+static void test_independent_harvest_components() {
+    HistoricalKvRawStoreConfig config;
+    config.n_layer = 2;
+    config.max_tokens_per_slot = 4;
+    config.packed_k_bytes_per_token = 2;
+    config.packed_v_bytes_per_token = 1;
+    config.mean_k_elements = 2;
+    HistoricalKvRawStore store(config, 1);
+    HistoricalKvRepository repo(1, 99);
+    auto release = [&](const HistoricalKvHandle & handle) {
+        return callback_succeeded(store.release(repo, handle).code);
+    };
+    auto writer = repo.begin_write(40, 13, 3, 1, 33, release);
+    check(writer.has_value(), "component writer was not admitted");
+    const HistoricalKvHandle handle = writer->handle();
+    check(store.reserve(*writer, handle, 13, 3),
+          "unaligned component span was not reserved");
+
+    // The adapter can deliver mean, V and K in separate jobs. Their relative
+    // order is irrelevant, but each component must cover its own prefix.
+    check(store.write_mean_k_slice(*writer, handle, 0, 0, 2, {1.0f, 2.0f}) &&
+          store.write_packed_v_slice(*writer, handle, 0, 0, 3, {7, 8, 9}) &&
+          store.write_packed_k_slice(*writer, handle, 0, 0, 1, {1, 2}),
+          "independent component writes failed");
+    check(!store.write_packed_k_slice(*writer, handle, 0, 2, 1, {5, 6}) &&
+          !store.write_packed_v_slice(*writer, handle, 0, 0, 1, {7}) &&
+          !store.write_mean_k_slice(*writer, handle, 0, 0, 1, {3.0f, 4.0f}) &&
+          !store.write_mean_k_slice(*writer, handle, 0, 2, 1, {3.0f}) &&
+          !store.write_packed_k_slice(*writer, handle, 0, 1, 3,
+                                      {3, 4, 5, 6, 7, 8}),
+          "component hole, duplicate, wrong dimension or overflow was accepted");
+    check(!store.read_layer(*writer, handle, 0) &&
+          !store.publish_complete(repo, *writer, handle),
+          "partial component data was exposed or published");
+
+    check(store.write_packed_k_slice(*writer, handle, 0, 1, 2, {3, 4, 5, 6}) &&
+          store.write_mean_k_slice(*writer, handle, 0, 2, 1, {3.0f, 4.0f}),
+          "independent component tail did not complete");
+    check(store.inspect(repo, handle)->written_layers == 1 &&
+          !store.publish_complete(repo, *writer, handle),
+          "missing second layer was published");
+    check(store.write_packed_v_slice(*writer, handle, 1, 0, 3, {10, 11, 12}) &&
+          store.write_mean_k_slice(*writer, handle, 1, 0, 3, {5.0f, 6.0f}) &&
+          store.write_packed_k_slice(*writer, handle, 1, 0, 3,
+                                     {21, 22, 23, 24, 25, 26}) &&
+          store.publish_complete(repo, *writer, handle),
+          "out-of-order multi-layer harvest did not publish");
+    auto reader = repo.acquire_read(handle);
+    check(reader.has_value(), "published component block was not readable");
+    const auto layer = store.read_layer(*reader, handle, 0);
+    check(layer && layer->packed_k == std::vector<uint8_t>({1, 2, 3, 4, 5, 6}) &&
+          layer->packed_v == std::vector<uint8_t>({7, 8, 9}) &&
+          layer->mean_k_sum == std::vector<float>({4.0f, 6.0f}) &&
+          layer->mean_tokens == 3,
+          "out-of-order component payload changed");
+    check(!store.write_packed_k_slice(*writer, handle, 0, 0, 1, {9, 9}) &&
+          !store.write_packed_v_slice(*writer, handle, 0, 0, 1, {9}) &&
+          !store.write_mean_k_slice(*writer, handle, 0, 0, 1, {9.0f, 9.0f}),
+          "published component was overwritten");
+
+    const uint64_t allocated = store.allocated_payload_bytes();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "component block was not retired");
+    writer->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred &&
+          store.allocated_payload_bytes() == allocated,
+          "component payload was released below an existing reader");
+    reader->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          store.allocated_payload_bytes() == 0,
+          "component payload was not reclaimed after readers completed");
+
+    auto retired_writer = repo.begin_write(41, 17, 2, 2, 22, release);
+    check(retired_writer.has_value(), "new component generation was not admitted");
+    const HistoricalKvHandle later = retired_writer->handle();
+    check(store.reserve(*retired_writer, later, 17, 2) &&
+          store.write_packed_v_slice(*retired_writer, later, 0, 0, 2, {1, 2}) &&
+          repo.retire(later) == HistoricalKvRepository::RetireResult::Committed &&
+          store.write_packed_k_slice(*retired_writer, later, 0, 0, 2,
+                                     {3, 4, 5, 6}) &&
+          store.write_mean_k_slice(*retired_writer, later, 0, 0, 2,
+                                    {7.0f, 8.0f}) &&
+          store.write_packed_k_slice(*retired_writer, later, 1, 0, 2,
+                                     {9, 10, 11, 12}) &&
+          store.write_packed_v_slice(*retired_writer, later, 1, 0, 2,
+                                     {13, 14}) &&
+          store.write_mean_k_slice(*retired_writer, later, 1, 0, 2,
+                                    {15.0f, 16.0f}) &&
+          store.inspect(repo, later)->written_layers == 2 &&
+          !store.publish_complete(repo, *retired_writer, later),
+          "retired component writer was interrupted or republished");
+    retired_writer->reset();
+    check(repo.try_reclaim(later) == HistoricalKvRepository::ReclaimResult::Complete &&
+          store.allocated_payload_bytes() == 0,
+          "retired component generation was not reclaimed");
+}
+
+static void test_independent_components_without_mean() {
+    HistoricalKvRawStoreConfig config;
+    config.n_layer = 1;
+    config.max_tokens_per_slot = 2;
+    config.packed_k_bytes_per_token = 1;
+    config.packed_v_bytes_per_token = 1;
+    HistoricalKvRawStore store(config, 1);
+    HistoricalKvRepository repo(1, 100);
+    auto writer = repo.begin_write(42, 5, 2, 1, 4,
+        [&](const HistoricalKvHandle & handle) {
+            return callback_succeeded(store.release(repo, handle).code);
+        });
+    check(writer.has_value(), "no-mean writer was not admitted");
+    const auto handle = writer->handle();
+    check(store.reserve(*writer, handle, 5, 2) &&
+          store.write_packed_v_slice(*writer, handle, 0, 0, 2, {3, 4}) &&
+          !store.publish_complete(repo, *writer, handle) &&
+          !store.write_mean_k_slice(*writer, handle, 0, 0, 2, {}),
+          "a missing K or disabled mean was accepted");
+    check(store.write_packed_k_slice(*writer, handle, 0, 0, 2, {1, 2}) &&
+          store.publish_complete(repo, *writer, handle),
+          "K/V-only layer did not publish without optional mean");
+    writer->reset();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          store.allocated_payload_bytes() == 0,
+          "K/V-only component payload was not reclaimed");
+}
+
+static void test_concurrent_component_arrival() {
+    HistoricalKvRawStoreConfig config;
+    config.n_layer = 1;
+    config.max_tokens_per_slot = 2;
+    config.packed_k_bytes_per_token = 2;
+    config.packed_v_bytes_per_token = 1;
+    config.mean_k_elements = 2;
+    HistoricalKvRawStore store(config, 1);
+    HistoricalKvRepository repo(1, 101);
+    auto writer = repo.begin_write(43, 9, 2, 1, 14,
+        [&](const HistoricalKvHandle & handle) {
+            return callback_succeeded(store.release(repo, handle).code);
+        });
+    check(writer.has_value(), "concurrent component writer was not admitted");
+    const auto handle = writer->handle();
+    check(store.reserve(*writer, handle, 9, 2),
+          "concurrent component span was not reserved");
+    bool k_ok = false, v_ok = false, mean_ok = false;
+    std::thread k([&] {
+        k_ok = store.write_packed_k_slice(*writer, handle, 0, 0, 2,
+                                           {1, 2, 3, 4});
+    });
+    std::thread v([&] {
+        v_ok = store.write_packed_v_slice(*writer, handle, 0, 0, 2,
+                                           {5, 6});
+    });
+    std::thread mean([&] {
+        mean_ok = store.write_mean_k_slice(*writer, handle, 0, 0, 2,
+                                             {7.0f, 8.0f});
+    });
+    k.join();
+    v.join();
+    mean.join();
+    check(k_ok && v_ok && mean_ok &&
+          store.inspect(repo, handle)->written_layers == 1 &&
+          store.publish_complete(repo, *writer, handle),
+          "concurrent components did not form exactly one complete layer");
+    writer->reset();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          store.allocated_payload_bytes() == 0,
+          "concurrent component payload was not reclaimed");
+}
+
+static void test_combined_slice_remains_atomic_with_component_writes() {
+    HistoricalKvRawStoreConfig config;
+    config.n_layer = 1;
+    config.max_tokens_per_slot = 3;
+    config.packed_k_bytes_per_token = 1;
+    config.packed_v_bytes_per_token = 1;
+    config.mean_k_elements = 1;
+    HistoricalKvRawStore store(config, 1);
+    HistoricalKvRepository repo(1, 102);
+    auto writer = repo.begin_write(44, 6, 3, 1, 18,
+        [&](const HistoricalKvHandle & handle) {
+            return callback_succeeded(store.release(repo, handle).code);
+        });
+    check(writer.has_value(), "mixed-slice writer was not admitted");
+    const auto handle = writer->handle();
+    check(store.reserve(*writer, handle, 6, 3) &&
+          store.write_packed_k_slice(*writer, handle, 0, 0, 1, {1}),
+          "mixed-slice K prefix failed");
+    check(!store.write_slice(*writer, handle, 0, 1, 1,
+                             {2}, {5}, {2.0f}, 1) &&
+          store.write_packed_v_slice(*writer, handle, 0, 0, 1, {4}) &&
+          store.write_mean_k_slice(*writer, handle, 0, 0, 1, {1.0f}),
+          "rejected combined slice partially advanced V or mean");
+    check(store.write_slice(*writer, handle, 0, 1, 2,
+                            {2, 3}, {5, 6}, {5.0f}, 2) &&
+          store.publish_complete(repo, *writer, handle),
+          "combined tail did not complete independently seeded prefixes");
+    auto reader = repo.acquire_read(handle);
+    const auto layer = reader ? store.read_layer(*reader, handle, 0) : std::nullopt;
+    check(layer && layer->packed_k == std::vector<uint8_t>({1, 2, 3}) &&
+          layer->packed_v == std::vector<uint8_t>({4, 5, 6}) &&
+          layer->mean_k_sum == std::vector<float>({6.0f}),
+          "mixed component and combined slice corrupted payload");
+    reader->reset();
+    writer->reset();
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          store.allocated_payload_bytes() == 0,
+          "mixed-slice payload was not reclaimed");
+}
+
 int main() {
     test_exact_generation_ram_reclamation();
     test_incremental_unaligned_tail_retired_while_writing();
     test_abandoned_partial_writer_reclaims_payload();
     test_published_writer_cannot_mutate_payload();
+    test_independent_harvest_components();
+    test_independent_components_without_mean();
+    test_concurrent_component_arrival();
+    test_combined_slice_remains_atomic_with_component_writes();
     std::cout << "historical KV RAM payload checks passed\n";
 }
