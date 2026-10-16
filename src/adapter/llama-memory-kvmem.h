@@ -264,7 +264,8 @@ private:
     void harvest_full_blocks_async();
     void decode_mean_ingest(struct ggml_backend_sched * sched);
     void decode_mean_reset();
-    void decode_mean_add_range(uint32_t tok0, uint32_t n_add);
+    struct MeanWriteRange;
+    void decode_mean_add_range(const MeanWriteRange & range, uint32_t n_add);
     void decode_mean_zero_acc();
     bool decode_mean_add_host_layer(struct ggml_tensor * t, int il, uint32_t tok0, uint32_t n_add);
     void decode_mean_print_sum();
@@ -309,7 +310,10 @@ private:
                                          int64_t d, int64_t h, int64_t n,
                                          size_t nb0, size_t nb1, size_t nb2,
                                          std::vector<uint16_t> & out);
-    void harvest_from_host(int il, char which, const uint8_t * host,
+    struct CaptureBatch;
+    CaptureBatch capture_batch(const std::vector<llama_pos> & positions) const;
+    void commit_mean_k(const CaptureBatch & batch, uint32_t il, const std::vector<float> & flat);
+    void harvest_from_host(const CaptureBatch & batch, int il, char which, const uint8_t * host,
                            ggml_type type, int64_t d, int64_t h, int64_t n,
                            size_t nb0, size_t nb1, size_t nb2);
     bool d2h_init();
@@ -445,8 +449,23 @@ private:
     bool query_frozen_ = false;
     uint64_t attention_epoch_ = 0;
 
-    std::vector<std::vector<llama_pos>> pos_queue_;
-    std::vector<llama_pos> cur_pos_;
+    struct MeanWriteRange {
+        enum class Route { Legacy, Managed, Closed };
+        Route route = Route::Closed;
+        uint32_t source_token = 0;
+        uint32_t token_count = 0;
+        uint32_t original_begin = 0;
+        uint32_t token_offset = 0;
+        std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
+    };
+    struct CaptureBatch {
+        std::vector<llama_pos> positions;
+        std::vector<MeanWriteRange> ranges;
+    };
+    // Positions and writer identity are captured together before model work.
+    // Async workers consume their own batch, never a current directory lookup.
+    std::vector<CaptureBatch> pos_queue_;
+    CaptureBatch cur_capture_; // synchronous fallback only
     struct CaptureNode {
         ggml_tensor * t = nullptr;
         int il = 0;
@@ -454,7 +473,9 @@ private:
     };
     std::vector<CaptureNode> pending_capture_;
     std::vector<CaptureNode> decode_mean_pending_k_;
-    std::vector<llama_pos> decode_mean_pending_pos_;
+    CaptureBatch decode_mean_pending_batch_;
+    MeanWriteRange decode_mean_target_;
+    std::vector<uint8_t> decode_mean_committed_;
     uint32_t decode_mean_n_ = 0;
     uint32_t decode_mean_block_ = ~0u;
     uint32_t decode_mean_pos0_ = 0;

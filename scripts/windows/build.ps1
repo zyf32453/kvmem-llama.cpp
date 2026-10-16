@@ -72,6 +72,7 @@ if (!$HostOnly) {
     $graph = Join-Path $SourceDir 'patches/cuda-graph-decode.patch'
     $gdnOutput = Join-Path $SourceDir 'patches/gdn-output-fusion.patch'
     $graphReactivation = Join-Path $SourceDir 'patches/cuda-graph-reactivation.patch'
+    $qwen3MoeCapture = Join-Path $SourceDir 'patches/0006-qwen3moe-capture.patch'
     function Test-PatchApplied([string]$PatchPath) {
         $savedPreference = $ErrorActionPreference
         try {
@@ -97,6 +98,10 @@ if (!$HostOnly) {
     if (!(Test-PatchApplied $graphReactivation)) {
         Invoke-Checked git @('-C', $llama, 'apply', '--check', $graphReactivation)
         Invoke-Checked git @('-C', $llama, 'apply', $graphReactivation)
+    }
+    if (!(Test-PatchApplied $qwen3MoeCapture)) {
+        Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', '--check', $qwen3MoeCapture)
+        Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', $qwen3MoeCapture)
     }
 }
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',

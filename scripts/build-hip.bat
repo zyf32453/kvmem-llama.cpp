@@ -57,6 +57,15 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
+set "QWEN3MOE_PATCH=%ROOT%\patches\0006-qwen3moe-capture.patch"
+git -C "%LLAMA_DIR%" apply --ignore-space-change --reverse --check "%QWEN3MOE_PATCH%" >nul 2>&1
+if errorlevel 1 (
+    git -C "%LLAMA_DIR%" apply --ignore-space-change --check "%QWEN3MOE_PATCH%"
+    if errorlevel 1 exit /b 1
+    git -C "%LLAMA_DIR%" apply --ignore-space-change "%QWEN3MOE_PATCH%"
+    if errorlevel 1 exit /b 1
+)
+
 if "%JOBS%"=="" set "JOBS=12"
 if "%BUILD_DIR%"=="" set "BUILD_DIR=%ROOT%\build-hip-win"
 

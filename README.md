@@ -114,7 +114,7 @@ scripts/apply-patches.sh
 scripts/build-cuda.sh
 ```
 
-The current `master` source pins ggml-org/llama.cpp at release `v0.5.0` (`7fe450e19`). `scripts/apply-patches.sh` applies `patches/llama-kvmem-current.patch` and the separate RDNA2 patch. Running it twice is safe. Do **not** apply numbered `0001`–`0004` together with the cumulative patch. The published `v0.17.0` and `v0.16.0-rc3` tags retain their original `b81c99b` pin; use `master` to build this revision. See [patches/README.md](patches/README.md).
+The current `master` source pins ggml-org/llama.cpp at release `v0.5.0` (`7fe450e19`). `scripts/apply-patches.sh` applies `patches/llama-kvmem-current.patch` and the separate graph, GDN, RDNA2 and Qwen3 MoE capture patches. Running it twice is safe. Do **not** apply numbered `0001`–`0004` together with the cumulative patch. The published `v0.17.0` and `v0.16.0-rc3` tags retain their original `b81c99b` pin; use `master` to build this revision. See [patches/README.md](patches/README.md).
 
 `scripts/build-cuda.sh` sets `GGML_CUDA_FA_QUANTS=all` (needed for `--kv-dtype q5_0` on hybrid models). Binaries: `build/bin/llama-kvmem-server`.
 

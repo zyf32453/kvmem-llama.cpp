@@ -8,6 +8,7 @@ GRAPH="$ROOT/patches/cuda-graph-decode.patch"
 GDN_OUTPUT="$ROOT/patches/gdn-output-fusion.patch"
 GRAPH_REACTIVATION="$ROOT/patches/cuda-graph-reactivation.patch"
 RDNA2_FATTN="$ROOT/patches/0005-hip-rdna2-quantized-kv-fa-vec.patch"
+QWEN3MOE_CAPTURE="$ROOT/patches/0006-qwen3moe-capture.patch"
 BUDGET_UPGRADE="$ROOT/patches/reasoning-budget-upgrade.patch"
 REPLAY_UPGRADE="$ROOT/patches/replayssm-upgrade.patch"
 UPGRADE="$ROOT/patches/multimodal-upgrade.patch"
@@ -84,4 +85,12 @@ else
     git apply --ignore-space-change --check "$RDNA2_FATTN"
     git apply --ignore-space-change "$RDNA2_FATTN"
     echo "applied RDNA2 quantized-KV Flash Attention patch"
+fi
+
+if git apply --ignore-space-change --reverse --check "$QWEN3MOE_CAPTURE" 2>/dev/null; then
+    echo "Qwen3 MoE capture patch already applied"
+else
+    git apply --ignore-space-change --check "$QWEN3MOE_CAPTURE"
+    git apply --ignore-space-change "$QWEN3MOE_CAPTURE"
+    echo "applied Qwen3 MoE Q/K/V capture patch"
 fi

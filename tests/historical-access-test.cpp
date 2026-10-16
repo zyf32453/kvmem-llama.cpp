@@ -4,6 +4,8 @@
 #include "llama-batch.h"
 #include "llama-kvmem-hooks.h"
 #include "ggml-backend.h"
+#include "ggml-alloc.h"
+#include "ggml-cpu.h"
 #include "kvmem/historical_kv_raw_store.hpp"
 
 #include <algorithm>
@@ -22,6 +24,39 @@ struct kvmem_transfer_test_access {
     static size_t pending(const llama_memory_kvmem & mem) {
         return mem.harvest_v_jobs_.size() + mem.harvest_v_pending_.jobs.size();
     }
+    static void mean_inputs(llama_memory_kvmem & mem, const std::vector<ggml_tensor *> & tensors,
+                            uint32_t begin, uint32_t count) {
+        mem.pos_queue_.clear();
+        std::vector<llama_pos> positions(count);
+        for (uint32_t i = 0; i < count; ++i) positions[i] = begin + i;
+        mem.note_ubatch_pos(positions);
+        mem.pending_capture_.clear();
+        const auto & layers = mem.raw().config().historical_gc_attention_layers;
+        for (size_t i = 0; i < layers.size(); ++i) mem.register_capture(tensors[i], layers[i], 'k');
+    }
+    static void mean_positions(llama_memory_kvmem & mem, const std::vector<llama_pos> & positions) {
+        mem.pos_queue_.clear();
+        mem.note_ubatch_pos(positions);
+    }
+    static bool mean_submit(llama_memory_kvmem & mem) {
+        // Deterministic barrier: queue the real DMA but do not let its worker
+        // commit before the test has retired/unbound the original generation.
+        if (!mem.d2h_init()) return false;
+        mem.harvest_worker_stop();
+        return mem.d2h_submit(nullptr);
+    }
+    static void mean_sync(llama_memory_kvmem & mem) {
+        mem.cur_capture_ = std::move(mem.pos_queue_.front());
+        mem.pos_queue_.erase(mem.pos_queue_.begin());
+        for (const auto & node : mem.pending_capture_) mem.harvest_capture(node.t, node.il, node.which);
+        mem.cur_capture_ = {};
+    }
+    static void mean_decode(llama_memory_kvmem & mem, uint32_t accepted) {
+        mem.decode_mean_ingest(nullptr);
+        mem.decode_mean_commit(accepted);
+    }
+    static void clear_mean_nodes(llama_memory_kvmem & mem) { mem.pending_capture_.clear(); }
+    static uint32_t decode_tokens(const llama_memory_kvmem & mem) { return mem.decode_mean_n_; }
     static void score(llama_memory_kvmem & mem) {
         mem.reset_query_acc();
         for (uint32_t il : mem.raw().config().historical_gc_attention_layers) {
@@ -43,6 +78,72 @@ static std::vector<uint8_t> pattern(size_t size, unsigned seed) {
         byte = uint8_t(seed >> 24);
     }
     return bytes;
+}
+
+// Known pre-RoPE tensors in the actual model's layer/head dimensions. These
+// exercise the production capture/conversion paths, not model-generated K.
+struct MeanTensors {
+    std::unique_ptr<ggml_context, decltype(&ggml_free)> context{nullptr, ggml_free};
+    std::unique_ptr<ggml_backend_buffer, decltype(&ggml_backend_buffer_free)> buffer{
+        nullptr, ggml_backend_buffer_free};
+    std::vector<ggml_tensor *> layers;
+
+    MeanTensors(llama_memory_kvmem & mem, uint32_t begin, uint32_t count, bool host, ggml_type type) {
+        const auto & cfg = mem.raw().config();
+        context.reset(ggml_init({cfg.historical_gc_attention_layers.size() * ggml_tensor_overhead() + 1024,
+                                 nullptr, true}));
+        require(bool(context), "Mean-K tensor context allocation failed");
+        for (uint32_t il : cfg.historical_gc_attention_layers) {
+            (void) il;
+            layers.push_back(ggml_new_tensor_3d(context.get(), type, cfg.n_embd_k, 1, count));
+        }
+        auto buft = host ? ggml_backend_cpu_buffer_type() : ggml_backend_buffer_get_type(
+            mem.get_kv()->get_k_storage(cfg.historical_gc_attention_layers.front())->buffer);
+        buffer.reset(ggml_backend_alloc_ctx_tensors_from_buft(context.get(), buft));
+        require(bool(buffer), "Mean-K tensor buffer allocation failed");
+        for (size_t i = 0; i < layers.size(); ++i) {
+            std::vector<float> values(static_cast<size_t>(count) * cfg.n_embd_k);
+            for (uint32_t t = 0; t < count; ++t)
+                for (uint32_t d = 0; d < cfg.n_embd_k; ++d)
+                    values[t * cfg.n_embd_k + d] = float(begin + t + 1) + float(d % 8) / 8;
+            if (type == GGML_TYPE_F16) {
+                std::vector<ggml_fp16_t> half(values.size());
+                ggml_fp32_to_fp16_row(values.data(), half.data(), values.size());
+                ggml_backend_tensor_set(layers[i], half.data(), 0, half.size() * sizeof(half[0]));
+            } else {
+                ggml_backend_tensor_set(layers[i], values.data(), 0, values.size() * sizeof(float));
+            }
+        }
+    }
+};
+
+static std::vector<float> mean_sum(uint32_t begin, uint32_t count, size_t dim) {
+    std::vector<float> result(dim);
+    for (size_t d = 0; d < dim; ++d)
+        result[d] = float(count) * (float(begin) + float(count + 1) / 2 + float(d % 8) / 8);
+    return result;
+}
+
+static void check_mean_ranges(llama_memory_kvmem & mem) {
+    const auto & cfg = mem.raw().config();
+    const auto block = mem.block_tokens();
+    MeanTensors means(mem, 0, 4, false, GGML_TYPE_F32);
+    kvmem_transfer_test_access::mean_inputs(mem, means.layers, 0, 4);
+    kvmem_transfer_test_access::mean_positions(mem, {0, 1, llama_pos(block), llama_pos(block + 1)});
+    kvmem_transfer_test_access::mean_sync(mem);
+    for (uint32_t il : cfg.historical_gc_attention_layers) {
+        std::vector<float> first(cfg.n_embd_k), second(cfg.n_embd_k);
+        mem.raw().mean_k(0, il, first.data());
+        mem.raw().mean_k(1, il, second.data());
+        for (size_t d = 0; d < first.size(); ++d) {
+            require(first[d] == 1.5f + float(d % 8) / 8 &&
+                    second[d] == 3.5f + float(d % 8) / 8,
+                    "Mean-K lost original positions across a gap/block boundary");
+        }
+    }
+    kvmem_transfer_test_access::clear_mean_nodes(mem);
+    mem.clear(true);
+    std::printf("PASS Mean-K original positions: discontiguous, cross-block\n");
 }
 
 static void check_access(llama_memory_kvmem & mem) {
@@ -193,7 +294,7 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
     auto repository = std::make_shared<Repository>(1);
     const std::weak_ptr<Repository> weak_repository = repository;
     kvmem::HistoricalKvHandle previous{};
-    for (uint32_t round = 0; round < 3; ++round) {
+    for (uint32_t round = 0; round < 5; ++round) {
         mem.clear(true);
         std::vector<llama_pos> positions(block);
         for (uint32_t i = 0; i < block; ++i) positions[i] = i;
@@ -228,12 +329,12 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         for (uint32_t il : cfg.attention_layers) {
             LayerCheck check{il, pattern(block * cfg.packed_k_bytes_per_token, il + 300 + round),
                                 pattern(block * cfg.packed_v_bytes_per_token, il + 400 + round)};
-            require(payload->write_mean_k_slice(*writer, handle, il, 0, block,
-                                                std::vector<float>(cfg.mean_k_elements, float(block))),
-                    "managed fixture Mean-K write failed");
             // Distinct K/V prefixes prove capture submits only each missing
             // component suffix; blindly rewriting from row zero is rejected.
             if (round == 0) {
+                require(payload->write_mean_k_slice(*writer, handle, il, 0, 4,
+                                                    mean_sum(0, 4, cfg.mean_k_elements)),
+                        "managed fixture Mean-K prefix write failed");
                 require(payload->write_packed_k_slice(*writer, handle, il, 0, 4,
                             std::vector<uint8_t>(check.k.begin(), check.k.begin() + 4 * cfg.packed_k_bytes_per_token)) &&
                         payload->write_packed_v_slice(*writer, handle, il, 0, 8,
@@ -248,9 +349,22 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         }
         require(runtime.bind_historical_full_block(0, repository, handle, *writer, payload),
                 "managed payload directory binding failed");
+        MeanTensors means(mem, 0, block, round == 3, round < 2 ? GGML_TYPE_F16 : GGML_TYPE_F32);
+        kvmem_transfer_test_access::mean_inputs(mem, means.layers, 0, block);
+        if (round < 2) {
+            require(kvmem_transfer_test_access::mean_submit(mem), "asynchronous Mean-K submit failed");
+        } else if (round == 2) {
+            kvmem_transfer_test_access::mean_sync(mem);
+        } else {
+            // Only 8 accepted tokens from a 32-token draft enter the sum.
+            kvmem_transfer_test_access::mean_decode(mem, 8);
+            require(payload->write_progress(directory.find(0)->writer_context->writer(), handle,
+                                            cfg.attention_layers.front())->mean_k_tokens == 0,
+                    "decode accumulator flushed speculative tokens prematurely");
+        }
         kvmem_transfer_test_access::capture(mem, 0);
         require(kvmem_transfer_test_access::pending(mem) > 0, "test did not enqueue asynchronous packed writes");
-        const bool retire_in_flight = round == 1;
+        const bool retire_in_flight = round == 1 || round == 4;
         auto reclaim = [&] {
             auto result = Repository::ReclaimResult::Stale;
             std::thread worker([&] { result = repository->try_reclaim(handle); });
@@ -264,6 +378,29 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                     "queued DMA writer failed to retain its allocation");
         }
         kvmem_transfer_test_access::commit(mem);
+        if (retire_in_flight) require(reclaim() == Repository::ReclaimResult::Deferred,
+                "Mean-K task/accumulator lost its writer after packed completion");
+        if (round < 2) {
+            mem.harvest_flush();
+            if (round == 0) {
+                // Replaying an already committed capture while still Writing
+                // must not count its tokens again.
+                kvmem_transfer_test_access::mean_inputs(mem, means.layers, 0, block);
+                kvmem_transfer_test_access::mean_sync(mem);
+            }
+        } else if (round == 3) {
+            // Host accumulator followed by GPU inputs must preserve both sums.
+            MeanTensors suffix(mem, 8, block - 8, false, GGML_TYPE_F32);
+            kvmem_transfer_test_access::mean_inputs(mem, suffix.layers, 8, block - 8);
+            kvmem_transfer_test_access::mean_decode(mem, block - 8);
+        } else if (round == 4) {
+            kvmem_transfer_test_access::mean_inputs(mem, means.layers, 8, block - 8);
+            kvmem_transfer_test_access::mean_decode(mem, block - 8);
+            require(kvmem_transfer_test_access::decode_tokens(mem) == 8,
+                    "retired accumulator accepted a newly submitted range");
+            mem.decode_mean_flush();
+        }
+        kvmem_transfer_test_access::clear_mean_nodes(mem);
         require(kvmem_transfer_test_access::pending(mem) == 0 && !mem.raw().has_block(0),
                 "managed completion leaked jobs or wrote the positional legacy store");
         if (!retire_in_flight) {
@@ -276,6 +413,9 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                     const auto layer = payload->read_layer(read.lease, handle, check.il);
                     require(layer && layer->packed_k == check.k && layer->packed_v == check.v,
                             "async component suffixes corrupted captured bytes");
+                    require(layer->mean_tokens == block &&
+                            layer->mean_k_sum == mean_sum(0, block, cfg.mean_k_elements),
+                            "Mean-K capture duplicated, omitted or included speculative tokens");
                 }
                 if (round) require(!payload->read_layer(read.lease, previous, cfg.attention_layers.front()),
                                    "old generation read the reused slot");
@@ -307,10 +447,13 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                 runtime.confirm_reclaimed_historical_block(0), "captured generation did not fully reclaim");
         const auto queued_before = kvmem_transfer_test_access::pending(mem);
         kvmem_transfer_test_access::capture(mem, 0);
+        kvmem_transfer_test_access::mean_inputs(mem, means.layers, 0, block);
+        kvmem_transfer_test_access::mean_sync(mem);
+        kvmem_transfer_test_access::clear_mean_nodes(mem);
         require(kvmem_transfer_test_access::pending(mem) == queued_before && !mem.raw().has_block(0),
                 "reclaimed GPU block was recaptured into legacy storage");
         previous = handle;
-        std::printf("PASS managed async harvest: round=%u generation=%llu retired_in_flight=%d\n",
+        std::printf("PASS managed harvest: round=%u generation=%llu retired_in_flight=%d\n",
                     round, (unsigned long long) handle.generation, retire_in_flight);
     }
     mem.clear(true);
@@ -352,7 +495,10 @@ int main(int argc, char ** argv) {
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
             if (managed) check_managed_async_harvest(*mem);
-            else check_access(*mem);
+            else {
+                check_mean_ranges(*mem);
+                check_access(*mem);
+            }
         }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FAIL historical adapter access: %s\n", e.what());

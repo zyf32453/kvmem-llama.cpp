@@ -44,15 +44,31 @@
 
 GPU 定向测试现增加三轮：第 1 轮先写入不同长度的 K/V 前缀，异步 D2H 补齐后检查 48 层字节、打分及 GPU 恢复；第 2 轮在队列仍有任务时退休并解绑 Writing 块，后台必须延期，旧任务完成后才归还真实 payload；第 3 轮复用同一物理槽位为新 generation，旧 handle 不能读取新数据。三轮全部通过，分别使用 generation 1/2/3，托管数据没有写入 legacy Raw。最终代码另通过本地 11 项、Linux 20 项宿主测试，5 项 ASan/UBSan，以及 CUDA CLI/server 构建。同版再次通过 356-token 提示词、8-token 生成的 recency 回归，记录 9 次 `stage_out_cpu`；原远程项目工作树状态未变。
 
-这一进展只完成 packed K/V producer 与对应读取端。测试中的 Mean-K 仍由 fixture 填入，目录和仓库也由 fixture 创建；生产 Mean-K capture/decode accumulator、自动创建/发布身份、partial tail、请求预约和全部 ActiveId 入口尚未完成，后台策略仍未在正常推理中启动。
+提交 `48469a1` 完成上述 packed K/V producer 与对应读取端接线；该提交的 Mean-K 仍由 fixture 直接填入。后续 Mean-K 接线见下节。目录与仓库仍由 fixture 创建，自动创建/发布身份、partial tail、请求预约和全部 ActiveId 入口尚未完成，后台策略仍未在正常推理中启动。
 
-**此桥接尚未接入真实模型推理。** 现有 `KvMemStore` 和 `RawKvStore` 的生产读取仍依赖 `pos / block_tokens` 的密集位置；检索选择、GPU stage、异步传输、checkpoint、session 和 MTP 路径未统一持有逐块许可。封存时 `truncate`、`clear` 和 snapshot 也会拒绝操作，NVMe、短尾块及共享位置块不受支持。由此不能打开生产删除开关，也不能把单测中的释放字节数当作实际模型运行的内存收益。下一步需要把生产目录与所有读写路径迁到稳定句柄，补足这几条路径的 lease 和恢复语义，再做远程模型验收。
+### Mean-K 采集与解码累加接线
 
-生产接线的首个受限配置应是单会话、单 lane、文本、RAM 权威存储、MTP 关闭且所需注意力层与 packed V 均明确可用。目录和 packed harvest job 已携带 `block_id → (handle, original span)` 及原 writer，提交时只捕获未写后缀；自动创建目录身份和 Mean-K producer 还需接入。`valid_tokens` 在预约时固定，因此尾块增长/退休切换、非对齐新 span、请求级容量预约也还需要设计和验证。`score_retrieval` 与直接 stage-in 已取得 Read/Transfer 许可；prefetch、同 query、全驻留、keep-selected 及压力换块等执行入口仍需接线，旧许可应保留到 GPU/异步 D2H 真正完成。
+`prepare_ubatches` / `note_ubatch_pos` 现在把原始位置、连续片段、原 writer context 一起捕获成 `CaptureBatch`。片段按位置连续性和块边界拆分；已退休、已回收和已发布的托管块关闭新写入，不回退 legacy Raw。每个 D2H slot 保存自己的 batch，worker 不再把自己的位置覆盖到共享的 `cur_pos_`。CUDA D2H、同步 fallback 和多设备批量返回使用相同的原代数提交接口；失败回退仍保留原队列中的 batch。
+
+Mean-K 与 packed K/V 一样只写原代数尚缺失的连续后缀；重复采集不会重复累加，缺少前缀或维度不符会拒绝提交。D2H 逐层记录完成状态，后续层失败重试时不会重复提交已完成的层。绑定存储的 Mean-K 不再通过当前位置式 Raw 写回。
+
+解码累加器保留原 writer，直到实际接受的 token 汇总写回；丢弃 draft 只移除未接受批次，不能丢掉已接受的累加结果。不同代数或不连续范围不能混入同一累加器。退休前已接受的片段可以写回，退休后新提交的范围不能继续追加到旧代。托管解码在开始累加前校验必需注意力层、维度及 token 范围；缺层不能冒充完整覆盖。另修正了已有的 host→GPU 输入切换问题：一旦累加退回 CPU，后续输入继续并入 CPU sum，避免用新的 GPU sum 覆盖此前结果。
+
+测试将前述手填 Mean-K 改为真实 GPU/CPU 张量输入，调用生产采集与解码函数。使用已知数据逐层核对 Mean-K sum、token 数及 packed K/V；并验证跨块且不连续的原始位置、重复采集、D2H 在途退休、解码累加器持有退休 writer、只接受部分 draft、CPU/GPU 输入切换、回收后拒绝重新采集，以及同一物理槽位连续 5 代复用。并发时序由明确的提交/提交完成屏障控制，没有用 sleep 猜测完成时机。张量是 fixture 构造的数据；这仍不等于正常推理已经自动创建托管历史并运行 GC。
+
+真实模型检查还发现：提供的 GGUF 是 `qwen3moe`（30B.A3B），现有补丁仅给 `qwen3` / `qwen35` 图加了采集入口。未修复时，容量足够的 retrieval 推理能够完成，但日志的 decode Mean-K 为 `n_tok=0, n_miss=8`，不能算采集验收通过。新增 `patches/0006-qwen3moe-capture.patch`，在 Q/K 归一化后、RoPE 前注册采集，并注册 V；`scripts/apply-patches.sh` 同步纳入该补丁，在隔离副本连续执行两次已验证只应用一次。其他模型架构仍须逐一确认入口，不能从某个模型能生成文本推断它支持完整 historical KV 采集。
+
+本轮最终验证：本地相关宿主 CTest **11/11**、Linux 宿主 CTest **20/20**、CUDA CLI/server 构建及 GPU 定向测试全部通过。新增补丁在固定上游 `7fe450e19` 的 LF/CRLF 文件上均通过正向应用与反向检查；Windows CUDA 构建脚本通过语法解析，CUDA/HIP 两个 Windows 入口均已接入补丁，但未执行 Windows GPU 构建。
+
+实际 GGUF 在 `retrieval --kvmem-budget 512` 下完成 **356-token 预填充 + 64-token query replay + 8-token 生成**。日志记录 3 次异步预填充采集，每次有 48 层 K；最终 decode 为 `n_tok=8, n_flush=1, n_gpu=384, n_miss=0, last_layers=48`。同版 `recency --kvmem-budget 96` 完成 356-token 预填充与 8-token 生成，并记录 9 次 `stage_out_cpu`。这验证了实际模型的采集入口和既有推理路径；仍不证明生产 GC 删除、长期有界或较小 retrieval 容量已通过。原始日志保存在隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-mean-gpu-test.log`、`model-mean-retrieval-capture.log`、`model-mean-recency.log` 与 `historical-mean-host-test.log`。
+
+**GC 托管身份尚未在正常推理中自动启用。** 现有 `KvMemStore` 和 `RawKvStore` 的生产读取仍依赖 `pos / block_tokens` 的密集位置；检索选择、GPU stage、异步传输、checkpoint、session 和 MTP 路径未统一持有逐块许可。封存时 `truncate`、`clear` 和 snapshot 也会拒绝操作，NVMe、短尾块及共享位置块不受支持。由此不能打开生产删除开关，也不能把单测中的释放字节数当作实际模型运行的内存收益。下一步需要把生产目录与所有读写路径迁到稳定句柄，补足这几条路径的 lease 和恢复语义，再做远程模型验收。
+
+生产接线的首个受限配置应是单会话、单 lane、文本、RAM 权威存储、MTP 关闭且所需注意力层与 packed V 均明确可用。目录、packed harvest job 与 Mean-K batch 已携带 `block_id → (handle, original span)` 及原 writer；自动创建目录身份和完成后的发布协调仍需接入。`valid_tokens` 在预约时固定，因此尾块增长/退休切换、非对齐新 span、请求级容量预约也还需要设计和验证。`score_retrieval` 与直接 stage-in 已取得 Read/Transfer 许可；prefetch、同 query、全驻留、keep-selected 及压力换块等执行入口仍需接线，旧许可应保留到 GPU/异步 D2H 真正完成。
 
 在正式绑定异步 writer 前，已修正两个现有错误路径：D2H 提交失败时保留位置队列供同步回退，并在回退读图张量前完成 scheduler 同步；CUDA stage-in 的直接 H2D fallback 等待 stream 拷贝完成才返回，避免调用者的局部 packed 缓冲区先析构。这些修复不构成 GC 生产接入。
 
-实际接线还要拒绝没有注意力层的配置，并保证 Mean-K 每段只提交一次：连续前缀证明覆盖范围，不能识别重复累加。`Writing` 块尚未封存，不能作为当前 legacy Raw 桥接的删除候选；独立按句柄存储已验证 Writing 期间退休及在途 packed writer 完成，正常推理仍待接入。退休和确认回收后的目录墓碑都必须由 adapter 读取端识别为关闭状态，禁止按“找不到绑定”退回旧位置读取；宿主选块预过滤已经接线，但不等于全部读取和执行许可已完成。`seq_rm`、清空、截断、回放和快照要在修改 GPU/Raw 前完成统一退休与异步排空；退休的 GPU 块再次 stage-out 时也不能重写已释放的 Raw 位置。
+实际启用还要拒绝没有注意力层或没有模型采集入口的配置。`Writing` 块尚未封存，不能作为当前 legacy Raw 桥接的删除候选；独立按句柄存储已验证 Writing 期间退休及在途 packed/Mean-K writer 完成，正常推理仍待接入。退休和确认回收后的目录墓碑都必须由 adapter 读取端识别为关闭状态，禁止按“找不到绑定”退回旧位置读取；宿主选块预过滤已经接线，但不等于全部读取和执行许可已完成。`seq_rm`、清空、截断、回放和快照要在修改 GPU/Raw 前完成统一退休与异步排空；退休的 GPU 块再次 stage-out 时也不能重写已释放的 Raw 位置。
 
 ### 本阶段验收记录
 
@@ -70,7 +86,7 @@ GPU 定向测试现增加三轮：第 1 轮先写入不同长度的 K/V 前缀�
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
-1. **生产 writer 与身份创建。** Mean-K D2H capture、同步 fallback 和 decode accumulator 必须捕获同代 writer/范围；完成后按组件覆盖情况发布。partial tail 退休后切换新 handle，支持非对齐 span，不能继续追加到旧代或偷偷保留其检索资格。
+1. **生产身份创建与发布。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已接入捕获的同代 writer/范围；还需在正常推理中自动预约/创建身份，并按全部组件覆盖情况发布。partial tail 退休后切换新 handle，支持非对齐 span，不能继续追加到旧代或偷偷保留其检索资格。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
 3. **请求预约与长期有界。** 请求进入 active 前，用真实内存/slots/extent 为最坏输入、输出、每追加边界删尾块造成的碎片及在途/rollback/scratch 资源一次预约。失败在入口处理；不能等 GC 补给，不支持的 streaming 显式拒绝。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证复用与计数守恒。
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。

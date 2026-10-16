@@ -27,6 +27,13 @@ for supported dimensions, avoiding the larger tile kernel's zero-occupancy
 assertion. It is applied after the cumulative patch by both Linux and Windows
 build entry points. F16 draft KV is not covered by this fix.
 
+`0006-qwen3moe-capture.patch` adds the Qwen3 MoE graph's normalized pre-RoPE
+Q/K and V capture calls, matching the existing Qwen3 hooks. Without it,
+Qwen3 MoE can generate text while retrieval and decode Mean-K receive no
+capture nodes. The Bash, Windows CUDA and Windows HIP patch entry points
+apply it idempotently. This enables capture; automatic historical GC remains
+separate and is not enabled by the patch.
+
 `reasoning-budget-upgrade.patch` upgrades the v0.15.0 ReplaySSM tree.
 `replayssm-upgrade.patch` upgrades the preceding multimodal/query-replay tree.
 `multimodal-upgrade.patch` upgrades the KVMem working tree recorded before

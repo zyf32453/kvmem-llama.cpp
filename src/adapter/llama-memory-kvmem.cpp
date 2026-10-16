@@ -333,6 +333,7 @@ struct llama_memory_kvmem::CaptureD2hPipe {
         size_t nb2 = 0;
         ggml_type type = GGML_TYPE_F16;
         bool from_gpu = false;
+        bool committed = false;
     };
     struct Slot {
         uint8_t * gpu = nullptr;
@@ -341,7 +342,7 @@ struct llama_memory_kvmem::CaptureD2hPipe {
         cudaEvent_t done = nullptr;
         bool inflight = false;
         std::vector<Item> items;
-        std::vector<llama_pos> pos;
+        CaptureBatch capture;
     };
     cudaStream_t stream = nullptr;
     cudaEvent_t snap = nullptr;
@@ -1247,7 +1248,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
     //    ends in a raw_ mutation (truncate_to / invalidate_packed_from /
     //    clear) that waits first. A detach mutates nothing, so it waits here.
     // The harvest worker is drained, never stopped: after the wait it parks in
-    // harvest_loop() holding no reference to raw_, q_sum_ or cur_pos_.
+    // harvest_loop() holding no reference to raw_ or q_sum_.
     kvmem_stagein_flush_sync(nullptr, nullptr, nullptr, nullptr);
     decode_mean_reset();
     harvest_flush();
@@ -1276,7 +1277,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
     }
     // Rows of the outgoing conversation. An unconsumed ubatch note would make
     // the incoming conversation's first harvest write to this conversation's
-    // rows, and cur_pos_ is what harvest_from_host() stamps onto them.
+    // rows. Each batch also owns the original historical writer contexts.
     // prepare_ubatches() refills pos_queue_ on every init_batch, so dropping
     // it here costs the incoming conversation nothing.
     //
@@ -1290,7 +1291,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
                 pos_queue_.size(), pending_capture_.size());
     }
     pos_queue_.clear();
-    cur_pos_.clear();
+    cur_capture_ = {};
 
     auto conv = std::make_unique<ConvStore>();
     {
@@ -2424,7 +2425,7 @@ bool llama_memory_kvmem::prepare_ubatches(
         for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
             p[i] = ubatch.logical_pos ? ubatch.logical_pos[i] : ubatch.pos[i];
         }
-        pos_queue_.push_back(std::move(p));
+        pos_queue_.push_back(capture_batch(p));
     }
     return true;
 }
@@ -2550,7 +2551,51 @@ void llama_memory_kvmem::state_read(llama_io_read_i & io, llama_seq_id seq_id, l
 }
 
 void llama_memory_kvmem::note_ubatch_pos(const std::vector<llama_pos> & pos) {
-    pos_queue_.push_back(pos);
+    pos_queue_.push_back(capture_batch(pos));
+}
+
+llama_memory_kvmem::CaptureBatch llama_memory_kvmem::capture_batch(
+        const std::vector<llama_pos> & positions) const {
+    CaptureBatch batch;
+    batch.positions = positions;
+    const auto & directory = runtime_->historical_shadow_directory();
+    for (uint32_t i = 0; i < positions.size();) {
+        if (positions[i] < 0) throw std::invalid_argument("negative historical capture position");
+        MeanWriteRange range;
+        range.source_token = i;
+        range.original_begin = static_cast<uint32_t>(positions[i]);
+        range.token_count = 1;
+        const uint32_t bid = range.original_begin / block_tokens_;
+        while (i + range.token_count < positions.size()) {
+            const auto next = positions[i + range.token_count];
+            if (next < 0 || static_cast<uint64_t>(next) !=
+                    uint64_t(range.original_begin) + range.token_count ||
+                    static_cast<uint32_t>(next) / block_tokens_ != bid) break;
+            ++range.token_count;
+        }
+        const auto observation = directory.observe(bid);
+        if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged) {
+            range.route = MeanWriteRange::Route::Legacy;
+        } else if (const auto binding = directory.find(bid)) {
+            const auto & context = binding->writer_context;
+            const auto meta = context->writer().metadata();
+            if (context->storage() && context->storage()->config().mean_k_elements &&
+                    meta && meta->life == kvmem::HistoricalKvLife::Writing &&
+                    !context->repository().closed()) {
+                if (range.original_begin < binding->original_begin ||
+                        uint64_t(range.original_begin) + range.token_count >
+                            binding->original_begin + binding->valid_tokens) {
+                    throw std::logic_error("historical capture exceeds its original span");
+                }
+                range.route = MeanWriteRange::Route::Managed;
+                range.token_offset = static_cast<uint32_t>(range.original_begin - binding->original_begin);
+                range.writer = context;
+            }
+        }
+        batch.ranges.push_back(std::move(range));
+        i += batch.ranges.back().token_count;
+    }
+    return batch;
 }
 
 void llama_memory_kvmem::register_capture(ggml_tensor * t, int il, char which) {
@@ -2673,6 +2718,8 @@ void llama_memory_kvmem::d2h_free() {
         }
         s.cap = 0;
         s.inflight = false;
+        s.items.clear();
+        s.capture = {};
     }
     if (d2h_->snap) {
         cudaEventDestroy(d2h_->snap);
@@ -2811,12 +2858,12 @@ bool llama_memory_kvmem::multi_d2h_submit() {
         return false;
     }
     const int64_t read_us = ggml_time_us() - t_read;
-    cur_pos_ = std::move(pos_queue_.front());
+    const auto batch = std::move(pos_queue_.front());
     pos_queue_.erase(pos_queue_.begin());
     const int64_t t_host = ggml_time_us();
     for (const auto & item : pipe.items) {
         const auto & c = item.capture;
-        harvest_from_host(c.il, c.which, pipe.devices[item.device].pin + c.offset,
+        harvest_from_host(batch, c.il, c.which, pipe.devices[item.device].pin + c.offset,
                           c.type, c.d, c.h, c.n, c.nb0, c.nb1, c.nb2);
     }
     const int64_t host_us = ggml_time_us() - t_host;
@@ -2903,24 +2950,27 @@ void llama_memory_kvmem::d2h_commit(int slot) {
     int64_t wait_us = 0;
     if (s.done) {
         const int64_t tw = ggml_time_us();
-        cudaEventSynchronize(s.done);
+        if (!kvmem_cuda_ok(cudaEventSynchronize(s.done), "capture commit wait")) {
+            throw std::runtime_error("historical capture D2H did not complete");
+        }
         wait_us = ggml_time_us() - tw;
     }
-    cur_pos_ = s.pos;
     const uint64_t nv0 = raw_ ? raw_->nvme_wait_ns() : 0;
     const uint64_t sc0 = raw_ ? raw_->nvme_syscalls() : 0;
     const uint64_t b0 = raw_ ? raw_->nvme_bytes_written() : 0;
     const int64_t tp = ggml_time_us();
-    for (const auto & it : s.items) {
-        if (it.which == 'q') {
-            harvest_from_host(it.il, it.which, s.pin + it.offset, it.type,
+    for (auto & it : s.items) {
+        if (it.which == 'q' && !it.committed) {
+            harvest_from_host(s.capture, it.il, it.which, s.pin + it.offset, it.type,
                               it.d, it.h, it.n, it.nb0, it.nb1, it.nb2);
+            it.committed = true;
         }
     }
-    for (const auto & it : s.items) {
-        if (it.which != 'q') {
-            harvest_from_host(it.il, it.which, s.pin + it.offset, it.type,
+    for (auto & it : s.items) {
+        if (it.which != 'q' && !it.committed) {
+            harvest_from_host(s.capture, it.il, it.which, s.pin + it.offset, it.type,
                               it.d, it.h, it.n, it.nb0, it.nb1, it.nb2);
+            it.committed = true;
         }
     }
     const int64_t pack_wall_us = ggml_time_us() - tp;
@@ -2939,7 +2989,7 @@ void llama_memory_kvmem::d2h_commit(int slot) {
     perf_.nvme_syscalls += perf_.last_nvme_syscalls;
     perf_.commit_us += perf_.last_commit_us;
     s.items.clear();
-    s.pos.clear();
+    s.capture = {};
     if (harvest_w_) {
         std::lock_guard<std::mutex> lk(harvest_w_->mu);
         s.inflight = false;
@@ -3100,7 +3150,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     s.items.clear();
     // The position queue is the synchronous fallback's input. Keep its front
     // intact until every CUDA operation and worker-queue insertion succeeds.
-    s.pos = pos_queue_.front();
+    s.capture = pos_queue_.front();
     const auto abort_submit = [&]() -> bool {
         // A failed copy/event can leave earlier copies queued against s.gpu or
         // s.pin. Drain the stream before a retry can reuse/free either buffer.
@@ -3108,7 +3158,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             throw std::runtime_error("KVMem D2H stream could not be drained after submission failure");
         }
         s.items.clear();
-        s.pos.clear();
+        s.capture = {};
         return false;
     };
     size_t off = 0;
@@ -3196,10 +3246,10 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
         return abort_submit();
     }
     const int submitted = d2h_->next;
-    // Once queued, a spurious worker wake may clear s.items/s.pos before the
+    // Once queued, a spurious worker wake may clear s.items/s.capture before the
     // foreground reaches its trace. Capture these while this thread owns it.
     const size_t submitted_items = s.items.size();
-    const size_t submitted_positions = s.pos.size();
+    const size_t submitted_positions = s.capture.positions.size();
     const bool worker_active = harvest_worker_on();
     if (worker_active) {
         bool queued = false;
@@ -3272,20 +3322,22 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
                 ggml_backend_dev_backend_reg(model_.devices[0].dev) : nullptr;
         const bool is_cuda = reg && std::strcmp(ggml_backend_reg_name(reg), "CUDA") == 0;
         const bool batch_on = is_cuda && (!batch_env || batch_env[0] != '0');
+        const size_t n_pos = pos_queue_.front().positions.size();
         const bool batched = batch_on && multi_d2h_submit();
         if (!batched) {
-            cur_pos_ = std::move(pos_queue_.front());
+            cur_capture_ = std::move(pos_queue_.front());
             pos_queue_.erase(pos_queue_.begin());
             for (const CaptureNode & n : pending_capture_) {
                 harvest_capture(n.t, n.il, n.which);
             }
+            cur_capture_ = {};
         }
         const int64_t t_block = ggml_time_us();
         harvest_full_blocks_async();
         const int64_t block_us = ggml_time_us() - t_block;
         if (perf_.enabled) {
             fprintf(stderr, "KVMEM_MULTI_HARVEST mode=%s n=%zu sync_ms=%.3f read_ms=%.3f host_ms=%.3f block_ms=%.3f\n",
-                    batched ? "batch" : "legacy", cur_pos_.size(), sync_us / 1000.0,
+                    batched ? "batch" : "legacy", n_pos, sync_us / 1000.0,
                     (perf_.multi_read_us - read_before) / 1000.0,
                     (perf_.multi_host_us - host_before) / 1000.0, block_us / 1000.0);
         }
@@ -3302,7 +3354,7 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
             }
         }
     }
-    const uint32_t n_pos = pos_queue_.empty() ? 0u : (uint32_t) pos_queue_.front().size();
+    const uint32_t n_pos = pos_queue_.empty() ? 0u : (uint32_t) pos_queue_.front().positions.size();
     bool submitted = d2h_submit(be);
     if (!submitted) {
         // The failed async path leaves its input at the queue front. Finish
@@ -3313,11 +3365,12 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         if (pos_queue_.empty()) {
             throw std::runtime_error("KVMem D2H fallback lost its position batch");
         }
-        cur_pos_ = std::move(pos_queue_.front());
+        cur_capture_ = std::move(pos_queue_.front());
         pos_queue_.erase(pos_queue_.begin());
         for (const CaptureNode & n : pending_capture_) {
             harvest_capture(n.t, n.il, n.which);
         }
+        cur_capture_ = {};
     }
     harvest_full_blocks_async();
     const int64_t entry_us = ggml_time_us() - t_entry;
@@ -3428,13 +3481,48 @@ void llama_memory_kvmem::tensor_to_f32_token_major(const ggml_tensor * t, std::v
                              t->nb[0], t->nb[1], t->nb[2], out);
 }
 
-void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * host,
+void llama_memory_kvmem::commit_mean_k(
+        const CaptureBatch & batch, uint32_t il, const std::vector<float> & flat) {
+    if (flat.size() < batch.positions.size() * n_embd_k_) {
+        throw std::runtime_error("historical Mean-K capture has too few tensor elements");
+    }
+    for (const auto & range : batch.ranges) {
+        if (range.route == MeanWriteRange::Route::Closed) continue;
+        if (range.route == MeanWriteRange::Route::Legacy) {
+            raw_->write_layer_mean_k(range.original_begin, range.token_count, il,
+                flat.data() + static_cast<size_t>(range.source_token) * n_embd_k_);
+            continue;
+        }
+        const auto & context = range.writer;
+        const auto & storage = context->storage();
+        const auto progress = storage->write_progress(context->writer(), context->handle(), il);
+        if (!progress || storage->config().mean_k_elements != n_embd_k_ ||
+                progress->mean_k_tokens < range.token_offset) {
+            throw std::logic_error("historical Mean-K capture has a missing prefix or invalid writer");
+        }
+        // A replay/commit retry cannot add the same token to the sum twice.
+        // Only the original generation's still-missing suffix is written.
+        const uint32_t skip = std::min(range.token_count, progress->mean_k_tokens - range.token_offset);
+        if (skip == range.token_count) continue;
+        std::vector<float> sum(n_embd_k_, 0.0f);
+        for (uint32_t i = skip; i < range.token_count; ++i) {
+            const auto * src = flat.data() + static_cast<size_t>(range.source_token + i) * n_embd_k_;
+            for (uint32_t d = 0; d < n_embd_k_; ++d) sum[d] += src[d];
+        }
+        if (!storage->write_mean_k_slice(context->writer(), context->handle(), il,
+                range.token_offset + skip, range.token_count - skip, sum)) {
+            throw std::logic_error("historical Mean-K capture rejected its original writer/range");
+        }
+    }
+}
+
+void llama_memory_kvmem::harvest_from_host(const CaptureBatch & batch, int il, char which, const uint8_t * host,
                                            ggml_type type, int64_t d, int64_t h, int64_t ntok,
                                            size_t nb0, size_t nb1, size_t nb2) {
     if (which == 'v') {
         return;
     }
-    if (!host || il < 0 || static_cast<uint32_t>(il) >= n_layer_ || cur_pos_.empty()) {
+    if (!host || il < 0 || static_cast<uint32_t>(il) >= n_layer_ || batch.positions.empty()) {
         return;
     }
     // The worker calls this through `this`, and a store swap moves raw_ and
@@ -3444,9 +3532,9 @@ void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * h
     if (!raw_ || q_sum_.size() != n_layer_ || q_count_.size() != n_layer_) {
         return;
     }
-    const uint32_t n = static_cast<uint32_t>(cur_pos_.size());
-    const uint32_t pos0 = static_cast<uint32_t>(cur_pos_[0]);
+    const uint32_t n = static_cast<uint32_t>(batch.positions.size());
     if (which == 'k') {
+        if (d * h != n_embd_k_) throw std::logic_error("historical Mean-K tensor dimension mismatch");
         std::vector<float> flat;
         if (type == GGML_TYPE_F16) {
             std::vector<uint16_t> flat16;
@@ -3457,9 +3545,7 @@ void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * h
         } else {
             bytes_to_f32_token_major(host, type, d, h, ntok, nb0, nb1, nb2, flat);
         }
-        if (!flat.empty()) {
-            raw_->write_layer_mean_k(pos0, n, static_cast<uint32_t>(il), flat.data());
-        }
+        commit_mean_k(batch, static_cast<uint32_t>(il), flat);
     } else if (which == 'q') {
         std::vector<float> flat;
         bytes_to_f32_token_major(host, type, d, h, ntok, nb0, nb1, nb2, flat);
@@ -3468,7 +3554,7 @@ void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * h
             return;
         }
         for (uint32_t i = 0; i < n; ++i) {
-            if (!query_contains(cur_pos_[i])) continue;
+            if (!query_contains(batch.positions[i])) continue;
             float * dst = q_sum_[static_cast<uint32_t>(il)].data();
             const float * src = flat.data() + i * qdim;
             for (uint32_t d0 = 0; d0 < qdim; ++d0) {
@@ -3486,7 +3572,7 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
     if (!t || il < 0 || static_cast<uint32_t>(il) >= n_layer_) {
         return;
     }
-    if (cur_pos_.empty()) {
+    if (cur_capture_.positions.empty()) {
         return;
     }
     std::vector<float> flat;
@@ -3495,14 +3581,14 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
     int64_t read_us = 0;
     tensor_to_f32_token_major(t, flat, timed ? &read_us : nullptr);
     if (timed) perf_.multi_read_us += read_us;
-    const uint32_t n = static_cast<uint32_t>(cur_pos_.size());
+    const uint32_t n = static_cast<uint32_t>(cur_capture_.positions.size());
     if (n == 0) {
         return;
     }
-    const uint32_t pos0 = static_cast<uint32_t>(cur_pos_[0]);
-
     if (which == 'k') {
-        raw_->write_layer_mean_k(pos0, n, static_cast<uint32_t>(il), flat.data());
+        if (t->ne[0] * t->ne[1] != n_embd_k_)
+            throw std::logic_error("historical Mean-K tensor dimension mismatch");
+        commit_mean_k(cur_capture_, static_cast<uint32_t>(il), flat);
         static bool dumped = false;
         if (!dumped && getenv("KVMEM_DUMP_CAPTURE") && il == 0) {
             dumped = true;
@@ -3519,7 +3605,7 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
             return;
         }
         for (uint32_t i = 0; i < n; ++i) {
-            if (!query_contains(cur_pos_[i])) continue;
+            if (!query_contains(cur_capture_.positions[i])) continue;
             float * dst = q_sum_[static_cast<uint32_t>(il)].data();
             const float * src = flat.data() + i * qdim;
             for (uint32_t d = 0; d < qdim; ++d) {
@@ -3820,11 +3906,13 @@ void llama_memory_kvmem::decode_mean_reset() {
     decode_mean_n_ = 0;
     decode_mean_block_ = ~0u;
     decode_mean_pos0_ = 0;
+    decode_mean_target_ = {};
+    decode_mean_committed_.clear();
 }
 
 void llama_memory_kvmem::decode_mean_discard() {
     decode_mean_pending_k_.clear();
-    decode_mean_pending_pos_.clear();
+    decode_mean_pending_batch_ = {};
 }
 
 void llama_memory_kvmem::decode_mean_zero_acc() {
@@ -3835,6 +3923,7 @@ void llama_memory_kvmem::decode_mean_zero_acc() {
     }
     decode_mean_host_.assign(n_layer_, std::vector<float>(n_embd_k_, 0.0f));
     decode_mean_src_.assign(n_layer_, 0);
+    decode_mean_committed_.assign(n_layer_, 0);
 }
 
 void llama_memory_kvmem::decode_mean_print_sum() {
@@ -3909,7 +3998,7 @@ void llama_memory_kvmem::decode_mean_ingest(ggml_backend_sched_t sched) {
     if (sched) {
         ggml_backend_sched_synchronize(sched);
     }
-    decode_mean_pending_pos_ = std::move(pos_queue_.front());
+    decode_mean_pending_batch_ = std::move(pos_queue_.front());
     pos_queue_.erase(pos_queue_.begin());
     decode_mean_pending_k_.clear();
     for (const CaptureNode & n : pending_capture_) {
@@ -3923,36 +4012,56 @@ void llama_memory_kvmem::decode_mean_ingest(ggml_backend_sched_t sched) {
             kvmem_diag("KVMEM_DECODE_MEAN ingest_skip no_k_nodes capture=%zu\n",
                     pending_capture_.size());
         }
-        decode_mean_pending_pos_.clear();
+        decode_mean_pending_batch_ = {};
         return;
     }
     if (trace_ && decode_mean_stats_.n_tok == 0 && !decode_mean_pending_k_.empty()) {
         const CaptureNode & n0 = decode_mean_pending_k_.front();
         kvmem_diag("KVMEM_TRACE decode_mean_ingest n_pos=%zu n_k=%zu type=%s gpu=%d\n",
-                decode_mean_pending_pos_.size(), decode_mean_pending_k_.size(),
+                decode_mean_pending_batch_.positions.size(), decode_mean_pending_k_.size(),
                 n0.t ? ggml_type_name(n0.t->type) : "?",
                 n0.t && kvmem_cuda_tensor_ptr(n0.t) ? 1 : 0);
     }
-    if (decode_mean_pending_pos_.size() == 1) {
+    if (decode_mean_pending_batch_.positions.size() == 1) {
         decode_mean_commit(1);
     }
 }
 
-void llama_memory_kvmem::decode_mean_add_range(uint32_t tok0, uint32_t n_add) {
-    if (n_add == 0 || decode_mean_pending_pos_.empty() || !raw_ ||
-        tok0 >= decode_mean_pending_pos_.size()) {
+void llama_memory_kvmem::decode_mean_add_range(const MeanWriteRange & range, uint32_t n_add) {
+    if (n_add == 0 || range.route == MeanWriteRange::Route::Closed || !raw_) {
         return;
     }
-    const llama_pos pos0 = decode_mean_pending_pos_[tok0];
-    const uint32_t bid = static_cast<uint32_t>(pos0) / block_tokens_;
-    if (decode_mean_block_ != bid) {
+    const uint32_t tok0 = range.source_token;
+    const uint32_t pos0 = range.original_begin;
+    const uint32_t bid = pos0 / block_tokens_;
+    if (range.route == MeanWriteRange::Route::Managed) {
+        // Validate the whole admitted set before launching any accumulation.
+        // A missing layer must not silently produce a partial-token sum that
+        // later claims to cover the full accepted range.
+        std::vector<uint8_t> seen(n_layer_, 0);
+        for (const auto & node : decode_mean_pending_k_) {
+            if (!node.t || node.il < 0 || static_cast<uint32_t>(node.il) >= n_layer_ ||
+                    seen[node.il] || node.t->ne[0] * node.t->ne[1] != n_embd_k_ ||
+                    node.t->ne[2] < uint64_t(tok0) + n_add) {
+                throw std::logic_error("historical decode Mean-K has invalid/duplicate capture layers");
+            }
+            seen[node.il] = 1;
+        }
+        for (uint32_t il : raw_cfg_.historical_gc_attention_layers) {
+            if (!seen[il]) throw std::logic_error("historical decode Mean-K is missing an attention layer");
+        }
+    }
+    if (decode_mean_block_ != bid || decode_mean_target_.route != range.route ||
+            decode_mean_target_.writer != range.writer ||
+            uint64_t(decode_mean_pos0_) + decode_mean_n_ != pos0) {
         if (decode_mean_n_ > 0) {
             decode_mean_flush();
         }
         decode_mean_zero_acc();
         decode_mean_block_ = bid;
-        decode_mean_pos0_ = static_cast<uint32_t>(pos0);
+        decode_mean_pos0_ = pos0;
         decode_mean_n_ = 0;
+        decode_mean_target_ = range;
     }
     const bool gpu_ready = !multi_gpu_ && kvmem_meank_ready(n_layer_, n_embd_k_);
     bool any = false;
@@ -3961,7 +4070,10 @@ void llama_memory_kvmem::decode_mean_add_range(uint32_t tok0, uint32_t n_add) {
             continue;
         }
         bool ok = false;
-        if (gpu_ready) {
+        // Once a layer has fallen back to a host sum, keep accumulating there;
+        // replacing it with a later GPU sum would drop the earlier tokens.
+        if (gpu_ready && (decode_mean_src_.size() <= static_cast<uint32_t>(n.il) ||
+                          decode_mean_src_[n.il] != 2)) {
             const uint8_t * gpu = kvmem_cuda_tensor_ptr(n.t);
             if (gpu &&
                 kvmem_meank_add(static_cast<uint32_t>(n.il), n.t->type, gpu,
@@ -3978,6 +4090,9 @@ void llama_memory_kvmem::decode_mean_add_range(uint32_t tok0, uint32_t n_add) {
         if (!ok) {
             ok = decode_mean_add_host_layer(n.t, n.il, tok0, n_add);
         }
+        if (!ok && range.route == MeanWriteRange::Route::Managed) {
+            throw std::runtime_error("historical decode Mean-K failed to capture an admitted layer");
+        }
         any = any || ok;
     }
     if (!any) {
@@ -3993,31 +4108,22 @@ void llama_memory_kvmem::decode_mean_add_range(uint32_t tok0, uint32_t n_add) {
 }
 
 void llama_memory_kvmem::decode_mean_commit(uint32_t n_keep) {
-    if (n_keep == 0 || decode_mean_pending_pos_.empty()) {
+    if (n_keep == 0 || decode_mean_pending_batch_.positions.empty()) {
         decode_mean_discard();
         return;
     }
-    n_keep = std::min(n_keep, static_cast<uint32_t>(decode_mean_pending_pos_.size()));
-    uint32_t i = 0;
-    while (i < n_keep) {
-        const uint32_t pos = static_cast<uint32_t>(decode_mean_pending_pos_[i]);
-        const uint32_t bid = pos / block_tokens_;
-        uint32_t take = 1;
-        while (i + take < n_keep) {
-            const uint32_t p = static_cast<uint32_t>(decode_mean_pending_pos_[i + take]);
-            if (p / block_tokens_ != bid) {
-                break;
-            }
-            take++;
-        }
-        decode_mean_add_range(i, take);
+    n_keep = std::min(n_keep, static_cast<uint32_t>(decode_mean_pending_batch_.positions.size()));
+    for (const auto & range : decode_mean_pending_batch_.ranges) {
+        if (range.source_token >= n_keep) break;
+        const uint32_t take = std::min(range.token_count, n_keep - range.source_token);
+        const uint32_t bid = range.original_begin / block_tokens_;
+        decode_mean_add_range(range, take);
         // Accepted tokens only. Store n_tokens can include MTP drafts that
         // seq_rm will drop; do not flush on that watermark.
         if (decode_mean_block_ == bid && decode_mean_n_ > 0 &&
             (decode_mean_pos0_ % block_tokens_) + decode_mean_n_ >= block_tokens_) {
             decode_mean_flush();
         }
-        i += take;
     }
     decode_mean_discard();
 }
@@ -4036,6 +4142,7 @@ void llama_memory_kvmem::decode_mean_flush() {
         if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
             continue;
         }
+        if (il < decode_mean_committed_.size() && decode_mean_committed_[il]) continue;
         const uint8_t src = (il < decode_mean_src_.size()) ? decode_mean_src_[il] : 0;
         bool got = false;
         if (src == 2 && il < decode_mean_host_.size() &&
@@ -4050,9 +4157,21 @@ void llama_memory_kvmem::decode_mean_flush() {
             n_gpu++;
         }
         if (!got) {
+            if (decode_mean_target_.route == MeanWriteRange::Route::Managed) {
+                throw std::runtime_error("historical decode Mean-K could not read an accumulated layer");
+            }
             continue;
         }
-        raw_->write_layer_mean_sum(decode_mean_pos0_, decode_mean_n_, il, sum.data());
+        if (decode_mean_target_.route == MeanWriteRange::Route::Managed) {
+            const auto & context = decode_mean_target_.writer;
+            if (!context->storage()->write_mean_k_slice(context->writer(), context->handle(), il,
+                    decode_mean_target_.token_offset, decode_mean_n_, sum)) {
+                throw std::logic_error("historical decode Mean-K rejected its original writer/range");
+            }
+        } else {
+            raw_->write_layer_mean_sum(decode_mean_pos0_, decode_mean_n_, il, sum.data());
+        }
+        decode_mean_committed_[il] = 1;
         if (!multi_gpu_) kvmem_meank_zero(il);
         if (n_ok == 0 && n_embd_k_ > 0) {
             double acc = 0;
@@ -4077,6 +4196,7 @@ void llama_memory_kvmem::decode_mean_flush() {
     decode_mean_stats_.last_rms = rms;
     decode_mean_n_ = 0;
     decode_mean_block_ = ~0u;
+    decode_mean_target_ = {};
     decode_mean_src_.assign(n_layer_, 0);
     for (auto & h : decode_mean_host_) {
         std::fill(h.begin(), h.end(), 0.0f);
