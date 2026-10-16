@@ -34,7 +34,9 @@
 
 ### 本阶段验收记录
 
-提交 `97c1672` 在本地 MinGW 环境通过 11 项相关 CTest；远程隔离宿主构建通过全部 20 项 CTest，影子目录和 Raw RAM 回收的 ASan/UBSan 两项测试通过，CUDA CLI 与 server 均完成构建。使用提供的 GGUF、单张 CUDA GPU、`--kvmem-budget 96`、`--kvmem-cpu-gb 1` 和 356-token 提示词生成 8 个 token 成功；`KVMEM_TRACE` 明确记录 9 次 `stage_out_cpu`。这一轮在加入稀疏注意力层和检索 Mean-K 封存检查后重跑，仍只验证**原有 GPU 工作集溢出到 CPU 的路径**及新代码未破坏该路径；影子目录仍为空，后台 GC 未启动，也没有实测历史块的物理删除或 CPU 释放量。
+提交 `75ab45c` 在本地 MinGW 环境通过全部 14 项 Historical KV 与宿主相关 CTest；另外两项会话快照/迁移测试在把临时目录指向工作区后通过。Windows 会话缓存生命周期测试仍受当前沙箱的符号链接权限及 Python 子进程输出编码限制。远程隔离 Linux 宿主构建通过全部 20 项 CTest，仓库代数、影子目录和 Raw RAM 回收的 ASan/UBSan 三项测试通过，CUDA CLI 与 server 均完成构建。
+
+使用提供的 GGUF、单张 CUDA GPU、`--kvmem-method recency`、`--kvmem-budget 96`、`--kvmem-cpu-gb 1` 和 356-token 提示词生成 8 个 token 成功；`KVMEM_TRACE` 明确记录 9 次 `stage_out_cpu`。这是与上一轮 `97c1672` 相同的 recency 模式，只验证**原有 GPU 工作集溢出到 CPU 的路径**及新代码未破坏该路径；影子目录仍为空，后台 GC 未启动，也没有实测历史块的物理删除或 CPU 释放量。另一次使用 CLI 默认 retrieval 模式的运行在 query replay 阶段报告找不到 GPU slot；该配置与上一轮 recency 验收不同，尚未做基线对照，不能据此归因于本轮改动或声称检索模式已通过。
 
 ## 已实现的迁移基础
 
