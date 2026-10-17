@@ -71,11 +71,25 @@ void kvmem_stageout_test_fault(KvmemStageoutFault fault, void * context);
 bool kvmem_d2d_batched(const void * const * src, void * const * dst,
                        const size_t * nbytes, int n);
 
-// Decode mean-K running sum on GPU. Extra VRAM = n_layer * n_embd * 4.
+// Decode mean-K running sum on GPU. Extra VRAM = n_layer * n_embd * 4;
+// one owned pinned layer is used for reads. CUDA errors close this accumulator
+// until explicit free. false means unsupported input/allocation before work,
+// never permission to replay an uncertain submitted addition on the CPU.
 bool kvmem_meank_ready(uint32_t n_layer, uint32_t n_embd);
 void kvmem_meank_free();
+void kvmem_meank_sync();
+// Prove outstanding device work finished before discarding its owners.
+// Does not reopen a failed accumulator or publish any accumulated contents.
+void kvmem_meank_cancel();
 void kvmem_meank_zero(uint32_t il);
 bool kvmem_meank_add(uint32_t il, ggml_type ty, const void * gpu_k,
                      uint32_t tok0, uint32_t n_keep, uint32_t n_embd,
                      int64_t ne0, size_t nb0, size_t nb1, size_t nb2);
+// Copies into caller memory only after a checked completion; an exception
+// leaves the caller buffer untouched and retains the internal DMA destination.
 bool kvmem_meank_d2h(uint32_t il, float * host, uint32_t n_embd);
+enum class KvmemMeanKPoint { Zero, AddResult, ReadCopy, Wait, Drain };
+using KvmemMeanKFault = bool (*)(void *, KvmemMeanKPoint, uint32_t) noexcept;
+// Per execution domain. AddResult observes an actually submitted kernel;
+// other true results skip the named call. Production defaults to no hook.
+void kvmem_meank_test_fault(KvmemMeanKFault fault, void * context);

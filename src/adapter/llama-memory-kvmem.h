@@ -278,6 +278,7 @@ private:
     void harvest_full_blocks_async();
     void decode_mean_ingest(struct ggml_backend_sched * sched);
     void decode_mean_reset();
+    void decode_mean_shutdown();
     struct MeanWriteRange;
     void decode_mean_add_range(const MeanWriteRange & range, uint32_t n_add);
     void decode_mean_zero_acc();
@@ -356,7 +357,8 @@ private:
     void harvest_merge_stats();
     void harvest_shutdown();
     void capture_fail() noexcept;
-    enum class CaptureFaultPoint { DeviceSelect, EventWait, HostCommit, SnapshotCopy, HostCopy, CompletionEvent, Drain };
+    enum class CaptureFaultPoint { DeviceSelect, EventWait, HostCommit, SnapshotCopy, HostCopy, CompletionEvent, Drain,
+                                   DecodeHostCommit };
     using CaptureFault = bool (*)(void *, CaptureFaultPoint, int, size_t) noexcept;
     bool capture_fault(CaptureFaultPoint point, int slot = -1, size_t index = 0) const noexcept;
     CaptureFault capture_fault_ = nullptr;

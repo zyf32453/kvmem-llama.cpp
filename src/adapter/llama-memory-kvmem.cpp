@@ -1037,10 +1037,18 @@ llama_memory_kvmem::~llama_memory_kvmem() {
     if (historical_capture_) historical_capture_->repository()->close();
     if (historical_gc_) historical_gc_->request_stop();
     try {
-        decode_mean_flush();
-        decode_mean_discard();
-        decode_mean_print_sum();
+        // A partial failed sum must never be retried or published by teardown.
+        // Keep its writers until the normal device owner proves completion.
+        if (!capture_failed_) {
+            try { decode_mean_flush(); }
+            catch (const std::exception & e) {
+                capture_fail();
+                LLAMA_LOG_ERROR("KVMem cancelling decode Mean-K at teardown: %s\n", e.what());
+            }
+        }
         harvest_shutdown();
+        decode_mean_shutdown();
+        decode_mean_print_sum();
         if (historical_capture_) harvest_gpu_v_commit();
         harvest_worker_stop();
         harvest_perf_print_sum();
@@ -4581,9 +4589,25 @@ void llama_memory_kvmem::decode_mean_reset() {
     decode_mean_committed_.clear();
 }
 
-void llama_memory_kvmem::decode_mean_discard() {
+void llama_memory_kvmem::decode_mean_discard() try {
+    harvest_check_error();
+    if (!multi_gpu_) kvmem_meank_sync();
     decode_mean_pending_k_.clear();
     decode_mean_pending_batch_ = {};
+} catch (...) {
+    capture_fail();
+    throw;
+}
+
+void llama_memory_kvmem::decode_mean_shutdown() {
+    // Caller has settled source computation before invoking this. A failed
+    // accumulator permits checked cancellation, never another flush/replay.
+    if (!multi_gpu_) kvmem_meank_cancel();
+    decode_mean_pending_k_.clear();
+    decode_mean_pending_batch_ = {};
+    decode_mean_target_ = {};
+    decode_mean_n_ = 0;
+    decode_mean_block_ = ~0u;
 }
 
 void llama_memory_kvmem::decode_mean_zero_acc() {
@@ -4627,11 +4651,9 @@ bool llama_memory_kvmem::decode_mean_add_host_layer(ggml_tensor * t, int il,
         if (decode_mean_host_[uil].size() != n_embd_k_) {
             decode_mean_host_[uil].assign(n_embd_k_, 0.0f);
         }
-        kvmem_stagein_sync();
         if (!kvmem_meank_d2h(uil, decode_mean_host_[uil].data(), n_embd_k_)) {
             return false;
         }
-        kvmem_stagein_sync();
         kvmem_meank_zero(uil);
         decode_mean_src_[uil] = 2;
     }
@@ -4655,8 +4677,19 @@ bool llama_memory_kvmem::decode_mean_add_host_layer(ggml_tensor * t, int il,
     return true;
 }
 
-void llama_memory_kvmem::decode_mean_ingest(ggml_backend_sched_t sched) {
+void llama_memory_kvmem::decode_mean_ingest(ggml_backend_sched_t sched) try {
+    harvest_check_error();
+    if (!decode_mean_pending_batch_.positions.empty())
+        throw std::logic_error("decode Mean-K must accept or discard the previous draft before another ingest");
+    const auto requires_managed_mean = [](const CaptureBatch & batch) {
+        return std::any_of(batch.ranges.begin(), batch.ranges.end(), [](const MeanWriteRange & range) {
+            return range.route == MeanWriteRange::Route::Managed && range.writer &&
+                   range.writer->storage()->config().mean_k_elements != 0;
+        });
+    };
     if (pending_capture_.empty() || pos_queue_.empty()) {
+        if (!pos_queue_.empty() && requires_managed_mean(pos_queue_.front()))
+            throw std::logic_error("historical decode Mean-K has no capture nodes for its admitted range");
         decode_mean_stats_.n_miss++;
         if (trace_ || decode_mean_stats_.n_miss <= 3) {
             kvmem_diag("KVMEM_DECODE_MEAN ingest_skip capture=%zu posq=%zu "
@@ -4668,16 +4701,20 @@ void llama_memory_kvmem::decode_mean_ingest(ggml_backend_sched_t sched) {
     }
     if (sched) {
         ggml_backend_sched_synchronize(sched);
-    }
-    decode_mean_pending_batch_ = std::move(pos_queue_.front());
-    pos_queue_.erase(pos_queue_.begin());
+    } else if (!kvmem_cuda_ok(cudaDeviceSynchronize(), "decode Mean-K source computation"))
+        throw std::runtime_error("decode Mean-K source computation did not complete");
     decode_mean_pending_k_.clear();
+    decode_mean_pending_k_.reserve(pending_capture_.size());
     for (const CaptureNode & n : pending_capture_) {
         if (n.t && n.which == 'k') {
             decode_mean_pending_k_.push_back(n);
         }
     }
+    decode_mean_pending_batch_ = std::move(pos_queue_.front());
+    pos_queue_.erase(pos_queue_.begin());
     if (decode_mean_pending_k_.empty()) {
+        if (requires_managed_mean(decode_mean_pending_batch_))
+            throw std::logic_error("historical decode Mean-K has no K nodes for its admitted range");
         decode_mean_stats_.n_miss++;
         if (trace_ || decode_mean_stats_.n_miss <= 3) {
             kvmem_diag("KVMEM_DECODE_MEAN ingest_skip no_k_nodes capture=%zu\n",
@@ -4696,6 +4733,9 @@ void llama_memory_kvmem::decode_mean_ingest(ggml_backend_sched_t sched) {
     if (decode_mean_pending_batch_.positions.size() == 1) {
         decode_mean_commit(1);
     }
+} catch (...) {
+    capture_fail();
+    throw;
 }
 
 void llama_memory_kvmem::decode_mean_add_range(const MeanWriteRange & range, uint32_t n_add) {
@@ -4713,7 +4753,7 @@ void llama_memory_kvmem::decode_mean_add_range(const MeanWriteRange & range, uin
         for (const auto & node : decode_mean_pending_k_) {
             if (!node.t || node.il < 0 || static_cast<uint32_t>(node.il) >= n_layer_ ||
                     seen[node.il] || node.t->ne[0] * node.t->ne[1] != n_embd_k_ ||
-                    node.t->ne[2] < uint64_t(tok0) + n_add) {
+                    node.t->ne[2] < int64_t(tok0) + n_add) {
                 throw std::logic_error("historical decode Mean-K has invalid/duplicate capture layers");
             }
             seen[node.il] = 1;
@@ -4761,7 +4801,7 @@ void llama_memory_kvmem::decode_mean_add_range(const MeanWriteRange & range, uin
         if (!ok) {
             ok = decode_mean_add_host_layer(n.t, n.il, tok0, n_add);
         }
-        if (!ok && range.route == MeanWriteRange::Route::Managed) {
+        if (!ok) {
             throw std::runtime_error("historical decode Mean-K failed to capture an admitted layer");
         }
         any = any || ok;
@@ -4778,7 +4818,8 @@ void llama_memory_kvmem::decode_mean_add_range(const MeanWriteRange & range, uin
     decode_mean_stats_.n_tok += n_add;
 }
 
-void llama_memory_kvmem::decode_mean_commit(uint32_t n_keep) {
+void llama_memory_kvmem::decode_mean_commit(uint32_t n_keep) try {
+    harvest_check_error();
     if (n_keep == 0 || decode_mean_pending_batch_.positions.empty()) {
         decode_mean_discard();
         return;
@@ -4797,14 +4838,21 @@ void llama_memory_kvmem::decode_mean_commit(uint32_t n_keep) {
             decode_mean_flush();
         }
     }
+    // The accumulation kernels read graph tensors on the transfer stream.
+    // Complete them before releasing the original batch or allowing the next
+    // graph to reuse those tensors, including an accepted partial draft.
     decode_mean_discard();
+} catch (...) {
+    capture_fail();
+    throw;
 }
 
-void llama_memory_kvmem::decode_mean_flush() {
+void llama_memory_kvmem::decode_mean_flush() try {
+    harvest_check_error();
     if (decode_mean_n_ == 0 || !raw_ || decode_mean_block_ == ~0u) {
         return;
     }
-    if (!multi_gpu_) kvmem_stagein_sync();
+    if (!multi_gpu_) kvmem_meank_sync();
     std::vector<float> sum(n_embd_k_, 0.0f);
     uint32_t n_ok = 0;
     uint32_t n_gpu = 0;
@@ -4824,7 +4872,6 @@ void llama_memory_kvmem::decode_mean_flush() {
             got = true;
             n_host++;
         } else if (src == 1 && kvmem_meank_d2h(il, sum.data(), n_embd_k_)) {
-            kvmem_stagein_sync();
             got = true;
             n_gpu++;
         }
@@ -4834,6 +4881,8 @@ void llama_memory_kvmem::decode_mean_flush() {
             }
             continue;
         }
+        if (capture_fault(CaptureFaultPoint::DecodeHostCommit, -1, il))
+            throw std::runtime_error("injected decode Mean-K host commit failure");
         if (decode_mean_target_.route == MeanWriteRange::Route::Managed) {
             const auto & context = decode_mean_target_.writer;
             if (!context->storage()->write_mean_k_slice(context->writer(), context->handle(), il,
@@ -4856,6 +4905,7 @@ void llama_memory_kvmem::decode_mean_flush() {
         }
         n_ok++;
     }
+    if (!multi_gpu_) kvmem_meank_sync();
     kvmem_diag("KVMEM_DECODE_MEAN flush block=%u n=%u pos0=%u layers=%u gpu=%u host=%u rms=%.6f\n",
             decode_mean_block_, decode_mean_n_, decode_mean_pos0_, n_ok, n_gpu, n_host, rms);
     if (trace_) {
@@ -4874,6 +4924,9 @@ void llama_memory_kvmem::decode_mean_flush() {
     for (auto & h : decode_mean_host_) {
         std::fill(h.begin(), h.end(), 0.0f);
     }
+} catch (...) {
+    capture_fail();
+    throw;
 }
 
 void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {

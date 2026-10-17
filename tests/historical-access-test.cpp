@@ -182,6 +182,15 @@ struct kvmem_transfer_test_access {
     }
     static void clear_mean_nodes(llama_memory_kvmem & mem) { mem.pending_capture_.clear(); }
     static uint32_t decode_tokens(const llama_memory_kvmem & mem) { return mem.decode_mean_n_; }
+    static void decode_ingest(llama_memory_kvmem & mem) { mem.decode_mean_ingest(nullptr); }
+    static size_t decode_pending(const llama_memory_kvmem & mem) { return mem.decode_mean_pending_batch_.positions.size(); }
+    static llama_pos decode_pending_begin(const llama_memory_kvmem & mem) {
+        return mem.decode_mean_pending_batch_.positions.empty() ? -1 : mem.decode_mean_pending_batch_.positions.front();
+    }
+    static void decode_shutdown(llama_memory_kvmem & mem) {
+        mem.harvest_shutdown();
+        mem.decode_mean_shutdown();
+    }
     static void score(llama_memory_kvmem & mem) {
         mem.reset_query_acc();
         for (uint32_t il : mem.raw().config().historical_gc_attention_layers) {
@@ -337,6 +346,143 @@ static void check_capture_start_failure(llama_memory_kvmem & mem) {
     std::puts("PASS capture worker startup: empty-queue flush propagates device selection failure");
 }
 
+struct DecodeFailure {
+    KvmemMeanKPoint point;
+    uint32_t layer = 0;
+    bool fired = false, deny_drain = false;
+    static bool inject(void * context, KvmemMeanKPoint point, uint32_t layer) noexcept {
+        auto & f = *static_cast<DecodeFailure *>(context);
+        if (point == KvmemMeanKPoint::Drain) return f.deny_drain;
+        if (!f.fired && point == f.point && layer == f.layer) { f.fired = true; return true; }
+        return false;
+    }
+};
+struct DecodeFailureGuard {
+    llama_memory_kvmem & mem;
+    ~DecodeFailureGuard() {
+        kvmem_meank_test_fault(nullptr, nullptr);
+        kvmem_transfer_test_access::capture_hook(mem, nullptr, nullptr);
+        kvmem_transfer_test_access::decode_shutdown(mem);
+        kvmem_transfer_test_access::commit(mem);
+        kvmem_transfer_test_access::cancel_capture_inputs(mem);
+    }
+};
+
+static void check_decode_failure(llama_memory_kvmem & mem, unsigned scenario,
+        const std::shared_ptr<kvmem::HistoricalKvRepository> & repository,
+        const std::shared_ptr<kvmem::HistoricalKvRawStore> & payload,
+        kvmem::HistoricalKvShadowDirectory::Producer & producer, kvmem::HistoricalKvHandle handle,
+        const MeanTensors & first, const MeanTensors & second) {
+    using Repository = kvmem::HistoricalKvRepository;
+    const auto & cfg = payload->config();
+    std::weak_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> weak = producer;
+    DecodeFailure fault{scenario == 21 ? KvmemMeanKPoint::AddResult :
+                        scenario == 23 ? KvmemMeanKPoint::ReadCopy : KvmemMeanKPoint::Wait};
+    fault.layer = (scenario == 21 || scenario == 23) ? cfg.attention_layers[1] : 0;
+    fault.deny_drain = scenario == 22 || scenario == 24;
+    CaptureFailure host_fault{CaptureFaultPoint::DecodeHostCommit};
+    host_fault.index = cfg.attention_layers[1];
+    DecodeFailureGuard guard{mem};
+    kvmem_transfer_test_access::mean_inputs(mem, first.layers, 0, 8);
+    kvmem_transfer_test_access::decode_ingest(mem);
+    const auto cell = mem.runtime().store().blocks()[0].gpu_slot * mem.block_tokens();
+    for (uint32_t il : cfg.attention_layers) {
+        const auto k = pattern(mem.block_tokens() * cfg.packed_k_bytes_per_token, il + 900);
+        const auto v = pattern(mem.block_tokens() * cfg.packed_v_bytes_per_token, il + 1000);
+        ggml_backend_tensor_set(mem.get_kv()->get_k_storage(il), k.data(), cell * cfg.packed_k_bytes_per_token, k.size());
+        ggml_backend_tensor_set(mem.get_kv()->get_v_storage(il), v.data(), cell * cfg.packed_v_bytes_per_token, v.size());
+    }
+    if (scenario == 28) {
+        mem.decode_mean_commit(0);
+        require(kvmem_transfer_test_access::decode_pending(mem) == 0 &&
+                kvmem_transfer_test_access::decode_tokens(mem) == 0 &&
+                kvmem_transfer_test_access::pending(mem) == 0, "rejected draft created historical output");
+        kvmem_transfer_test_access::mean_inputs(mem, first.layers, 0, 8);
+        kvmem_transfer_test_access::mean_decode(mem, 4);
+        kvmem_transfer_test_access::commit(mem);
+        require(kvmem_transfer_test_access::decode_tokens(mem) == 4, "accepted draft did not retain exact prefix");
+        producer.reset();
+        require(repository->retire(handle) == Repository::RetireResult::Committed &&
+                repository->try_reclaim(handle) == Repository::ReclaimResult::Deferred,
+                "accepted decode prefix lost its producer before flush");
+        mem.decode_mean_flush();
+        require(weak.expired() && repository->inspect(handle)->life == kvmem::HistoricalKvLife::Retired &&
+                repository->try_reclaim(handle) == Repository::ReclaimResult::Complete,
+                "old accepted decode prefix revived retired history or prevented release");
+        std::puts("PASS decode accept/reject: rejected draft wrote nothing; accepted four-token prefix flushed after retirement without resurrection");
+        return;
+    }
+    bool threw = false;
+    try {
+        if (scenario == 26) {
+            kvmem_transfer_test_access::mean_inputs(mem, second.layers, 8, 8);
+            kvmem_transfer_test_access::decode_ingest(mem);
+        } else {
+            if (scenario == 27 || scenario == 29) {
+                // Re-ingest a malformed layer list only after explicitly
+                // rejecting the prior draft, so this tests layer validation.
+                mem.decode_mean_discard();
+                auto incomplete = first.layers;
+                incomplete.pop_back();
+                kvmem_transfer_test_access::mean_inputs(mem, first.layers, 0, 8);
+                kvmem_transfer_test_access::clear_mean_nodes(mem);
+                for (size_t i = 0; scenario != 29 && i < incomplete.size(); ++i)
+                    mem.register_capture(incomplete[i], cfg.attention_layers[i], 'k');
+                kvmem_transfer_test_access::decode_ingest(mem);
+            }
+            if (scenario == 21 || scenario == 22) kvmem_meank_test_fault(DecodeFailure::inject, &fault);
+            mem.decode_mean_commit(4);
+            if (scenario == 23 || scenario == 24) kvmem_meank_test_fault(DecodeFailure::inject, &fault);
+            if (scenario == 25) kvmem_transfer_test_access::capture_hook(mem, CaptureFailure::hook, &host_fault);
+            mem.decode_mean_flush();
+        }
+    } catch (const std::exception &) { threw = true; }
+    require(threw && kvmem_transfer_test_access::capture_domain_failed(mem), "decode error left request admission open");
+    if (scenario <= 24) require(fault.fired, "decode CUDA fault not reached");
+    if (scenario == 25) require(host_fault.entered, "decode host write fault not reached");
+    if (scenario == 26) require(kvmem_transfer_test_access::decode_pending_begin(mem) == 0,
+                              "rejected second draft overwrote the original captured identity");
+    require(!kvmem_transfer_test_access::append_after_failure(mem), "failed decode accepted another append");
+    for (unsigned action = 0; action < 3; ++action) {
+        bool rejected = false;
+        try {
+            if (action == 0) mem.decode_mean_commit(4);
+            if (action == 1) mem.decode_mean_discard();
+            if (action == 2) mem.decode_mean_flush();
+        } catch (const std::exception &) { rejected = true; }
+        require(rejected, "failed decode replayed or discarded an unconfirmed task");
+    }
+    producer.reset();
+    require(repository->retire(handle) == Repository::RetireResult::Committed, "failed decode writer retirement failed");
+    kvmem_transfer_test_access::commit(mem); // settle packed tasks; Mean-K alone must retain the writer
+    require(repository->try_reclaim(handle) == Repository::ReclaimResult::Deferred,
+            "decode failure lost its CPU owner before cancellation");
+    {
+        auto held = weak.lock();
+        require(bool(held), "failed decode did not retain its original producer");
+        for (size_t i = 0; i < cfg.attention_layers.size(); ++i) {
+            const auto p = payload->write_progress(held->writer(), handle, cfg.attention_layers[i]);
+            const uint32_t expected = (scenario == 23 || scenario == 25) && i == 0 ? 4 : 0;
+            require(p && p->mean_k_tokens == expected, "failed decode repeated or published an incomplete sum");
+        }
+    }
+    if (fault.deny_drain) {
+        bool rejected = false;
+        try { kvmem_transfer_test_access::decode_shutdown(mem); }
+        catch (const std::exception &) { rejected = true; }
+        require(rejected && !weak.expired() && repository->try_reclaim(handle) == Repository::ReclaimResult::Deferred,
+                "unconfirmed decode cancellation released its writer");
+    }
+    kvmem_meank_test_fault(nullptr, nullptr);
+    kvmem_transfer_test_access::capture_hook(mem, nullptr, nullptr);
+    kvmem_transfer_test_access::decode_shutdown(mem);
+    kvmem_transfer_test_access::cancel_capture_inputs(mem);
+    require(weak.expired() && repository->inspect(handle)->life == kvmem::HistoricalKvLife::Retired &&
+            repository->try_reclaim(handle) == Repository::ReclaimResult::Complete && payload->allocated_payload_bytes() == 0,
+            "confirmed decode cancellation revived history or leaked CPU payload");
+    std::printf("PASS decode failure scenario=%u: closed admission, exact partial writes, retained producer, checked cancellation, CPU release\n", scenario);
+}
+
 static void check_capture_failure(llama_memory_kvmem & mem, unsigned scenario) {
     using Repository = kvmem::HistoricalKvRepository;
     using Payload = kvmem::HistoricalKvRawStore;
@@ -381,6 +527,10 @@ static void check_capture_failure(llama_memory_kvmem & mem, unsigned scenario) {
     const uint32_t qdim = kvmem_transfer_test_access::query_dim(mem);
     MeanTensors first(mem, 0, 8, false, GGML_TYPE_F32);
     MeanTensors second(mem, 8, 8, false, GGML_TYPE_F32);
+    if (scenario >= 21) {
+        check_decode_failure(mem, scenario, repository, payload, producer, handle, first, second);
+        return;
+    }
     MeanTensors first_q(mem, 0, 8, false, GGML_TYPE_F32, qdim);
     MeanTensors second_q(mem, 8, 8, false, GGML_TYPE_F32, qdim);
     CaptureFailure fault{scenario == 14 || ordered_fallback ? CaptureFaultPoint::EventWait :
@@ -1589,7 +1739,7 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario = 0; scenario < 21; ++scenario) {
+        for (unsigned scenario = 0; scenario < 30; ++scenario) {
             if (scenario >= 3 && scenario <= 12) {
                 kp.method = 0;
                 kp.budget = 96;

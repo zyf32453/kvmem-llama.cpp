@@ -278,6 +278,26 @@ shadow 不退休块、不释放 payload；相同配置结束为 `committed=0, re
 
 这一步仍不开放生产 retrieval 的历史 GC，也未覆盖 multi-GPU 采集、decode accumulator 的全部错误分支、MTP 或 NVMe 的设备失败恢复。CUDA sanitizer 的环境限制仍在，不能将本轮原生测试或此前宿主 sanitizer 结果当作 CUDA 适配器通过 sanitizer 的证据。
 
+### 解码 Mean-K 累积、部分接受与失败取消（2026-10-17）
+
+逐 token 解码及接受草稿前缀时，Mean-K 使用独立 GPU running sum。原实现有三个失败风险：清零与等待错误被忽略；累加 kernel 报错返回 false 后会转 CPU 重算，无法证明 GPU 是否已经修改过部分和；D2H 直接写入调用方临时向量，等待失败时该向量可能先于 DMA 释放。另一个顺序风险是接受后立即丢弃输入批次，未确认独立 stream 上读取这些图张量的累加 kernel 已结束。
+
+现在 GPU accumulator 记录 pending/failed 状态。已提交操作的错误抛出异常并关闭累积器，不能当作“尚未执行、可以同步回退”的 false；正常 false 只用于不支持的输入或提交前分配不足。读取结果改用该 execution domain 持有的一层 pinned staging（`n_embd_k × sizeof(float)`），确认完成后才复制到调用方，失败时调用方缓冲区保持原值。清零、累加、读取、等待都检查结果；取消只确认设备任务结束并保留失败状态，释放和重新初始化是显式边界。无法确认完成时，取消、free 和外层 staging free 均不能释放相关分配。
+
+适配器在 ingest/commit/discard/flush 错误时关闭请求，保留原 pending batch、writer 及部分结果。失败后的 commit、flush、普通草稿 discard 和新追加均被拒绝，不能靠重试把同一前缀加两遍。已接受的累加任务在丢弃输入批次前完成；下一次 graph 才能复用相应张量。尚未接受或拒绝的草稿不能被下一次 ingest 覆盖。托管历史缺少任一必要层或完全没有采集节点时明确失败，不再静默跳过。正常草稿拒绝仍只丢弃未接受范围；历史块退休后，旧 writer 可以完成已经接受的前缀，但不能重新发布为 Live。
+
+上下文退出不再重试已失败的部分和：正常 flush 出错也转入取消路径。先通过原 GPU owner 确认源计算及其它采集任务结束，再检查 accumulator stream 排空，随后释放 decode task 的引用；packed K/V 已提交任务仍按原完成协议结算。持续无法确认设备结束的最终析构仍采取显式终止进程，不能把该实现解释成任意硬件错误后的服务恢复。新增同步属于当前设备数据依赖，不依赖 GC 继续回收。
+
+新增独立 `kvmem-meank-failure-test` 使用实际 CUDA 缓冲区和 kernel，检查接受片段的精确和、完成后复用源张量、逐层清零、初始化及清零失败、实际提交后模拟累加结果报错、读取/等待失败和无法确认排空；验证失败后调用方缓冲区不被晚到 DMA 改写，以及取消后不能直接重开累积器。模型上下文测试另覆盖第二层累加失败、接受后等待失败、读取和 Host 写入部分失败、覆盖未决草稿、缺层/无节点，以及“全部拒绝，再接受 4/8 token，退休后完成旧前缀”。故障用例在 packed 任务已结算后单独验证 Mean-K writer 仍使 CPU 回收延期，确认取消后 CPU payload 才可释放。它们使用模型维度的已知张量，不等于真实 MTP 接受率或完整生产 retrieval GC 已验收。
+
+最终模型上下文验证 **30/30 个顶层场景** 通过，保留上一轮 21 个，新增 8 个故障场景和 1 个正常 accept/reject 场景。独立 CUDA CTest **2/2** 通过，其中 Mean-K 测试执行 7 个内部场景，packed stageout 保留原有 8 个。Windows 宿主回归 **12/12**、Linux 宿主回归 **24/24** 通过。七个代码/构建文件的本地与远程 SHA256 一致。原始记录为 `historical-decode-final-gpu-test.log`、`historical-decode-native-final-test.log`、`historical-decode-native-detail.log`、`historical-decode-{windows,host}-test.log` 与 `historical-decode-source-sha256.txt`。
+
+普通 CLI retrieval 使用同一 GGUF、356-token 提示词、8-token 生成、Q8_0 KV、预算 512，正常完成生成与退出。真实解码日志为 `n_tok=8, n_flush=1, n_gpu=384, n_host=0, n_miss=0`；48 个 attention 层的 8 个接受 token 均在 GPU 累积，随后一次 flush 写入。这验证真实生成经过本轮修改路径；该运行未开启 historical capture/GC，不证明生产 retrieval GC 已接入，也不是前后性能对照。原始日志和输出为 `historical-decode-cli-retrieval.log/.tokens`。
+
+同版 recency CLI delete 使用既定 356/8 token 和容量/水位 32/14/16，正常生成并退出，`proposed=committed=reclaimed=6`、`live_observed=14`、`task_references=0`，policy/worker failure 均为 0。本次 `gpu_deferred=gpu_returned=2`：这两项只统计退休时仍有源读取依赖而延期归还的 GPU 槽，不要求每次等于 CPU 回收数；实际值受退休与搬运的时序影响。结束时 `payload_bytes=26738688` 仍是包含待归还私有预约的瞬时观测。原始记录为 `historical-decode-cli-delete.log/.tokens`，上述日志同时保存在远程隔离副本与本地 `build-local/capture-session-validation/`。
+
+这一修改仍未完成全请求 GPU/pinned/metadata/scratch 预约，也未覆盖其它 stage-in、layout、多 GPU、NVMe 和 MTP 全链路的所有设备错误。新 staging 的大小有明确上界，但仍须纳入后续请求统一预约；当前结果不能证明长期总内存有界或前台没有任何动态分配。CUDA sanitizer 的环境限制继续保留，不用宿主 sanitizer 结果代替适配器证据。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

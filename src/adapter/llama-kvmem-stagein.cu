@@ -293,10 +293,26 @@ __global__ void copy_bytes(const CopyOp * ops, int n) {
 
 struct MeanKAcc {
     float * acc = nullptr;
+    float * pin = nullptr;
     uint32_t n_layer = 0;
     uint32_t n_embd = 0;
+    bool pending = false;
+    bool failed = false;
+    KvmemMeanKFault fault = nullptr;
+    void * fault_context = nullptr;
 };
 MeanKAcc & mean_k();
+
+bool meank_fault(KvmemMeanKPoint point, uint32_t layer = 0) {
+    return mean_k().fault && mean_k().fault(mean_k().fault_context, point, layer);
+}
+void meank_require_open() {
+    if (mean_k().failed) throw std::runtime_error("KVMem decode Mean-K accumulator is closed after failure");
+}
+[[noreturn]] void meank_fail(const char * message) {
+    mean_k().failed = true;
+    throw std::runtime_error(message);
+}
 
 __global__ void meank_add_f32(const uint8_t * k, float * acc, int tok0, int n_keep,
                               int n_embd, int ne0, size_t nb0, size_t nb1, size_t nb2) {
@@ -465,6 +481,7 @@ bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed) {
 void kvmem_stagein_gpu_free() {
     // In particular, do not free pinned memory after a partial failed submit.
     stageout_drain();
+    kvmem_meank_cancel();
     if (stage().dev_f32) {
         cudaFree(stage().dev_f32);
         stage().dev_f32 = nullptr;
@@ -1125,6 +1142,7 @@ bool kvmem_d2d_batched(const void * const * src, void * const * dst,
 }
 
 bool kvmem_meank_ready(uint32_t n_layer, uint32_t n_embd) {
+    meank_require_open();
     if (n_layer == 0 || n_embd == 0) {
         return false;
     }
@@ -1139,37 +1157,74 @@ bool kvmem_meank_ready(uint32_t n_layer, uint32_t n_embd) {
     }
     mean_k().n_layer = n_layer;
     mean_k().n_embd = n_embd;
-    if (!cuda_ok(cudaMemsetAsync(mean_k().acc, 0, need, stream()), "meank zero")) {
+    if (!cuda_ok(cudaMallocHost(reinterpret_cast<void **>(&mean_k().pin), size_t(n_embd) * sizeof(float)),
+                 "meank read staging")) {
         kvmem_meank_free();
         return false;
     }
+    mean_k().pending = true;
+    if (meank_fault(KvmemMeanKPoint::Zero) ||
+            !cuda_ok(cudaMemsetAsync(mean_k().acc, 0, need, stream()), "meank initial zero"))
+        meank_fail("KVMem decode Mean-K initialization did not complete");
     return true;
 }
 
+void kvmem_meank_sync() {
+    meank_require_open();
+    if (!mean_k().pending) return;
+    if (meank_fault(KvmemMeanKPoint::Wait) ||
+            !cuda_ok(cudaStreamSynchronize(stream()), "meank completion"))
+        meank_fail("KVMem decode Mean-K completion is unconfirmed");
+    mean_k().pending = false;
+}
+
+void kvmem_meank_cancel() {
+    if (!mean_k().pending) return;
+    if (meank_fault(KvmemMeanKPoint::Drain) ||
+            !cuda_ok(cudaStreamSynchronize(stream()), "meank cancellation drain"))
+        meank_fail("KVMem decode Mean-K cancellation requires confirmed device completion");
+    mean_k().pending = false;
+}
+
 void kvmem_meank_free() {
+    kvmem_meank_cancel();
     if (mean_k().acc) {
-        cudaFree(mean_k().acc);
+        if (!cuda_ok(cudaFree(mean_k().acc), "meank free"))
+            meank_fail("KVMem decode Mean-K device allocation could not be released");
         mean_k().acc = nullptr;
+    }
+    if (mean_k().pin) {
+        if (!cuda_ok(cudaFreeHost(mean_k().pin), "meank pin free"))
+            meank_fail("KVMem decode Mean-K host allocation could not be released");
+        mean_k().pin = nullptr;
     }
     mean_k().n_layer = 0;
     mean_k().n_embd = 0;
+    mean_k().failed = false;
 }
 
 void kvmem_meank_zero(uint32_t il) {
+    meank_require_open();
     if (!mean_k().acc || il >= mean_k().n_layer) {
         return;
     }
-    cudaMemsetAsync(mean_k().acc + (size_t) il * mean_k().n_embd, 0,
-                    (size_t) mean_k().n_embd * sizeof(float), stream());
+    mean_k().pending = true;
+    if (meank_fault(KvmemMeanKPoint::Zero, il) ||
+            !cuda_ok(cudaMemsetAsync(mean_k().acc + (size_t) il * mean_k().n_embd, 0,
+                                    (size_t) mean_k().n_embd * sizeof(float), stream()), "meank zero"))
+        meank_fail("KVMem decode Mean-K zero failed");
 }
 
 bool kvmem_meank_add(uint32_t il, ggml_type ty, const void * gpu_k,
                      uint32_t tok0, uint32_t n_keep, uint32_t n_embd,
                      int64_t ne0, size_t nb0, size_t nb1, size_t nb2) {
+    meank_require_open();
     if (!mean_k().acc || !gpu_k || n_keep == 0 || n_embd == 0 || ne0 <= 0 ||
         il >= mean_k().n_layer || n_embd != mean_k().n_embd) {
         return false;
     }
+    if (ty != GGML_TYPE_F32 && ty != GGML_TYPE_F16 && ty != GGML_TYPE_BF16) return false;
+    mean_k().pending = true;
     float * acc = mean_k().acc + (size_t) il * mean_k().n_embd;
     const uint8_t * k = static_cast<const uint8_t *>(gpu_k);
     const int threads = 64;
@@ -1186,15 +1241,29 @@ bool kvmem_meank_add(uint32_t il, ggml_type ty, const void * gpu_k,
     } else {
         return false;
     }
-    return cuda_ok(cudaGetLastError(), "meank add");
+    const auto result = cudaGetLastError();
+    if (meank_fault(KvmemMeanKPoint::AddResult, il) || !cuda_ok(result, "meank add"))
+        meank_fail("KVMem decode Mean-K addition failed; CPU replay is unsafe");
+    return true;
 }
 
 bool kvmem_meank_d2h(uint32_t il, float * host, uint32_t n_embd) {
+    meank_require_open();
     if (!mean_k().acc || !host || il >= mean_k().n_layer || n_embd != mean_k().n_embd) {
         return false;
     }
-    return cuda_ok(kvmem_copy_async(host, mean_k().acc + (size_t) il * mean_k().n_embd,
-                                   (size_t) n_embd * sizeof(float),
-                                   cudaMemcpyDeviceToHost, stream()),
-                   "meank D2H");
+    mean_k().pending = true;
+    if (meank_fault(KvmemMeanKPoint::ReadCopy, il) ||
+            !cuda_ok(kvmem_copy_async(mean_k().pin, mean_k().acc + (size_t) il * mean_k().n_embd,
+                                     (size_t) n_embd * sizeof(float), cudaMemcpyDeviceToHost, stream()),
+                     "meank D2H"))
+        meank_fail("KVMem decode Mean-K read failed");
+    kvmem_meank_sync();
+    std::memcpy(host, mean_k().pin, size_t(n_embd) * sizeof(float));
+    return true;
+}
+
+void kvmem_meank_test_fault(KvmemMeanKFault fault, void * context) {
+    mean_k().fault = fault;
+    mean_k().fault_context = context;
 }
