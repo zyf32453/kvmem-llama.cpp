@@ -2,6 +2,7 @@
 // a controlled fixture; it does not enable background GC in CLI/server runs.
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-batch.h"
+#include "llama-context.h"
 #include "llama-kvmem-batch.h"
 #include "llama-kvmem-hooks.h"
 #include "llama-kvmem-stagein.h"
@@ -130,6 +131,25 @@ struct kvmem_transfer_test_access {
         }
         probe.clear_prepared_simple_pool();
         return valid;
+    }
+    static bool input_batch_without_cpp_allocation(const llama_vocab & vocab, llama_token * tokens) {
+        llama_batch_allocr probe(1);
+        if (!probe.prepare_historical_simple_input(64)) return false;
+        auto batch = llama_batch_get_one(tokens, 64);
+        for (int round = 0; round < 3; ++round) {
+            bool valid = false;
+            {
+                DenyCppAllocation guard;
+                if (!probe.init(batch, vocab, nullptr, 0, 1, false)) return false;
+                probe.get_out_ids().push_back(63);
+                valid = probe.seq_pos_min(0) == 0 && probe.seq_pos_max(0) == 63 &&
+                        probe.get_n_tokens() == 64 && probe.get_n_outputs() == 1 &&
+                        probe.get_out_ids().size() == 1;
+            }
+            if (!valid) return false;
+        }
+        probe.clear_historical_simple_input();
+        return !probe.historical_simple_input_prepared();
     }
     static bool microbatch_graph_bound_without_cpp_allocation(llama_memory_kvmem & mem,
             const llama_vocab & vocab, llama_token * tokens) {
@@ -1532,7 +1552,8 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     std::vector<llama_token> tokens(count);
     require(llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(), tokens.size(), true, true) == count,
             "real capture prompt tokenization failed");
-    require(!llama_kvmem_historical_capture_begin(1, 160, 3, 7) && mem.store_n_tokens() == 0,
+    require(!llama_kvmem_historical_capture_begin(ctx, 1, 160, 3, 7) && mem.store_n_tokens() == 0 &&
+            !ctx->historical_simple_input_prepared(),
             "insufficient capture reservation changed runtime");
     if (saturated_queue) {
         auto & cleanup = kvmem::HistoricalKvCleanup::process();
@@ -1561,10 +1582,11 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
             return point == KvmemCaptureReservePoint::Pin1;
         };
         kvmem_capture_reserve_test_fault(inject, nullptr);
-        const bool admitted = llama_kvmem_historical_capture_begin(12, 160, 3, 7);
+        const bool admitted = llama_kvmem_historical_capture_begin(ctx, 12, 160, 3, 7);
         kvmem_capture_reserve_test_fault(nullptr, nullptr);
         const auto failed = kvmem_capture_workspace_status();
-        require(!admitted && mem.store_n_tokens() == 0 && !failed.reserved && !failed.device_bytes &&
+        require(!admitted && !ctx->historical_simple_input_prepared() &&
+                mem.store_n_tokens() == 0 && !failed.reserved && !failed.device_bytes &&
                 !failed.pinned_bytes && !failed.events && !failed.host_bytes && cleanup.occupied() == 1 &&
                 mem.runtime().store().allocated_bytes() == table_bytes &&
                 !mem.runtime().historical_shadow_directory().size() &&
@@ -1576,7 +1598,10 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 "real request preparation failure published an owner or retained workspace");
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
     }
-    require(llama_kvmem_historical_capture_begin(12, 160, 3, 7), "real request capture admission failed");
+    require(llama_kvmem_historical_capture_begin(ctx, 12, 160, 3, 7), "real request capture admission failed");
+    require(ctx->historical_simple_input_prepared() &&
+            kvmem_transfer_test_access::input_batch_without_cpp_allocation(*vocab, tokens.data()),
+            "historical input batch normalization allocated after admission");
     const auto table_bytes = mem.runtime().store().allocated_bytes();
     const auto execution_buffers = kvmem_transfer_test_access::execution_buffers(mem);
     const auto execution_bytes = kvmem_transfer_test_access::execution_bytes(mem);
@@ -1605,7 +1630,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     require(packed_workspace.capacity >= 2 * KVMEM_CAPTURE_MAX_JOBS && packed_workspace.fallback_bytes,
             "real request did not prepare both queues and fallback");
     if (saturated_queue) kvmem_transfer_test_access::small_packed_queue(mem);
-    require(!llama_kvmem_historical_capture_begin(12, 160, 3, 7), "duplicate capture owner accepted");
+    require(!llama_kvmem_historical_capture_begin(ctx, 12, 160, 3, 7), "duplicate capture owner accepted");
     struct Saved { uint32_t id, il; uint64_t k, v; };
     std::vector<Saved> saved;
     uint32_t retired_during_request = UINT32_MAX;

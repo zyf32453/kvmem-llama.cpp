@@ -503,7 +503,7 @@ int main(int argc, char ** argv) {
     };
     if (historical_capacity) {
         const uint64_t appends = (uint64_t(n_prompt) + n_batch - 1) / n_batch + uint64_t(n_predict);
-        if (!llama_kvmem_historical_capture_begin(historical_capacity, n_prompt, n_predict, appends)) {
+        if (!llama_kvmem_historical_capture_begin(ctx, historical_capacity, n_prompt, n_predict, appends)) {
             free_context();
             llama_model_free(model);
             return 1;

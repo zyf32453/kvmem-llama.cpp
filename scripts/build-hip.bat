@@ -66,7 +66,7 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
-for %%P in (0007-historical-active-hook.patch 0008-historical-cell-index-reservation.patch 0009-historical-slot-info-return.patch 0010-historical-microbatch-pool.patch) do (
+for %%P in (0007-historical-active-hook.patch 0008-historical-cell-index-reservation.patch 0009-historical-slot-info-return.patch) do (
     git -C "%LLAMA_DIR%" apply --reverse --check "%ROOT%\patches\%%P" >nul 2>&1
     if errorlevel 1 (
         git -C "%LLAMA_DIR%" apply --check "%ROOT%\patches\%%P"
@@ -74,6 +74,23 @@ for %%P in (0007-historical-active-hook.patch 0008-historical-cell-index-reserva
         git -C "%LLAMA_DIR%" apply "%ROOT%\patches\%%P"
         if errorlevel 1 exit /b 1
     )
+)
+
+set "HISTORICAL_INPUT_PATCH=%ROOT%\patches\0011-historical-input-workspace.patch"
+set "HISTORICAL_MICROBATCH_PATCH=%ROOT%\patches\0010-historical-microbatch-pool.patch"
+git -C "%LLAMA_DIR%" apply --reverse --check "%HISTORICAL_INPUT_PATCH%" >nul 2>&1
+if errorlevel 1 (
+    git -C "%LLAMA_DIR%" apply --reverse --check "%HISTORICAL_MICROBATCH_PATCH%" >nul 2>&1
+    if errorlevel 1 (
+        git -C "%LLAMA_DIR%" apply --check "%HISTORICAL_MICROBATCH_PATCH%"
+        if errorlevel 1 exit /b 1
+        git -C "%LLAMA_DIR%" apply "%HISTORICAL_MICROBATCH_PATCH%"
+        if errorlevel 1 exit /b 1
+    )
+    git -C "%LLAMA_DIR%" apply --check "%HISTORICAL_INPUT_PATCH%"
+    if errorlevel 1 exit /b 1
+    git -C "%LLAMA_DIR%" apply "%HISTORICAL_INPUT_PATCH%"
+    if errorlevel 1 exit /b 1
 )
 
 if "%JOBS%"=="" set "JOBS=12"

@@ -77,6 +77,7 @@ if (!$HostOnly) {
     $historicalCells = Join-Path $SourceDir 'patches/0008-historical-cell-index-reservation.patch'
     $historicalSlots = Join-Path $SourceDir 'patches/0009-historical-slot-info-return.patch'
     $historicalMicrobatch = Join-Path $SourceDir 'patches/0010-historical-microbatch-pool.patch'
+    $historicalInput = Join-Path $SourceDir 'patches/0011-historical-input-workspace.patch'
     function Test-PatchApplied([string]$PatchPath) {
         $savedPreference = $ErrorActionPreference
         try {
@@ -107,7 +108,9 @@ if (!$HostOnly) {
         Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', '--check', $qwen3MoeCapture)
         Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', $qwen3MoeCapture)
     }
-    foreach ($historicalPatch in @($historicalActive, $historicalCells, $historicalSlots, $historicalMicrobatch)) {
+    $historicalInputApplied = Test-PatchApplied $historicalInput
+    foreach ($historicalPatch in @($historicalActive, $historicalCells, $historicalSlots, $historicalMicrobatch, $historicalInput)) {
+        if ($historicalInputApplied -and $historicalPatch -eq $historicalMicrobatch) { continue }
         if (!(Test-PatchApplied $historicalPatch)) {
             Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalPatch)
             Invoke-Checked git @('-C', $llama, 'apply', $historicalPatch)

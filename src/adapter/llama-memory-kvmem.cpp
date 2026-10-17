@@ -19,6 +19,7 @@
 
 #include "llama-arch.h"
 #include "llama-cparams.h"
+#include "llama-context.h"
 #include "llama-impl.h"
 #include "llama-memory-recurrent.h"
 #include "llama-memory-hybrid.h"
@@ -6004,10 +6005,20 @@ bool llama_kvmem_want_decode_mean(void) {
     return mem && mem->want_decode_mean();
 }
 
-bool llama_kvmem_historical_capture_begin(uint32_t capacity, uint64_t input_tokens,
+bool llama_kvmem_historical_capture_begin(llama_context * ctx, uint32_t capacity, uint64_t input_tokens,
         uint64_t max_output_tokens, uint64_t max_appends) {
     auto * mem = kvmem_capture_active();
-    return mem && mem->begin_historical_capture(capacity, input_tokens, max_output_tokens, max_appends);
+    if (!mem || !ctx || ctx->get_memory() != mem) return false;
+    const bool previously_prepared = ctx->historical_simple_input_prepared();
+    try {
+        if (!ctx->prepare_historical_simple_input()) return false;
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("historical capture: input reservation failed: %s\n", e.what());
+        return false;
+    }
+    if (mem->begin_historical_capture(capacity, input_tokens, max_output_tokens, max_appends)) return true;
+    if (!previously_prepared) ctx->clear_historical_simple_input();
+    return false;
 }
 
 bool llama_kvmem_historical_gc_start(int mode, uint32_t ready_low, uint32_t ready_high) {

@@ -49,9 +49,11 @@ LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 // hybrid, CPU spill arena or NVMe. It reserves actual historical RAM, not all
 // GPU/backend/metadata resources. Begin refusal leaves an empty context usable;
 // an execution failure after begin is terminal and requires context teardown.
-// Call after context creation and before the first decode. end_prefill_capture
+// Call after context creation and before the first decode. The context must
+// own the currently bound KVMem memory so its batch allocator is reserved
+// before the capture owner is published. end_prefill_capture
 // separates input and output quotas. finish requires llama_synchronize first.
-LLAMA_API bool llama_kvmem_historical_capture_begin(uint32_t capacity,
+LLAMA_API bool llama_kvmem_historical_capture_begin(struct llama_context * ctx, uint32_t capacity,
         uint64_t input_tokens, uint64_t max_output_tokens, uint64_t max_appends);
 // After begin and before decode. mode: 1 shadow, 2 delete. LRU pressure
 // requires 0 < ready_low < ready_high <= historical capacity.

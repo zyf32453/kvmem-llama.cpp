@@ -1,0 +1,203 @@
+diff --git a/src/llama-batch.h b/src/llama-batch.h
+index f68d286..901fa56 100644
+--- a/src/llama-batch.h
++++ b/src/llama-batch.h
+@@ -104,6 +104,12 @@ public:
+     void split_reset();
+ 
+ #if defined(LLAMA_KVMEM)
++    // Prepare the single-sequence text input path before a historical request
++    // is admitted. This path does not build the general set/map indexes.
++    bool prepare_historical_simple_input(uint32_t max_tokens);
++    void clear_historical_simple_input() noexcept;
++    bool historical_simple_input_prepared() const noexcept;
++
+     // Restricted single-sequence text path: the caller owns all data and
+     // scratch storage before splitting, and retains it through decode.
+     bool use_prepared_simple_pool(
+@@ -184,6 +190,11 @@ private:
+     std::vector<bool> used;
+ 
+ #if defined(LLAMA_KVMEM)
++    uint32_t prepared_historical_max_tokens = 0;
++    bool prepared_historical_input = false;
++    bool historical_simple_batch = false;
++    llama_pos historical_min_pos = -1;
++    llama_pos historical_max_pos = -1;
+     std::vector<std::shared_ptr<llama_ubatch::data_t>> * prepared_simple_data = nullptr;
+     std::vector<int32_t> * prepared_simple_indices = nullptr;
+     size_t prepared_simple_next = 0;
+diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
+index a3eee30..6b65d5c 100644
+--- a/src/llama-batch.cpp
++++ b/src/llama-batch.cpp
+@@ -30,6 +30,16 @@ bool llama_batch_allocr::init(
+         uint32_t n_embd,
+         uint32_t n_seq_max,
+         bool output_all) {
++#if defined(LLAMA_KVMEM)
++    if (prepared_historical_input && (batch_inp.n_tokens <= 0 ||
++            uint32_t(batch_inp.n_tokens) > prepared_historical_max_tokens ||
++            !batch_inp.token || batch_inp.embd || batch_inp.embd_nextn ||
++            (batch_inp.seq_id && !batch_inp.n_seq_id) ||
++            n_pos_per_embd != 1 || output_all)) {
++        LLAMA_LOG_ERROR("%s: input is outside the admitted historical simple-text shape\n", __func__);
++        return false;
++    }
++#endif
+     clear();
+ 
+     batch = batch_inp;
+@@ -153,6 +163,34 @@ bool llama_batch_allocr::init(
+     this->n_embd    = n_embd;
+     this->n_seq_max = n_seq_max;
+ 
++#if defined(LLAMA_KVMEM)
++    if (prepared_historical_input) {
++        // A historical capture admits only one plain-text sequence. Avoid the
++        // node-allocating std::set/std::unordered_map general path entirely.
++        const llama_pos first = batch.pos[0];
++        const llama_pos prior = memory ? memory->seq_pos_max(0) : -1;
++        if (int64_t(first) != int64_t(prior) + 1) {
++            LLAMA_LOG_ERROR("%s: historical sequence does not continue memory\n", __func__);
++            return false;
++        }
++        for (int32_t i = 0; i < batch.n_tokens; ++i) {
++            if (batch.n_seq_id[i] != 1 || batch.seq_id[i][0] != 0 ||
++                int64_t(batch.pos[i]) != int64_t(first) + i) {
++                LLAMA_LOG_ERROR("%s: historical input requires consecutive positions on sequence 0\n", __func__);
++                return false;
++            }
++            n_outputs += batch.logits[i] != 0;
++        }
++        seq_id_unq.push_back(0);
++        seq_idx[0] = 0;
++        historical_min_pos = first;
++        historical_max_pos = batch.pos[batch.n_tokens - 1];
++        historical_simple_batch = true;
++        split_reset();
++        return true;
++    }
++#endif
++
+     // count the outputs in this batch
+     for (int32_t i = 0; i < batch.n_tokens; ++i) {
+         n_outputs += batch.logits[i] != 0;
+@@ -458,10 +496,16 @@ std::vector<int32_t> & llama_batch_allocr::get_out_ids() {
+ }
+ 
+ llama_pos llama_batch_allocr::seq_pos_min(llama_seq_id seq_id) const {
++#if defined(LLAMA_KVMEM)
++    if (historical_simple_batch) return seq_id == 0 ? historical_min_pos : -1;
++#endif
+     return seq_pos[seq_id].empty() ? -1 : *seq_pos[seq_id].begin();
+ }
+ 
+ llama_pos llama_batch_allocr::seq_pos_max(llama_seq_id seq_id) const {
++#if defined(LLAMA_KVMEM)
++    if (historical_simple_batch) return seq_id == 0 ? historical_max_pos : -1;
++#endif
+     return seq_pos[seq_id].empty() ? -1 : *seq_pos[seq_id].rbegin();
+ }
+ 
+@@ -479,6 +523,46 @@ void llama_batch_allocr::split_reset() {
+ }
+ 
+ #if defined(LLAMA_KVMEM)
++bool llama_batch_allocr::prepare_historical_simple_input(uint32_t max_tokens) {
++    if (max_tokens == 0 || n_pos_per_embd != 1 || debug != 0) return false;
++    if (prepared_historical_input) return max_tokens <= prepared_historical_max_tokens;
++    clear();
++    prepared_historical_max_tokens = max_tokens;
++    prepared_historical_input = true;
++    try {
++        pos.reserve(max_tokens);
++        n_seq_id.reserve(max_tokens);
++        seq_id.reserve(size_t(max_tokens) + 1);
++        output.reserve(max_tokens);
++        seq_id_unq.reserve(1);
++        used.reserve(max_tokens);
++        out_ids.reserve(max_tokens);
++    } catch (...) {
++        clear_historical_simple_input();
++        throw;
++    }
++    return true;
++}
++
++void llama_batch_allocr::clear_historical_simple_input() noexcept {
++    if (!prepared_historical_input) return;
++    clear();
++    std::vector<llama_pos>().swap(pos);
++    std::vector<int32_t>().swap(n_seq_id);
++    std::vector<llama_seq_id *>().swap(seq_id);
++    std::vector<llama_seq_id>().swap(seq_id_unq);
++    std::vector<int8_t>().swap(output);
++    std::vector<bool>().swap(used);
++    std::vector<int32_t>().swap(out_ids);
++    prepared_historical_input = false;
++    prepared_historical_max_tokens = 0;
++    historical_simple_batch = false;
++}
++
++bool llama_batch_allocr::historical_simple_input_prepared() const noexcept {
++    return prepared_historical_input;
++}
++
+ bool llama_batch_allocr::use_prepared_simple_pool(
+         std::vector<std::shared_ptr<llama_ubatch::data_t>> * data,
+         std::vector<int32_t> * indices) noexcept {
+@@ -758,6 +842,11 @@ llama_ubatch llama_batch_allocr::split_seq(uint32_t n_ubatch) {
+ }
+ 
+ void llama_batch_allocr::clear() {
++#if defined(LLAMA_KVMEM)
++    historical_simple_batch = false;
++    historical_min_pos = -1;
++    historical_max_pos = -1;
++#endif
+     n_outputs = 0;
+ 
+     batch = {};
+diff --git a/src/llama-context.h b/src/llama-context.h
+index e9ef44d..bcf1327 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -75,6 +75,12 @@ struct llama_context {
+ 
+     llama_memory_t get_memory() const;
+ 
++#if defined(LLAMA_KVMEM)
++    bool prepare_historical_simple_input();
++    void clear_historical_simple_input() noexcept;
++    bool historical_simple_input_prepared() const noexcept;
++#endif
++
+     // return true if the memory was updated
+     bool memory_update(bool optimize);
+ 
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index def8fd6..e365255 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -855,6 +855,20 @@ llama_memory_t llama_context::get_memory() const {
+     return memory.get();
+ }
+ 
++#if defined(LLAMA_KVMEM)
++bool llama_context::prepare_historical_simple_input() {
++    return balloc && balloc->prepare_historical_simple_input(cparams.n_batch);
++}
++
++void llama_context::clear_historical_simple_input() noexcept {
++    if (balloc) balloc->clear_historical_simple_input();
++}
++
++bool llama_context::historical_simple_input_prepared() const noexcept {
++    return balloc && balloc->historical_simple_input_prepared();
++}
++#endif
++
+ bool llama_context::memory_update(bool optimize) {
+     if (!memory) {
+         return false;
