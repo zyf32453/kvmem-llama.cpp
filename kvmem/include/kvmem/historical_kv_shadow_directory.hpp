@@ -74,6 +74,10 @@ public:
     // Only swaps privately prepared storage into an unchanged, empty runtime.
     // No allocation or publication of block identities occurs here.
     bool install_append_reservation(KvMemStore & store, AppendReservation & reservation) noexcept;
+    // Admission-time preparation for one detached, exactly reclaimed table
+    // slot. Allocates its next producer before an append enters the hot path.
+    bool prepare_recycled_slot(KvMemStore & store, AppendReservation & reservation,
+                               uint32_t block_id);
     bool append_reserved_blocks(KvMemStore & store, AppendReservation & reservation,
         std::shared_ptr<HistoricalKvRepository> repository,
         std::shared_ptr<HistoricalKvRawStore> storage,
@@ -202,12 +206,12 @@ private:
         State state = State::Bound;
     };
 
-    // KvMemStore appends monotonically, so the greatest bound ID also has
-    // the greatest original span. Mutation guards inspect only that tail.
+    // Keys are physical table slots; chronological order lives in KvMemStore.
     std::map<uint32_t, Entry> entries_;
     uint64_t repository_id_ = 0;
     uint32_t reserved_append_capacity_ = 0;
     bool reserved_append_mode_ = false;
+    bool recycled_table_slots_ = false;
 };
 
 } // namespace kvmem

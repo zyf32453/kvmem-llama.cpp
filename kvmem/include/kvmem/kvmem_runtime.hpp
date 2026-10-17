@@ -86,6 +86,10 @@ public:
     bool install_historical_metadata(HistoricalKvShadowDirectory::AppendReservation & reservation) noexcept {
         return historical_shadow_directory_.install_append_reservation(store_, reservation);
     }
+    bool prepare_recycled_historical_slot(
+            HistoricalKvShadowDirectory::AppendReservation & reservation, uint32_t block_id) {
+        return historical_shadow_directory_.prepare_recycled_slot(store_, reservation, block_id);
+    }
     bool confirm_reclaimed_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.confirm_reclaimed(block_id);
     }

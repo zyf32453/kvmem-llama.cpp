@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -32,12 +33,13 @@ struct HistoricalKvShadowDirectory::AppendReservation::Impl {
     KvMemStore * store;
     std::shared_ptr<HistoricalKvRepository> repository;
     std::shared_ptr<HistoricalKvRawStore> storage;
-    uint32_t limit = 0, used = 0, block_tokens = 0;
+    uint32_t limit = 0, used = 0, recycled_ready = 0, block_tokens = 0;
     uint64_t last_logical_id = 0;
     bool installed = false;
     std::map<uint32_t, Entry> nodes;
     std::vector<Producer> contexts;
     std::vector<KvMemBlock> table, pending;
+    std::vector<uint32_t> pending_ids;
     std::vector<uint32_t> position_order;
 };
 
@@ -45,7 +47,9 @@ HistoricalKvShadowDirectory::AppendReservation::AppendReservation(std::unique_pt
     : impl_(std::move(impl)) {}
 HistoricalKvShadowDirectory::AppendReservation::~AppendReservation() = default;
 uint32_t HistoricalKvShadowDirectory::AppendReservation::capacity() const noexcept { return impl_->limit; }
-uint32_t HistoricalKvShadowDirectory::AppendReservation::remaining() const noexcept { return impl_->limit - impl_->used; }
+uint32_t HistoricalKvShadowDirectory::AppendReservation::remaining() const noexcept {
+    return impl_->limit - impl_->used + impl_->recycled_ready;
+}
 
 std::unique_ptr<HistoricalKvShadowDirectory::AppendReservation>
 HistoricalKvShadowDirectory::prepare_append_reservation(
@@ -64,6 +68,7 @@ HistoricalKvShadowDirectory::prepare_append_reservation(
     r->table.reserve(capacity);
     r->position_order.reserve(capacity);
     r->pending.reserve(capacity);
+    r->pending_ids.reserve(capacity);
     r->contexts.reserve(capacity);
     for (uint32_t id = 0; id < capacity; ++id) {
         auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, storage));
@@ -94,6 +99,31 @@ bool HistoricalKvShadowDirectory::install_append_reservation(
     return true;
 }
 
+bool HistoricalKvShadowDirectory::prepare_recycled_slot(
+        KvMemStore & store, AppendReservation & reservation, uint32_t block_id) {
+    auto & r = *reservation.impl_;
+    if (!r.installed || r.owner != this || r.store != &store ||
+        store.historical_shadow_directory_ != this || !reserved_append_mode_ ||
+        repository_id_ != r.repository->repository_id() ||
+        block_id >= r.used || r.contexts[block_id] ||
+        store.blocks_[block_id].n_tokens != 0) return false;
+    auto entry = entries_.find(block_id);
+    if (entry == entries_.end() || entry->second.state != State::Reclaimed ||
+        entry->second.repository != r.repository ||
+        !entry->second.producer.expired() ||
+        !r.repository->reclaim_completed(entry->second.binding.handle,
+                                          entry->second.repository_id)) return false;
+    std::shared_ptr<WriterContext> next;
+    try { next.reset(new WriterContext(r.repository, r.storage)); }
+    catch (const std::bad_alloc &) { return false; }
+    // The old weak reference can release its control block here, before the
+    // next admitted append's no-allocation commit phase.
+    entry->second.producer.reset();
+    r.contexts[block_id] = std::move(next);
+    ++r.recycled_ready;
+    return true;
+}
+
 bool HistoricalKvShadowDirectory::append_reserved_blocks(
         KvMemStore & store, AppendReservation & reservation,
         std::shared_ptr<HistoricalKvRepository> repository,
@@ -106,19 +136,43 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
         repository_id_ != repository->repository_id() || !reserved_append_mode_ || reserved_append_capacity_ != r.limit ||
         store.block_count() != r.used || store.gc_ || store.historical_shadow_directory_ != this ||
         store.config().block_tokens != r.block_tokens || !tail_span_matches(store) ||
-        store.append_tail_room() || writers.size() > r.limit - r.used ||
+        store.append_tail_room() || writers.size() > reservation.remaining() ||
         writers.size() > producers.capacity() || store.blocks_.capacity() < r.limit ||
-        store.position_order_.capacity() < r.limit) return false;
+        store.position_order_.capacity() < r.limit ||
+        writers.size() > r.limit - store.position_order_.size()) return false;
     r.pending.clear();
+    r.pending_ids.clear();
+    uint32_t next_fresh = r.used;
+    for (size_t i = 0; i < writers.size(); ++i) {
+        if (next_fresh < r.limit) {
+            r.pending_ids.push_back(next_fresh++);
+            continue;
+        }
+        uint32_t recycled = UINT32_MAX;
+        for (uint32_t candidate = 0; candidate < r.used; ++candidate) {
+            if (!r.contexts[candidate] ||
+                std::find(r.pending_ids.begin(), r.pending_ids.end(), candidate) != r.pending_ids.end()) continue;
+            recycled = candidate;
+            break;
+        }
+        if (recycled == UINT32_MAX) return false;
+        r.pending_ids.push_back(recycled);
+    }
     uint64_t position = store.total_tokens();
     uint64_t previous_logical_id = r.last_logical_id;
     for (size_t i = 0; i < writers.size(); ++i) {
-        const uint32_t id = r.used + uint32_t(i);
+        const uint32_t id = r.pending_ids[i];
+        const bool recycled = id < r.used;
         const auto & writer = writers[i];
         const auto meta = writer.metadata();
         const auto node = r.nodes.find(id);
+        const auto old = entries_.find(id);
         const auto & context = r.contexts[id];
-        if (node == r.nodes.end() || entries_.count(id) || !context || context->writer_ ||
+        if ((!recycled && (node == r.nodes.end() || old != entries_.end())) ||
+            (recycled && (old == entries_.end() || old->second.state != State::Reclaimed ||
+                store.blocks_[id].n_tokens || !old->second.producer.expired() ||
+                !repository->reclaim_completed(old->second.binding.handle, old->second.repository_id))) ||
+            !context || context->writer_ ||
             !repository->owns_writer(writer) || !meta ||
             (meta->life != HistoricalKvLife::Writing && meta->life != HistoricalKvLife::Retired) ||
             ((r.used || i) && meta->logical_id <= previous_logical_id) ||
@@ -127,7 +181,8 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
         const auto payload = storage->inspect(*repository, writer.handle());
         if (!payload || payload->original_begin != position || payload->valid_tokens != meta->valid_tokens)
             return false;
-        node->second.binding = {id, meta->logical_id, writer.handle(), position, meta->valid_tokens, {}};
+        if (!recycled)
+            node->second.binding = {id, meta->logical_id, writer.handle(), position, meta->valid_tokens, {}};
         KvMemBlock block;
         block.block_id = id; block.logical_id = meta->logical_id;
         block.orig_pos_start = uint32_t(position);
@@ -139,18 +194,31 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
     // Validation above changes only private records. Below, integer-key map
     // node transfers use the same allocator; all vector capacities are held.
     for (size_t i = 0; i < writers.size(); ++i) {
-        const uint32_t id = r.used + uint32_t(i);
+        const uint32_t id = r.pending_ids[i];
         auto & context = r.contexts[id];
         context->writer_ = std::move(writers[i]);
-        const auto inserted = entries_.insert(r.nodes.extract(id));
-        if (!inserted.inserted) std::terminate(); // impossible after owner-serialized validation
+        if (id < r.used) {
+            auto & entry = entries_.find(id)->second;
+            entry.binding = {id, r.pending[i].logical_id, context->handle(),
+                             r.pending[i].orig_pos_start, r.pending[i].n_tokens, {}};
+            entry.producer = context;
+            entry.state = State::Bound;
+            --r.recycled_ready;
+            recycled_table_slots_ = true;
+        } else {
+            const auto inserted = entries_.insert(r.nodes.extract(id));
+            if (!inserted.inserted) std::terminate(); // impossible after owner-serialized validation
+        }
         producers.push_back(std::move(context));
     }
-    store.blocks_.insert(store.blocks_.end(), r.pending.begin(), r.pending.end());
-    for (size_t i = 0; i < writers.size(); ++i)
-        store.position_order_.push_back(r.used + uint32_t(i));
+    for (size_t i = 0; i < writers.size(); ++i) {
+        const uint32_t id = r.pending_ids[i];
+        if (id < r.used) store.blocks_[id] = r.pending[i];
+        else store.blocks_.push_back(r.pending[i]);
+        store.position_order_.push_back(id);
+    }
     store.total_tokens_ = uint32_t(position);
-    r.used += uint32_t(writers.size());
+    r.used = next_fresh;
     if (!writers.empty()) r.last_logical_id = previous_logical_id;
     return true;
 }
@@ -427,6 +495,11 @@ void HistoricalKvShadowDirectory::validate_truncate(
     if (!tail_span_matches(store))
         throw std::logic_error("historical shadow directory has a stale block span");
     if (token_pos >= store.total_tokens()) return;
+    // KvMemStore::truncate_to still removes the physical table's dense tail.
+    // Once a lower table slot has received a newer span, that operation can
+    // remove the wrong generation and leave position_order_ dangling.
+    if (recycled_table_slots_)
+        throw std::logic_error("cannot truncate a recycled historical block table");
     for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
         const auto & entry = it->second;
         const auto & span = entry.binding;

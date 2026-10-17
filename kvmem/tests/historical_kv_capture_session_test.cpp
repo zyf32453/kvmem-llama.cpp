@@ -374,6 +374,156 @@ static void reserved_metadata_batch_is_atomic() {
           "metadata reservation retained a permanent producer reference");
 }
 
+static void reserved_metadata_reuses_reclaimed_table_slots() {
+    KvMemRuntime runtime(runtime_config());
+    auto repo = std::make_shared<HistoricalKvRepository>(2);
+    auto storage = std::make_shared<HistoricalKvRawStore>(storage_config(), 2);
+    auto reservation = runtime.prepare_historical_metadata(repo, storage, 2);
+    check(reservation && runtime.install_historical_metadata(*reservation),
+          "cyclic metadata reservation failed");
+    const auto table_bytes = runtime.store().allocated_bytes();
+    std::vector<HistoricalKvRepository::Lease> writers;
+    std::vector<HistoricalKvShadowDirectory::Producer> producers;
+    writers.reserve(1); producers.reserve(1);
+    HistoricalKvShadowDirectory::Producer previous_task;
+    HistoricalKvHandle previous_handle{};
+    uint32_t previous_id = UINT32_MAX;
+    std::optional<HistoricalKvHandle> reclaimed_handle;
+    uint32_t reclaimed_begin = 0;
+    for (uint32_t i = 0; i < 20; ++i) {
+        const uint32_t begin = 2 * i;
+        auto writer = repo->begin_write(1000 + i, begin, 2, i + 1, 0,
+            [weak = std::weak_ptr<HistoricalKvRepository>(repo), storage](HistoricalKvHandle handle) {
+                auto owner = weak.lock();
+                return owner && storage->release(*owner, handle).code ==
+                    HistoricalKvRawStore::ReleaseCode::Released;
+            });
+        check(writer && storage->reserve(*writer, writer->handle(), begin, 2),
+              "cyclic writer/payload reservation failed");
+        writers.push_back(std::move(*writer));
+        allocation_budget = 0;
+        const bool appended = runtime.register_historical_append(
+            repo, storage, writers, producers, reservation.get());
+        allocation_budget = -1;
+        check(appended && producers.size() == 1 && runtime.store().block_count() <= 2 &&
+              runtime.store().allocated_bytes() == table_bytes &&
+              runtime.historical_shadow_directory().size() <= 2,
+              "recycled metadata append allocated, grew, or failed");
+        const uint32_t id = runtime.store().chronological_ids().back();
+        check(runtime.store().blocks()[id].logical_id == 1000 + i &&
+              runtime.store().block_id_containing(begin) == static_cast<int32_t>(id) &&
+              (i < 2 || id != previous_id),
+              "cyclic table index or original-position mapping was stale");
+        if (reclaimed_handle) {
+            const auto now = runtime.historical_shadow_directory().observe(id).handle;
+            check(!repo->acquire_read(*reclaimed_handle) &&
+                  runtime.store().block_id_containing(reclaimed_begin) == -1 &&
+                  (now.slot != reclaimed_handle->slot ||
+                   now.generation != reclaimed_handle->generation),
+                  "old generation or position reopened after table-slot reuse");
+            if (i == 2) {
+                bool rejected = false;
+                try { runtime.truncate_to(begin); }
+                catch (const std::logic_error &) { rejected = true; }
+                check(rejected && runtime.store().block_id_containing(begin) == static_cast<int32_t>(id),
+                      "unsafe recycled table truncation changed the live generation");
+            }
+        }
+        auto current_task = std::move(producers[0]);
+        complete(current_task, 2);
+        producers.clear(); writers.clear();
+        if (previous_task) {
+            check(repo->retire(previous_handle) == HistoricalKvRepository::RetireResult::Committed,
+                  "cyclic prior generation did not retire");
+            previous_task.reset();
+            check(repo->try_reclaim(previous_handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+                  !repo->acquire_read(previous_handle),
+                  "cyclic prior generation did not release exactly once");
+            check(runtime.detach_reclaimed_historical_block(previous_id) &&
+                  runtime.store().block_id_containing(begin - 2) == -1 &&
+                  runtime.prepare_recycled_historical_slot(*reservation, previous_id),
+                  "cyclic reclaimed table slot was not prepared for a new generation");
+            reclaimed_handle = previous_handle;
+            reclaimed_begin = begin - 2;
+        }
+        previous_task = std::move(current_task);
+        previous_handle = previous_task->handle();
+        previous_id = id;
+    }
+    check(repo->retire(previous_handle) == HistoricalKvRepository::RetireResult::Committed,
+          "final cyclic generation did not retire");
+    previous_task.reset();
+    check(repo->try_reclaim(previous_handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          runtime.detach_reclaimed_historical_block(previous_id) &&
+          repo->ready_count() == 2 && !storage->allocated_payload_bytes() &&
+          runtime.store().block_count() == 2 && runtime.store().chronological_ids().empty(),
+          "cyclic metadata/payload slots did not return to bounded Ready state");
+}
+
+static void reserved_metadata_mixes_fresh_and_recycled_slots_atomically() {
+    KvMemRuntime runtime(runtime_config());
+    auto repo = std::make_shared<HistoricalKvRepository>(3);
+    auto storage = std::make_shared<HistoricalKvRawStore>(storage_config(), 3);
+    auto reservation = runtime.prepare_historical_metadata(repo, storage, 3);
+    check(reservation && runtime.install_historical_metadata(*reservation),
+          "mixed table reservation failed");
+    auto write = [&](uint64_t logical_id, uint32_t begin) {
+        auto writer = repo->begin_write(logical_id, begin, 2, logical_id, 0,
+            [weak = std::weak_ptr<HistoricalKvRepository>(repo), storage](HistoricalKvHandle handle) {
+                auto owner = weak.lock();
+                return owner && storage->release(*owner, handle).code ==
+                    HistoricalKvRawStore::ReleaseCode::Released;
+            });
+        check(writer && storage->reserve(*writer, writer->handle(), begin, 2),
+              "mixed writer reservation failed");
+        return std::move(*writer);
+    };
+    std::vector<HistoricalKvRepository::Lease> writers;
+    std::vector<HistoricalKvShadowDirectory::Producer> producers;
+    std::vector<HistoricalKvShadowDirectory::Producer> baseline;
+    writers.reserve(2); producers.reserve(2);
+    baseline.reserve(2);
+    for (uint32_t i = 0; i < 2; ++i) {
+        writers.push_back(write(1000 + i, 2 * i));
+        check(runtime.register_historical_append(repo, storage, writers, producers, reservation.get()),
+              "mixed baseline append failed");
+        complete(producers.back(), 2);
+        baseline.push_back(std::move(producers.back()));
+        producers.clear();
+        writers.clear();
+    }
+    const auto old_handle = baseline[0]->handle();
+    check(repo->retire(old_handle) == HistoricalKvRepository::RetireResult::Committed,
+          "mixed old generation did not retire");
+    baseline.erase(baseline.begin());
+    check(repo->try_reclaim(old_handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          runtime.detach_reclaimed_historical_block(0) &&
+          runtime.prepare_recycled_historical_slot(*reservation, 0) && reservation->remaining() == 2,
+          "mixed reclaimed table slot was not prepared");
+    writers.push_back(write(1002, 4));
+    writers.push_back(write(1003, 7)); // Invalid second span must leave the fresh slot unused.
+    const auto bad_handle = writers.back().handle();
+    check(!runtime.register_historical_append(repo, storage, writers, producers, reservation.get()) &&
+          writers[0] && writers[1] && producers.empty() &&
+          runtime.store().block_count() == 2 && reservation->remaining() == 2,
+          "mixed invalid batch partially committed");
+    check(repo->retire(bad_handle) == HistoricalKvRepository::RetireResult::Committed,
+          "mixed invalid writer did not retire");
+    writers.back().reset();
+    check(repo->try_reclaim(bad_handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "mixed invalid writer did not release");
+    writers.back() = write(1003, 6);
+    allocation_budget = 0;
+    const bool appended = runtime.register_historical_append(repo, storage, writers, producers, reservation.get());
+    allocation_budget = -1;
+    check(appended && producers.size() == 2 && runtime.store().block_count() == 3 &&
+          runtime.store().chronological_ids() == std::vector<uint32_t>({1, 2, 0}) &&
+          runtime.store().block_id_containing(4) == 2 &&
+          runtime.store().block_id_containing(6) == 0 &&
+          !repo->acquire_read(old_handle) && !reservation->remaining(),
+          "mixed fresh/recycled append lost atomic order or revived old generation");
+}
+
 static void unadmitted_rollback_with_stalled_cleanup() {
     std::promise<void> entered, resume;
     auto entered_signal = entered.get_future();
@@ -474,6 +624,8 @@ int main() {
         failures_are_atomic();
         wait_cleanup();
         reserved_metadata_batch_is_atomic();
+        reserved_metadata_reuses_reclaimed_table_slots();
+        reserved_metadata_mixes_fresh_and_recycled_slots_atomically();
         unadmitted_rollback_with_stalled_cleanup();
         unused_reservation_handoff_with_stalled_cleanup();
         std::puts("PASS historical capture session: private prepare/admit, immediate rollback, reserved metadata, bounded quotas, publication, cancellation, allocation faults");

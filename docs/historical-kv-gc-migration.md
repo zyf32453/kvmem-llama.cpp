@@ -529,6 +529,14 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 
 此时位置索引可稀疏，**物理块表和 shadow 目录仍未循环复用**；生产请求仍按整请求一次性预约并在用完后拒绝追加。下一步必须让墓碑在旧计划/设备/任务引用全部结清后获得新代，改造剩余按密集下标寻址的适配器与快照，并完成累计追加至少 10 倍物理容量的端到端验收。
 
+### 已回收物理表项的显式复用（2026-10-17）
+
+预约追加现在可以在某个块完成精确代际 CPU payload 释放、producer 引用消失、GPU/CPU/NVMe 槽和执行权利归零、原跨度从位置索引脱离之后，显式准备该表下标的新 producer。准备在接纳时完成可能分配内存的工作；后续追加先用尚未使用的表下标，再选已准备的墓碑，把新逻辑身份、repository handle 和原始位置覆盖到同一物理表项。shadow directory 的节点和 `KvMemStore` 的块表/位置索引均保持固定容量；旧 handle 继续由 repository 的 generation 校验拒绝，旧位置也不能解析为新代。
+
+宿主回归使用 **2 个物理表项、2 个 repository/RAM 槽位累计追加 20 个真实 payload**，每次追加在禁止普通 C++ `new` 的区间执行，检查元数据容量恒定、旧句柄不可读取、旧位置缺失和最后 payload 全部归还。这是宿主组件级的 **10 倍循环**，不是 CLI 或 server 的生产长轨迹验收。复用以后，旧 `truncate_to` 仍按物理表的稠密尾部删除，可能删错新代；当前明确拒绝对已复用表的截断，待截断/回滚按位置顺序及精确代际重写后再开放。生产 capture session 尚未自动调用表项准备，也没有跨请求 admission；不能把此项报告成完整 P4。
+
+另有混合批次回归：先保留一个旧块，再同时追加一个新表下标和一个已回收表下标；第二个 writer 位置错误时整个批次不提交，修正后在禁止 `new` 的区间原子提交。最终远程宿主 CTest **27/27**、相关 ASan/UBSan **3/3**、TSan **3/3** 均通过。真实 GGUF/CUDA 模型的既有 **35/35** 场景和 backend guard 通过；recency/RAM delete 请求完成 356-token 输入、8-token 输出，本次后台 `proposed=committed=reclaimed=8`、位置脱离 8 次、策略与 worker 错误为 0。该 CLI 路径目前未自动启用表项复用，模型结果是基线回归，不是生产复用验收。原始日志在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`，文件名前缀 `recycled-table-`。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
@@ -539,4 +547,4 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到完整生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 
-单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository 与按句柄 payload store 已使用固定物理槽位，但生产 `KvMemStore::blocks_`、位置映射及相关队列仍需改造；当前结果不证明长期总内存有界，也不证明已接纳请求完全不依赖 GC。
+单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store 以及宿主预约追加的块表具备固定物理槽位复用；生产 capture session、适配器的旧计划引用及相关队列仍需改造。当前结果不证明生产长期总内存有界，也不证明已接纳请求完全不依赖 GC。
