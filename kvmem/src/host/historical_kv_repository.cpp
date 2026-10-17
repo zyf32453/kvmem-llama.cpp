@@ -488,11 +488,6 @@ HistoricalKvRepository::ReclaimResult HistoricalKvRepository::try_reclaim(
     return ReclaimResult::Complete;
 }
 
-bool HistoricalKvRepository::mark_executed(HistoricalKvHandle handle, uint64_t sequence) {
-    auto admitted = acquire_new(handle);
-    return admitted && mark_executed(*admitted, sequence);
-}
-
 bool HistoricalKvRepository::mark_executed(const Lease & admitted, uint64_t sequence) {
     const auto shared = shared_;
     if (!admitted.shared_ || admitted.shared_.get() != shared.get() ||

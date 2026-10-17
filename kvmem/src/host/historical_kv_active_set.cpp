@@ -50,7 +50,7 @@ HistoricalKvActiveSet::AcquireResult HistoricalKvActiveSet::acquire(
     return result;
 }
 
-bool HistoricalKvActiveSet::mark_execution_complete(uint64_t sequence) {
+bool HistoricalKvActiveSet::mark_execution_submitted(uint64_t sequence) {
     bool all_recorded = true;
     for (const auto & lease : leases_)
         all_recorded = repository_->mark_executed(lease, sequence) && all_recorded;

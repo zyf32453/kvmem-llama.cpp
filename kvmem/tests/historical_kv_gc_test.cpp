@@ -188,8 +188,12 @@ void test_lru_policy_through_manager() {
         handles[i] = writer->handle();
         writer->reset();
     }
-    check(repo->mark_executed(handles[0], 20) &&
-          repo->mark_executed(handles[1], 10), "LRU use tracking failed");
+    auto recent_a = repo->acquire_new(handles[0]);
+    auto recent_b = repo->acquire_new(handles[1]);
+    check(recent_a && recent_b && repo->mark_executed(*recent_a, 20) &&
+          repo->mark_executed(*recent_b, 10), "LRU use tracking failed");
+    recent_a->reset();
+    recent_b->reset();
     auto active_oldest = repo->acquire_new(handles[2]);
     check(active_oldest && repo->mark_executed(*active_oldest, 4),
           "active oldest block setup failed");

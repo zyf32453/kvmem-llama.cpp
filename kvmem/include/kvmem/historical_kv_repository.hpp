@@ -121,9 +121,9 @@ public:
     // callbacks leave the slot Releasing and are retried with the same handle.
     ReclaimResult try_reclaim(HistoricalKvHandle handle);
 
-    bool mark_executed(HistoricalKvHandle handle, uint64_t sequence);
-    // Records an execution already admitted before retire_commit. Such an
-    // operation may finish after retirement without reopening new admission.
+    // Record a successfully submitted model computation using its already
+    // admitted execution lease. Submission can follow retire_commit if that
+    // lease was acquired first; a bare handle cannot mint permission here.
     bool mark_executed(const Lease & admitted, uint64_t sequence);
     // A callback must not accept a writer from another repository even if a
     // caller deliberately reused the same incarnation, slot and generation.

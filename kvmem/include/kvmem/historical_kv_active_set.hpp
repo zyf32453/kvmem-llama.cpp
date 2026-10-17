@@ -38,10 +38,11 @@ public:
     const std::vector<HistoricalKvHandle> & handles() const { return handles_; }
     bool empty() const { return leases_.empty(); }
 
-    // Call only after the admitted operation actually executes. This may be
-    // called again after a later decode step under the same active permission.
-    // An abandoned plan simply destroys the set without updating last_use.
-    bool mark_execution_complete(uint64_t sequence);
+    // Call immediately after the admitted model computation is successfully
+    // submitted. An acquired but abandoned plan does not update last_use.
+    // A later decode submission under the same active permission may call it
+    // again with that submission's sequence, even after retirement.
+    bool mark_execution_submitted(uint64_t sequence);
 
 private:
     explicit HistoricalKvActiveSet(std::shared_ptr<HistoricalKvRepository> repository);

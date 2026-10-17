@@ -58,7 +58,7 @@ static void test_old_active_finishes_after_retirement() {
     check(old_active && old_active.active->handles().size() == 1,
           "old active operation was not admitted");
     check(repository->inspect(handle)->last_use_seq == 1,
-          "admission alone incorrectly marked execution complete");
+          "admission alone incorrectly marked execution submitted");
     check(repository->retire(handle) == HistoricalKvRepository::RetireResult::Committed,
           "active block could not retire");
 
@@ -67,10 +67,13 @@ static void test_old_active_finishes_after_retirement() {
           "new active reused an older execution lease");
     check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred,
           "payload was released during the old active operation");
-    check(old_active.active->mark_execution_complete(7),
-          "admitted old operation could not report actual use after retirement");
+    check(old_active.active->mark_execution_submitted(7),
+          "admitted old operation could not report submission after retirement");
     check(repository->inspect(handle)->last_use_seq == 7,
-          "completion did not update LRU recency");
+          "submission did not update LRU recency");
+    check(old_active.active->mark_execution_submitted(9) &&
+          repository->inspect(handle)->last_use_seq == 9,
+          "later decode submission under the same permission was not recorded");
     old_active.active.reset();
     check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
           released.load() == 1,

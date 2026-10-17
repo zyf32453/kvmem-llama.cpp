@@ -155,7 +155,7 @@ static void test_snapshot_and_last_use() {
     auto execution = repo.acquire_new(handle);
     check(execution && repo.inspect(handle)->active,
           "execution lease was not visible as active");
-    check(repo.mark_executed(handle, 20) && repo.mark_executed(handle, 12),
+    check(repo.mark_executed(*execution, 20) && repo.mark_executed(*execution, 12),
           "execution mark failed");
     auto observed = repo.inspect(handle);
     check(observed && observed->logical_id == 44 && observed->original_begin == 713 &&
@@ -176,7 +176,7 @@ static void test_snapshot_and_last_use() {
     prefetch->reset();
     check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
           "snapshot block retirement failed");
-    check(!repo.mark_executed(handle, 30), "retired block accepted a new execution mark");
+    check(!repo.acquire_new(handle), "retired block accepted a new execution lease");
     writer->reset();
     check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
           "snapshot block release failed");
