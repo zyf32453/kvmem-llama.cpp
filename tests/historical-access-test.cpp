@@ -28,6 +28,11 @@
 #include <cuda_runtime_api.h>
 #endif
 
+// Historical graph rebuilds must not duplicate the large hparams/cparams
+// value objects inside every per-microbatch input holder.
+static_assert(sizeof(llm_graph_input_out_ids) < 1024, "output IDs input copied model parameters");
+static_assert(sizeof(llm_graph_input_attn_kv) < 1024, "KV attention input copied model parameters");
+
 // Only the foreground interval explicitly guarded by a test rejects C++
 // allocation. Model loading, CUDA and background capture are unaffected.
 static thread_local bool deny_cpp_allocation = false;

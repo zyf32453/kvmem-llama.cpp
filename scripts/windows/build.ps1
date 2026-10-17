@@ -79,6 +79,7 @@ if (!$HostOnly) {
     $historicalMicrobatch = Join-Path $SourceDir 'patches/0010-historical-microbatch-pool.patch'
     $historicalInput = Join-Path $SourceDir 'patches/0011-historical-input-workspace.patch'
     $historicalBackend = Join-Path $SourceDir 'patches/0012-historical-backend-reservation.patch'
+    $historicalGraphInput = Join-Path $SourceDir 'patches/0013-compact-graph-input-state.patch'
     function Test-PatchApplied([string]$PatchPath) {
         $savedPreference = $ErrorActionPreference
         try {
@@ -109,15 +110,21 @@ if (!$HostOnly) {
         Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', '--check', $qwen3MoeCapture)
         Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', $qwen3MoeCapture)
     }
-    $historicalBackendApplied = Test-PatchApplied $historicalBackend
+    $historicalGraphInputApplied = Test-PatchApplied $historicalGraphInput
+    $historicalBackendApplied = $historicalGraphInputApplied -or (Test-PatchApplied $historicalBackend)
     $historicalInputApplied = $historicalBackendApplied -or (Test-PatchApplied $historicalInput)
     foreach ($historicalPatch in @($historicalActive, $historicalCells, $historicalSlots, $historicalMicrobatch, $historicalInput, $historicalBackend)) {
+        if ($historicalGraphInputApplied -and $historicalPatch -in @($historicalMicrobatch, $historicalInput, $historicalBackend)) { continue }
         if ($historicalBackendApplied -and $historicalPatch -in @($historicalMicrobatch, $historicalInput)) { continue }
         if ($historicalInputApplied -and $historicalPatch -eq $historicalMicrobatch) { continue }
         if (!(Test-PatchApplied $historicalPatch)) {
             Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalPatch)
             Invoke-Checked git @('-C', $llama, 'apply', $historicalPatch)
         }
+    }
+    if (!(Test-PatchApplied $historicalGraphInput)) {
+        Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalGraphInput)
+        Invoke-Checked git @('-C', $llama, 'apply', $historicalGraphInput)
     }
 }
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',

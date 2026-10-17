@@ -79,6 +79,9 @@ for %%P in (0007-historical-active-hook.patch 0008-historical-cell-index-reserva
 set "HISTORICAL_INPUT_PATCH=%ROOT%\patches\0011-historical-input-workspace.patch"
 set "HISTORICAL_MICROBATCH_PATCH=%ROOT%\patches\0010-historical-microbatch-pool.patch"
 set "HISTORICAL_BACKEND_PATCH=%ROOT%\patches\0012-historical-backend-reservation.patch"
+set "HISTORICAL_GRAPH_INPUT_PATCH=%ROOT%\patches\0013-compact-graph-input-state.patch"
+git -C "%LLAMA_DIR%" apply --reverse --check "%HISTORICAL_GRAPH_INPUT_PATCH%" >nul 2>&1
+if not errorlevel 1 goto historical_graph_input_done
 git -C "%LLAMA_DIR%" apply --reverse --check "%HISTORICAL_BACKEND_PATCH%" >nul 2>&1
 if errorlevel 1 (
     git -C "%LLAMA_DIR%" apply --reverse --check "%HISTORICAL_INPUT_PATCH%" >nul 2>&1
@@ -98,6 +101,14 @@ if errorlevel 1 (
     git -C "%LLAMA_DIR%" apply --check "%HISTORICAL_BACKEND_PATCH%"
     if errorlevel 1 exit /b 1
     git -C "%LLAMA_DIR%" apply "%HISTORICAL_BACKEND_PATCH%"
+    if errorlevel 1 exit /b 1
+)
+:historical_graph_input_done
+git -C "%LLAMA_DIR%" apply --reverse --check "%HISTORICAL_GRAPH_INPUT_PATCH%" >nul 2>&1
+if errorlevel 1 (
+    git -C "%LLAMA_DIR%" apply --check "%HISTORICAL_GRAPH_INPUT_PATCH%"
+    if errorlevel 1 exit /b 1
+    git -C "%LLAMA_DIR%" apply "%HISTORICAL_GRAPH_INPUT_PATCH%"
     if errorlevel 1 exit /b 1
 )
 

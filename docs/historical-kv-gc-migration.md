@@ -487,6 +487,16 @@ Linux 补丁连续重放两次及从已装 `0011` 升级到 `0012` 均通过；P
 
 这是后端资源中已有明确上界的部分；实际构图仍可能为 input/fused-node 对象、rollback 快照、调度器内部结构或临时执行数据分配。本轮地址稳定测试不能证明已接纳请求完全无新分配，也不覆盖 server、多请求、MTP/hybrid 等组合。P3 严格预算仍未完成，P4–P6 原交付范围不变。
 
+### 缩小每批图输入状态并实测前台分配（2026-10-17）
+
+上轮只检查了后端缓冲区和图结果的地址是否稳定。本轮在隔离远程构建的测试程序中，临时统计真实模型每次 `llama_decode` 的前台 C++ `new`，并按调用点归类。受限历史请求的首个 48-token 批次有 **1815 次、6,660,844 字节**；随后 32-token 批次仍有 **1425 次、228,748 字节**。这证明此前的地址稳定检查不能代表整个解码无分配。首批中约 **6,397,248 字节**来自 CUDA 图的首次节点属性分配；稳定批次的两个大对象分别来自 KV 注意力输入和输出 ID 输入，每批各创建两次，却复制了完整的 `llama_hparams` 与 `llama_cparams`。
+
+上游补丁 `0013-compact-graph-input-state.patch` 使 KV 注意力输入只持有后续 `set_input` 实际需要的 `causal_attn` 值，输出 ID 输入只持有输出数量；不借用上一批临时图参数的引用。对照构建在相同模型、相同请求下，32-token 批次降至 **1421 次、83,740 字节**，后续 48-token 批次从 **1336 次、229,796 字节**降至 **1332 次、84,788 字节**，即每批减少 **4 次、145,008 字节**的 C++ 分配。首次 48-token 批次仍有 **1811 次、6,515,836 字节**，主要受 CUDA 图首次准备影响。计数只覆盖调用 `llama_decode` 的前台线程、C++ `new`；不是总内存/RSS、CUDA 分配或完整请求预算的测量。
+
+最终测试为图输入对象加入尺寸断言，真实 GGUF/CUDA 模型 **35/35** 项及 backend guard 通过。recency/RAM delete 实际推理完成 356-token 输入和 8-token 生成，`proposed=committed=reclaimed=6`、policy/worker failure 为 0；普通 retrieval 实际推理完成 420-token prompt eval、8-token 生成、64-token replay 和 `layout_writeback move=4`。Linux 补丁从 `0012` 升级到 `0013` 及重复应用均通过。测量与最终运行日志保存在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`，文件名分别为 `foreground-site-model.log`、`compact-graph-input-model.log`、`compact-graph-input-final-model.log`、`compact-graph-input-final-delete.log` 和 `compact-graph-input-final-retrieval.log`。
+
+本轮再次确认长期有界问题：物理 repository/payload 槽位可按代复用，但生产 `KvMemStore::blocks_` 仍按递增 ID 存储，已预留的 `AppendReservation` 用完即拒绝后续追加，即使旧 payload 已被 GC 回收。因此 P4 要求的累计追加至少 10 倍容量及元数据循环复用仍未达到。其它图输入、fused-node、调度器/CUDA 图内部结构及 rollback 仍可分配；P3 严格接纳前预算也未完成。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

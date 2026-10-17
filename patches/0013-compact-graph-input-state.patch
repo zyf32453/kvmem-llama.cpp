@@ -1,0 +1,67 @@
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -217,9 +217,9 @@
+ class llm_graph_input_out_ids : public llm_graph_input_i {
+ public:
+     llm_graph_input_out_ids(
+-            const llama_hparams & hparams,
+-            const llama_cparams & cparams,
+-            uint32_t n_outputs) : hparams(hparams), cparams(cparams), n_outputs(n_outputs) {}
++            const llama_hparams &,
++            const llama_cparams &,
++            uint32_t n_outputs) : n_outputs(n_outputs) {}
+     virtual ~llm_graph_input_out_ids() = default;
+ 
+     void set_input(const llama_ubatch * ubatch) override;
+@@ -227,9 +227,6 @@
+     bool can_reuse(const llm_graph_params & params) override;
+ 
+     ggml_tensor * out_ids; // I32 [n_outputs]
+-
+-    const llama_hparams hparams;
+-    const llama_cparams cparams;
+ 
+     const uint32_t n_outputs;
+ };
+@@ -321,11 +318,10 @@
+ class llm_graph_input_attn_kv : public llm_graph_input_i {
+ public:
+     llm_graph_input_attn_kv(
+-            const llama_hparams & hparams,
++            const llama_hparams &,
+             const llama_cparams & cparams,
+             const llama_kv_cache_context * mctx) :
+-        hparams(hparams),
+-        cparams(cparams),
++        causal_attn(cparams.causal_attn),
+         mctx(mctx) {
+     }
+     ~llm_graph_input_attn_kv() = default;
+@@ -349,11 +345,9 @@
+     ggml_tensor * self_k_rot = nullptr;
+     ggml_tensor * self_v_rot = nullptr;
+ 
+-    // note: these have to be copies because in order to be able to reuse a graph, its inputs
+-    //       need to carry these parameters with them. otherwise, they can point to freed
+-    //       llm_graph_params from a previous batch, causing stack-use-after-return
+-    const llama_hparams hparams;
+-    const llama_cparams cparams;
++    // Retain only the value used when graph inputs are filled. Keeping a
++    // reference to the previous batch's graph parameters would dangle.
++    const bool causal_attn;
+ 
+     const llama_kv_cache_context * mctx;
+ };
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -475,7 +475,7 @@
+     // the mask is left unallocated when the graph only stores K/V without attending
+     // (e.g. DFlash's KV-injection pass)
+     if (self_kq_mask && self_kq_mask->buffer) {
+-        mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
++        mctx->set_input_kq_mask(self_kq_mask, ubatch, causal_attn);
+     }
+ 
+     if (self_k_rot && self_k_rot->buffer) {

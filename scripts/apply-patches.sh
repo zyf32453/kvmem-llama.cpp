@@ -15,6 +15,7 @@ HISTORICAL_SLOTS="$ROOT/patches/0009-historical-slot-info-return.patch"
 HISTORICAL_MICROBATCH="$ROOT/patches/0010-historical-microbatch-pool.patch"
 HISTORICAL_INPUT="$ROOT/patches/0011-historical-input-workspace.patch"
 HISTORICAL_BACKEND="$ROOT/patches/0012-historical-backend-reservation.patch"
+HISTORICAL_GRAPH_INPUT="$ROOT/patches/0013-compact-graph-input-state.patch"
 BUDGET_UPGRADE="$ROOT/patches/reasoning-budget-upgrade.patch"
 REPLAY_UPGRADE="$ROOT/patches/replayssm-upgrade.patch"
 UPGRADE="$ROOT/patches/multimodal-upgrade.patch"
@@ -125,7 +126,9 @@ else
     echo "applied historical slot info return"
 fi
 
-if git apply --reverse --check "$HISTORICAL_BACKEND" 2>/dev/null; then
+if git apply --reverse --check "$HISTORICAL_GRAPH_INPUT" 2>/dev/null; then
+    echo "compact historical graph inputs and prerequisite workspaces already applied"
+elif git apply --reverse --check "$HISTORICAL_BACKEND" 2>/dev/null; then
     echo "historical backend reservation and prerequisite workspaces already applied"
 else
     if git apply --reverse --check "$HISTORICAL_INPUT" 2>/dev/null; then
@@ -145,4 +148,12 @@ else
     git apply --check "$HISTORICAL_BACKEND"
     git apply "$HISTORICAL_BACKEND"
     echo "applied historical backend reservation"
+fi
+
+if git apply --reverse --check "$HISTORICAL_GRAPH_INPUT" 2>/dev/null; then
+    echo "compact historical graph inputs already applied"
+else
+    git apply --check "$HISTORICAL_GRAPH_INPUT"
+    git apply "$HISTORICAL_GRAPH_INPUT"
+    echo "applied compact historical graph inputs"
 fi
