@@ -23,6 +23,7 @@ HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repositor
     }
     retry_.reserve(repository_->capacity());
     seen_generation_.resize(repository_->capacity());
+    shadow_generation_.resize(repository_->capacity());
     if (!repository_->claim_gc_owner())
         throw std::logic_error("historical KV repository already has a GC owner");
 }
@@ -147,6 +148,18 @@ void HistoricalKvGc::manual_tick() {
         auto slice = repository_->observe_range(collect_cursor_, scan);
         pressure_.ready += slice.ready;
         pressure_.pending_slot_credit += slice.pending;
+        if (config_.mode == Mode::Shadow) {
+            for (auto & block : slice.blocks) {
+                if (block.handle.slot >= shadow_generation_.size() ||
+                    shadow_generation_[block.handle.slot] != block.handle.generation ||
+                    !historical_kv_can_request_delete(block, round_->incarnation)) continue;
+                // A shadow candidate remains physically Live. Model the
+                // effect of its hypothetical retirement for the policy only.
+                block.life = HistoricalKvLife::Retired;
+                block.sealed = false;
+                ++pressure_.pending_slot_credit;
+            }
+        }
         round_->blocks.insert(round_->blocks.end(), slice.blocks.begin(),
                               slice.blocks.end());
         collect_cursor_ += scan;
@@ -200,7 +213,11 @@ void HistoricalKvGc::manual_tick() {
             continue;
         }
         seen_generation_[intent.victim.slot] = intent.victim.generation;
-        if (config_.mode == Mode::Shadow) { ++shadow_; continue; }
+        if (config_.mode == Mode::Shadow) {
+            shadow_generation_[intent.victim.slot] = intent.victim.generation;
+            ++shadow_;
+            continue;
+        }
         const auto code = commit(intent);
         acknowledge(intent, code);
         if (code == HistoricalKvCommitCode::Retry) {

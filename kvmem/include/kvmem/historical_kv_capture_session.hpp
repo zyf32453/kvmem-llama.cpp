@@ -5,8 +5,9 @@
 
 namespace kvmem {
 
-// A finite, single-request capture baseline with deletion OFF. It connects
-// actual appends to the RAM reservation and producer handoff. This is NOT
+// A finite, single-request capture owner. The caller may attach one GC
+// manager to its repository after admission. It connects actual appends to
+// the RAM reservation and producer handoff. This is NOT
 // full production request admission: directory/GPU/backend allocations are
 // still fallible, and a failed session must be discarded after draining its
 // tasks. No reset, continuation, streaming or policy deletion is supported.

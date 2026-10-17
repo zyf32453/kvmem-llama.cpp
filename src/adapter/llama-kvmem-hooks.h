@@ -43,7 +43,8 @@ struct llama_kvmem_params {
 LLAMA_API void llama_kvmem_set_params(const struct llama_kvmem_params * params);
 LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 
-// Experimental finite single-request RAM capture baseline, deletion OFF.
+// Experimental finite single-request RAM capture path; deletion is OFF unless
+// the caller explicitly starts one shadow/delete manager after admission.
 // Requires an empty recency context, one GPU/lane, flash attention, no MTP,
 // hybrid, CPU spill arena or NVMe. It reserves actual historical RAM, not all
 // GPU/backend/metadata resources. Begin refusal leaves an empty context usable;
@@ -52,6 +53,9 @@ LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 // separates input and output quotas. finish requires llama_synchronize first.
 LLAMA_API bool llama_kvmem_historical_capture_begin(uint32_t capacity,
         uint64_t input_tokens, uint64_t max_output_tokens, uint64_t max_appends);
+// After begin and before decode. mode: 1 shadow, 2 delete. LRU pressure
+// requires 0 < ready_low < ready_high <= historical capacity.
+LLAMA_API bool llama_kvmem_historical_gc_start(int mode, uint32_t ready_low, uint32_t ready_high);
 LLAMA_API bool llama_kvmem_historical_capture_finish(void);
 
 // Isolated hook, retrieval, conversation and transfer state for one target

@@ -263,6 +263,30 @@ void test_duplicate_intents_count_once_in_shadow() {
           "duplicate victim was counted twice in a shadow round");
 }
 
+void test_lru_shadow_does_not_repropose_same_generations() {
+    auto repo = std::make_shared<HistoricalKvRepository>(4);
+    HistoricalKvHandle handles[2];
+    for (uint32_t i = 0; i < 2; ++i) {
+        auto writer = repo->begin_write(30 + i, i, 1, i + 1, 8,
+            [](const HistoricalKvHandle &) { return true; });
+        check(writer && repo->publish_write(*writer), "shadow LRU setup failed");
+        handles[i] = writer->handle();
+        writer->reset();
+    }
+    auto cfg = config(HistoricalKvGc::Mode::Shadow);
+    cfg.ready_low = 3;
+    cfg.ready_high = 4;
+    cfg.scan_blocks = cfg.reclaim_blocks = 4;
+    cfg.batch_blocks = 2;
+    HistoricalKvGc gc(repo, std::make_unique<HistoricalKvLruPolicy>(repo->capacity()), cfg);
+    for (int tick = 0; tick < 100; ++tick) gc.manual_tick();
+    const auto stats = gc.stats();
+    check(stats.proposed == 2 && stats.shadow == 2 && !stats.committed &&
+          repo->ready_count() == 2 && repo->acquire_new(handles[0]).has_value() &&
+          repo->acquire_new(handles[1]).has_value(),
+          "LRU shadow repeatedly proposed or physically retired the same generations");
+}
+
 void test_custom_policy_needs_no_lru_watermarks() {
     auto repo = std::make_shared<HistoricalKvRepository>(2);
     auto writer = repo->begin_write(18, 0, 1, 1, 8,
@@ -333,6 +357,7 @@ int main() {
         test_policy_failure_does_not_stop_reclaimer();
         test_one_manager_owns_each_repository();
         test_duplicate_intents_count_once_in_shadow();
+        test_lru_shadow_does_not_repropose_same_generations();
         test_custom_policy_needs_no_lru_watermarks();
         test_manager_reclaims_real_ram_payload();
     } catch (const std::exception & e) {

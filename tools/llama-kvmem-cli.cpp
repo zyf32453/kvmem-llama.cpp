@@ -34,7 +34,10 @@ static void print_usage(const char * argv0) {
             "  --tokens-only              print generated token ids, one per line\n"
             "  --no-prompt                do not echo the prompt (generation only)\n"
             "  --kvmem                    enable KVMem slot-pool memory\n"
-            "  --kvmem-historical-capture N  experimental reserved RAM slots; recency single-request capture, deletion OFF\n"
+            "  --kvmem-historical-capture N  experimental reserved RAM slots; recency single-request RAM only\n"
+            "  --kvmem-historical-gc-mode M  off | shadow | delete (default off; requires capture)\n"
+            "  --kvmem-historical-gc-low N   LRU Ready low watermark (requires high)\n"
+            "  --kvmem-historical-gc-high N  LRU Ready target (requires low)\n"
             "  --kvmem-block-tokens N     block size (default 32)\n"
             "  --kvmem-budget N           GPU working-set tokens; 0 = n_ctx (identity)\n"
             "  --kvmem-gen-reserve N      extra GPU tokens for decode (default 256)\n"
@@ -86,6 +89,10 @@ int main(int argc, char ** argv) {
     bool tokens_only = false;
     bool no_prompt = false;
     uint32_t historical_capacity = 0;
+    int historical_gc_mode = 0;
+    bool historical_gc_mode_set = false;
+    uint32_t historical_gc_low = 0, historical_gc_high = 0;
+    bool historical_gc_low_set = false, historical_gc_high_set = false;
 
     llama_kvmem_params kparams = {};
     kparams.block_tokens = 32;
@@ -164,6 +171,29 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             historical_capacity = static_cast<uint32_t>(parsed);
+        } else if (eq(arg, "--kvmem-historical-gc-mode")) {
+            const char * value = need(arg);
+            historical_gc_mode_set = true;
+            if (eq(value, "off")) historical_gc_mode = 0;
+            else if (eq(value, "shadow")) historical_gc_mode = 1;
+            else if (eq(value, "delete")) historical_gc_mode = 2;
+            else {
+                fprintf(stderr, "--kvmem-historical-gc-mode requires off, shadow or delete\n");
+                return 1;
+            }
+        } else if (eq(arg, "--kvmem-historical-gc-low") ||
+                   eq(arg, "--kvmem-historical-gc-high")) {
+            const bool low = eq(arg, "--kvmem-historical-gc-low");
+            const char * value = need(arg);
+            char * end = nullptr;
+            const auto parsed = std::strtoull(value, &end, 10);
+            if (value[0] < '0' || value[0] > '9' || !end || *end ||
+                !parsed || parsed > UINT32_MAX) {
+                fprintf(stderr, "%s requires a positive integer <= UINT32_MAX\n", arg);
+                return 1;
+            }
+            if (low) { historical_gc_low = uint32_t(parsed); historical_gc_low_set = true; }
+            else { historical_gc_high = uint32_t(parsed); historical_gc_high_set = true; }
         } else if (eq(arg, "--kvmem-block-tokens")) {
             kparams.block_tokens = static_cast<uint32_t>(std::atoi(need(arg)));
         } else if (eq(arg, "--kvmem-budget")) {
@@ -269,9 +299,33 @@ int main(int argc, char ** argv) {
     }
 #endif
     // Validate before backend initialization and loading a potentially large model.
+    if ((historical_gc_mode_set || historical_gc_low_set || historical_gc_high_set) && !historical_capacity) {
+        fprintf(stderr, "historical GC flags require --kvmem-historical-capture N\n");
+        return 1;
+    }
+    if (historical_gc_low_set != historical_gc_high_set ||
+        ((historical_gc_low_set || historical_gc_high_set) && !historical_gc_mode)) {
+        fprintf(stderr, "historical GC Ready thresholds require both low and high with shadow or delete mode\n");
+        return 1;
+    }
+    if (historical_gc_mode) {
+        if (historical_capacity < 2) {
+            fprintf(stderr, "historical GC requires at least two repository slots\n");
+            return 1;
+        }
+        if (!historical_gc_low_set) {
+            historical_gc_low = std::max(1u, historical_capacity / 4);
+            historical_gc_high = std::max(historical_gc_low + 1, historical_capacity / 2);
+        }
+        if (!historical_gc_low || historical_gc_low >= historical_gc_high ||
+            historical_gc_high > historical_capacity) {
+            fprintf(stderr, "historical GC requires 0 < low < high <= capture capacity\n");
+            return 1;
+        }
+    }
     if (historical_capacity && (!kparams.enabled || kparams.method != 0 || spec_mtp ||
         n_predict < 0 || kparams.raw_k_nvme || kparams.nvme_bytes || kparams.cpu_bytes || dump_kv)) {
-        fprintf(stderr, "historical capture requires --kvmem --kvmem-method recency, finite -n >= 0, no MTP/NVMe/CPU spill/dump; deletion is OFF\n");
+        fprintf(stderr, "historical capture requires --kvmem --kvmem-method recency, finite -n >= 0, no MTP/NVMe/CPU spill/dump\n");
         return 1;
     }
     if (!kvmem_cache_types_ok(cache_type_k, cache_type_v)) {
@@ -450,6 +504,12 @@ int main(int argc, char ** argv) {
     if (historical_capacity) {
         const uint64_t appends = (uint64_t(n_prompt) + n_batch - 1) / n_batch + uint64_t(n_predict);
         if (!llama_kvmem_historical_capture_begin(historical_capacity, n_prompt, n_predict, appends)) {
+            free_context();
+            llama_model_free(model);
+            return 1;
+        }
+        if (historical_gc_mode && !llama_kvmem_historical_gc_start(
+                historical_gc_mode, historical_gc_low, historical_gc_high)) {
             free_context();
             llama_model_free(model);
             return 1;

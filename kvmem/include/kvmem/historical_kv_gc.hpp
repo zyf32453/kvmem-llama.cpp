@@ -15,7 +15,8 @@ namespace kvmem {
 // The sole owner of delete decisions for one repository. The policy proposes
 // exact-generation intents; this manager commits retirement and asks the
 // repository to release resources only after its old leases have gone away.
-// This module is host-only and is not wired into the production adapter yet.
+// This module is host-only. The adapter currently owns it only for the
+// explicitly enabled single-request recency/RAM path.
 class HistoricalKvGc {
 public:
     enum class Mode { Off, Shadow, Delete };
@@ -72,6 +73,9 @@ private:
     // One generation per physical slot is enough to suppress duplicate
     // commands across all yielded batches of the same policy round.
     std::vector<uint64_t> seen_generation_;
+    // Shadow mode simulates committed retirements as pending Ready credit so
+    // the same generation is not proposed on every polling tick.
+    std::vector<uint64_t> shadow_generation_;
     uint64_t next_round_id_ = 1;
     uint32_t reclaim_cursor_ = 0;
     uint32_t collect_cursor_ = 0;

@@ -23,7 +23,7 @@ struct llama_memory_params;
 struct ggml_tensor;
 class llama_memory_recurrent;
 class llama_memory_kvmem_mtp;
-namespace kvmem { class HistoricalKvCaptureSession; class HistoricalKvActiveSet; }
+namespace kvmem { class HistoricalKvCaptureSession; class HistoricalKvActiveSet; class HistoricalKvGc; }
 
 // Bounded block-slot pool over a llama_kv_cache.
 //
@@ -141,10 +141,11 @@ public:
         return retrieval_pinned_ && method_ == 1 && !replay_;
     }
     void end_prefill_capture();
-    // Finite single-request, recency, RAM capture baseline. Policy deletion
-    // remains off until all production execution boundaries are lease-gated.
+    // Finite single-request, recency, RAM capture path. Other combinations
+    // remain unsupported until their execution boundaries are lease-gated.
     bool begin_historical_capture(uint32_t capacity, uint64_t input_tokens,
                                   uint64_t max_output_tokens, uint64_t max_appends);
+    bool start_historical_gc(int mode, uint32_t ready_low, uint32_t ready_high);
     bool finish_historical_capture();
     // Next request continues this sequence: flush decode mean, unpin
     // retrieval, harvest mean-K for the suffix. Does not wipe prefix KV.
@@ -426,6 +427,8 @@ private:
     std::unique_ptr<kvmem::KvMemRuntime> runtime_;
     std::unique_ptr<kvmem::RawKvStore> raw_;
     std::unique_ptr<kvmem::HistoricalKvCaptureSession> historical_capture_;
+    std::unique_ptr<kvmem::HistoricalKvGc> historical_gc_;
+    int historical_gc_mode_ = 0;
     std::unique_ptr<kvmem::HistoricalKvActiveSet> historical_active_;
     uint64_t historical_active_skips_ = 0;
     std::vector<int32_t> free_slots_;

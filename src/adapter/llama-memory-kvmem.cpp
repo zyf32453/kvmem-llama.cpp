@@ -3,6 +3,7 @@
 #include "kvmem/historical_kv_raw_store.hpp"
 #include "kvmem/historical_kv_capture_session.hpp"
 #include "kvmem/historical_kv_active_set.hpp"
+#include "kvmem/historical_kv_gc.hpp"
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-memory-kvmem-mtp.h"
 
@@ -1009,6 +1010,7 @@ llama_memory_kvmem::llama_memory_kvmem(
 }
 
 llama_memory_kvmem::~llama_memory_kvmem() {
+    if (historical_gc_) historical_gc_->stop();
     decode_mean_flush();
     decode_mean_discard();
     decode_mean_print_sum();
@@ -1074,7 +1076,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         // staging scratch and backend work allocations still need admission.
         row_positions_.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
         historical_capture_ = std::move(session);
-        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin mode=off capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu\n",
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu\n",
             capacity, historical_capture_->reserved_blocks(),
             (unsigned long long) historical_capture_->payload_bytes(),
             (unsigned long long) input_tokens, (unsigned long long) max_output_tokens,
@@ -1082,6 +1084,40 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         return true;
     } catch (const std::exception & e) {
         LLAMA_LOG_ERROR("historical capture begin: %s\n", e.what());
+        return false;
+    }
+}
+
+bool llama_memory_kvmem::start_historical_gc(int mode, uint32_t ready_low,
+                                             uint32_t ready_high) {
+    if (!historical_capture_ || historical_capture_->failed() ||
+        historical_capture_->finished() || historical_gc_ ||
+        (mode != 1 && mode != 2) || !ready_low ||
+        ready_low >= ready_high || ready_high > historical_capture_->repository()->capacity()) {
+        LLAMA_LOG_ERROR("historical GC: invalid request owner, mode or Ready thresholds\n");
+        return false;
+    }
+    try {
+        const auto repository = historical_capture_->repository();
+        kvmem::HistoricalKvGc::Config cfg;
+        cfg.mode = mode == 1 ? kvmem::HistoricalKvGc::Mode::Shadow :
+                               kvmem::HistoricalKvGc::Mode::Delete;
+        cfg.ready_low = ready_low;
+        cfg.ready_high = ready_high;
+        cfg.scan_blocks = std::min<uint32_t>(repository->capacity(), 64);
+        cfg.batch_blocks = std::min<uint32_t>(repository->capacity(), 16);
+        cfg.reclaim_blocks = std::min<uint32_t>(repository->capacity(), 64);
+        cfg.poll_ms = 5;
+        auto manager = std::make_unique<kvmem::HistoricalKvGc>(repository,
+            std::make_unique<kvmem::HistoricalKvLruPolicy>(repository->capacity()), cfg);
+        manager->start();
+        historical_gc_ = std::move(manager);
+        historical_gc_mode_ = mode;
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_GC begin mode=%s low=%u high=%u capacity=%u\n",
+            mode == 1 ? "shadow" : "delete", ready_low, ready_high, repository->capacity());
+        return true;
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("historical GC start: %s\n", e.what());
         return false;
     }
 }
@@ -1104,11 +1140,27 @@ bool llama_memory_kvmem::finish_historical_capture() {
     try {
         harvest_flush();
         harvest_gpu_v_commit();
+        // Stop short metadata observations before the request's final
+        // zero-task-reference check. The worker never releases on this thread.
+        if (historical_gc_) historical_gc_->stop();
         if (!historical_capture_->finish()) {
             LLAMA_LOG_ERROR("historical capture: incomplete publication or outstanding producers\n");
             return false;
         }
-        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish mode=off blocks=%u live=%u references=0 rows=%u payload_bytes=%llu\n",
+        if (historical_gc_) {
+            const auto stats = historical_gc_->stats();
+            LLAMA_LOG_INFO("KVMEM_HISTORICAL_GC finish mode=%s proposed=%llu committed=%llu shadow=%llu reclaimed=%llu deferred=%llu retry=%llu policy_failures=%llu worker_failures=%llu ready=%u payload_bytes=%llu\n",
+                historical_gc_mode_ == 1 ? "shadow" : "delete",
+                (unsigned long long) stats.proposed, (unsigned long long) stats.committed,
+                (unsigned long long) stats.shadow, (unsigned long long) stats.reclaimed,
+                (unsigned long long) stats.deferred, (unsigned long long) stats.retry,
+                (unsigned long long) stats.policy_failures,
+                (unsigned long long) stats.worker_failures,
+                historical_capture_->repository()->ready_count(),
+                (unsigned long long) historical_capture_->payload_bytes());
+            if (stats.policy_failures || stats.worker_failures) return false;
+        }
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live=%u references=0 rows=%u payload_bytes=%llu\n",
             historical_capture_->created_blocks(), historical_capture_->live_blocks_at_finish(), store_n_tokens(),
             (unsigned long long) historical_capture_->payload_bytes());
         return true;
@@ -5428,6 +5480,11 @@ bool llama_kvmem_historical_capture_begin(uint32_t capacity, uint64_t input_toke
         uint64_t max_output_tokens, uint64_t max_appends) {
     auto * mem = kvmem_capture_active();
     return mem && mem->begin_historical_capture(capacity, input_tokens, max_output_tokens, max_appends);
+}
+
+bool llama_kvmem_historical_gc_start(int mode, uint32_t ready_low, uint32_t ready_high) {
+    auto * mem = kvmem_capture_active();
+    return mem && mem->start_historical_gc(mode, ready_low, ready_high);
 }
 
 bool llama_kvmem_historical_capture_finish(void) {
