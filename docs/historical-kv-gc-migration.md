@@ -497,6 +497,14 @@ Linux 补丁连续重放两次及从已装 `0011` 升级到 `0012` 均通过；P
 
 本轮再次确认长期有界问题：物理 repository/payload 槽位可按代复用，但生产 `KvMemStore::blocks_` 仍按递增 ID 存储，已预留的 `AppendReservation` 用完即拒绝后续追加，即使旧 payload 已被 GC 回收。因此 P4 要求的累计追加至少 10 倍容量及元数据循环复用仍未达到。其它图输入、fused-node、调度器/CUDA 图内部结构及 rollback 仍可分配；P3 严格接纳前预算也未完成。
 
+### 后台 GC 扫描元数据固定容量复用（2026-10-17）
+
+后台 manager 过去每轮为回收扫描、策略观察和决策输出重新创建 `std::vector`，完成一轮后还会销毁整个快照。现在 repository 提供接收调用方预留缓冲区的 `observe_range_into`；容量不足在改变输出前拒绝。GC manager 在构造时按物理仓库容量准备扫描、整轮快照和决策缓冲区，后续 tick 清空并复用它们，重试队列和代际去重数组仍维持原有固定上界。策略发生异常时也清除本轮决策，不保留未提交命令。外部原有 `observe_range`/`snapshot_range` 接口行为不变。
+
+新增宿主回归用 **4 个物理槽位累计追加 40 个真实 RAM payload**，通过 LRU 提交退休、精确代际 release 和后续新代复用完成 10 倍容量循环；每个 `manual_tick` 均在禁止普通 C++ `new` 的测试区间内执行。结束时 40 次实际 release、仓库全部 Ready、payload 字节归零，累计过程中快照不超过 4 条、payload 字节不超过 4 个单槽用量，旧句柄不能重新读取。另一回归验证可复用扫描缓冲区不会遗留上一轮计数，容量不足时原输出保持不变。这只证明底层 repository/RAM/GC 链路，**不证明**生产 dense block 表或多请求入口已经通过 10 倍追加。
+
+Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受本机已知的 `unexpected memory mapping` 启动错误阻挡，按此前已验证的 `setarch x86_64 -R` 仅调整测试进程后相关 **2/2** 通过。真实 GGUF/CUDA 模型 **35/35** 项与 backend guard 通过；recency/RAM delete 推理完成 356-token 输入、8-token 输出，`proposed=committed=reclaimed=6`，policy/worker failure 为 0。原始日志保存在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`，前缀为 `bounded-worker-`。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

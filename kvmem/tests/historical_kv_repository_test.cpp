@@ -319,6 +319,24 @@ static void test_bounded_observation_counts_each_slot_once() {
     const auto tail = repo.observe_range(3, 100);
     check(tail.ready == 1 && tail.pending == 0 && tail.blocks.empty(),
           "bounded tail range failed to clamp at capacity");
+    HistoricalKvRepository::RangeObservation reused;
+    reused.blocks.reserve(4);
+    const auto * scratch = reused.blocks.data();
+    repo.observe_range_into(0, 4, reused);
+    check(reused.blocks.data() == scratch && reused.ready == whole.ready &&
+          reused.pending == whole.pending && reused.blocks.size() == whole.blocks.size(),
+          "reusable observation changed storage or pressure counts");
+    repo.observe_range_into(3, 100, reused);
+    check(reused.blocks.data() == scratch && reused.ready == 1 &&
+          !reused.pending && reused.blocks.empty(),
+          "reusable observation retained a prior round's entries");
+    HistoricalKvRepository::RangeObservation undersized;
+    undersized.ready = 9;
+    bool rejected = false;
+    try { repo.observe_range_into(0, 4, undersized); }
+    catch (const std::length_error &) { rejected = true; }
+    check(rejected && undersized.ready == 9 && undersized.blocks.empty(),
+          "undersized observation mutated output before rejection");
     check(repo.snapshot_range(1, 2).size() == 2 && repo.ready_count_range(3, 1) == 1,
           "legacy range APIs changed behavior");
 

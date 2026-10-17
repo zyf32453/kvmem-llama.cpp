@@ -163,6 +163,11 @@ public:
     // adapter must hold those leases until its actual completion boundary.
     // observe_range obtains blocks and pressure counts in one bounded pass.
     RangeObservation observe_range(uint32_t first, uint32_t count) const;
+    // Reuse caller-owned storage for repeated worker scans. The caller must
+    // reserve at least min(count, capacity - first) entries before calling;
+    // insufficient capacity is rejected before any observation is changed.
+    void observe_range_into(uint32_t first, uint32_t count,
+                            RangeObservation & out) const;
     std::vector<HistoricalKvBlockMeta> snapshot() const;
     std::vector<HistoricalKvBlockMeta> snapshot_range(uint32_t first, uint32_t count) const;
     uint32_t ready_count() const;

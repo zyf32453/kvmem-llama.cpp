@@ -1,20 +1,40 @@
 #include "kvmem/historical_kv_gc.hpp"
 #include "kvmem/historical_kv_raw_store.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <thread>
 
 using namespace kvmem;
+
+static thread_local bool deny_cpp_allocation = false;
+void * operator new(size_t size) {
+    if (deny_cpp_allocation) throw std::bad_alloc();
+    if (void * p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void * operator new[](size_t size) { return ::operator new(size); }
+void operator delete(void * p) noexcept { std::free(p); }
+void operator delete[](void * p) noexcept { ::operator delete(p); }
+void operator delete(void * p, size_t) noexcept { ::operator delete(p); }
+void operator delete[](void * p, size_t) noexcept { ::operator delete(p); }
 
 namespace {
 
 void check(bool condition, const char * message) {
     if (!condition) throw std::runtime_error(message);
 }
+
+struct DenyCppAllocation {
+    DenyCppAllocation() { deny_cpp_allocation = true; }
+    ~DenyCppAllocation() { deny_cpp_allocation = false; }
+};
 
 // A policy can request deletion of an active block, regardless of its age or
 // reference count. The manager must apply the same safe protocol as for LRU.
@@ -346,6 +366,76 @@ void test_manager_reclaims_real_ram_payload() {
           !raw->inspect(*repo, handle), "manager did not release real RAM bytes");
 }
 
+void test_tenfold_ram_reuse_without_worker_allocation() {
+    constexpr uint32_t capacity = 4;
+    constexpr uint32_t appends = 10 * capacity;
+    auto repo = std::make_shared<HistoricalKvRepository>(capacity);
+    HistoricalKvRawStoreConfig raw_cfg;
+    raw_cfg.n_layer = 1;
+    raw_cfg.max_tokens_per_slot = 4;
+    raw_cfg.packed_k_bytes_per_token = 1;
+    raw_cfg.packed_v_bytes_per_token = 1;
+    auto raw = std::make_shared<HistoricalKvRawStore>(raw_cfg, capacity);
+    const std::weak_ptr<HistoricalKvRepository> weak_repo = repo;
+    uint32_t releases = 0;
+    auto cfg = config(HistoricalKvGc::Mode::Delete);
+    cfg.ready_low = 1;
+    cfg.ready_high = 3;
+    cfg.scan_blocks = cfg.reclaim_blocks = capacity;
+    cfg.batch_blocks = capacity;
+    HistoricalKvGc gc(repo, std::make_unique<HistoricalKvLruPolicy>(capacity), cfg);
+    const auto tick_without_allocation = [&] {
+        DenyCppAllocation guard;
+        gc.manual_tick();
+    };
+    HistoricalKvHandle oldest{};
+    uint64_t single_payload_bytes = 0;
+    uint64_t max_payload_bytes = 0;
+    for (uint32_t id = 0; id < appends; ++id) {
+        std::optional<HistoricalKvRepository::Lease> writer;
+        for (unsigned tick = 0; tick < 20 && !writer; ++tick) {
+            writer = repo->begin_write(id, uint64_t(id) * 4, 4, id + 1, 8,
+                [raw, weak_repo, &releases](HistoricalKvHandle handle) {
+                    const auto owner = weak_repo.lock();
+                    if (!owner) return false;
+                    const auto code = raw->release(*owner, handle).code;
+                    if (code == HistoricalKvRawStore::ReleaseCode::Released) ++releases;
+                    return code == HistoricalKvRawStore::ReleaseCode::Released ||
+                           code == HistoricalKvRawStore::ReleaseCode::AlreadyReleased;
+                });
+            if (!writer) tick_without_allocation();
+        }
+        check(writer.has_value(), "LRU did not make a recycled slot available");
+        const auto handle = writer->handle();
+        if (id == 0) oldest = handle;
+        check(raw->reserve(*writer, handle, uint64_t(id) * 4, 4) &&
+              raw->write_layer(*writer, handle, 0, {1, 2, 3, 4}, {5, 6, 7, 8}, {}, 0) &&
+              raw->publish_complete(*repo, *writer, handle),
+              "recycled RAM generation could not publish its payload");
+        if (!single_payload_bytes) single_payload_bytes = raw->allocated_payload_bytes();
+        max_payload_bytes = std::max(max_payload_bytes, raw->allocated_payload_bytes());
+        writer->reset();
+        tick_without_allocation();
+        check(repo->snapshot().size() <= capacity &&
+              raw->allocated_payload_bytes() <= capacity * single_payload_bytes,
+              "physical metadata or RAM bytes grew with cumulative appends");
+    }
+    check(oldest.generation != 0 && !repo->acquire_new(oldest) &&
+          !raw->inspect(*repo, oldest), "old generation reappeared after slot reuse");
+    for (const auto & meta : repo->snapshot())
+        if (meta.life == HistoricalKvLife::Writing || meta.life == HistoricalKvLife::Live)
+            check(repo->retire(meta.handle) == HistoricalKvRepository::RetireResult::Committed,
+                  "final live generation could not retire");
+    for (unsigned tick = 0; tick < 20 && repo->ready_count() != capacity; ++tick)
+        tick_without_allocation();
+    const auto stats = gc.stats();
+    check(repo->ready_count() == capacity && !raw->allocated_payload_bytes() &&
+          releases == appends && stats.reclaimed == appends &&
+          !stats.policy_failures && !stats.worker_failures &&
+          max_payload_bytes <= capacity * single_payload_bytes,
+          "tenfold LRU/RAM reuse leaked capacity or lost a release");
+}
+
 } // namespace
 
 int main() {
@@ -360,6 +450,7 @@ int main() {
         test_lru_shadow_does_not_repropose_same_generations();
         test_custom_policy_needs_no_lru_watermarks();
         test_manager_reclaims_real_ram_payload();
+        test_tenfold_ram_reuse_without_worker_allocation();
     } catch (const std::exception & e) {
         std::cerr << e.what() << '\n';
         return 1;

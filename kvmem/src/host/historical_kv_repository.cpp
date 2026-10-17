@@ -614,11 +614,23 @@ std::vector<HistoricalKvBlockMeta> HistoricalKvRepository::snapshot() const {
 
 HistoricalKvRepository::RangeObservation HistoricalKvRepository::observe_range(
     uint32_t first, uint32_t count) const {
-    const auto shared = shared_;
     RangeObservation out;
-    if (first >= shared->capacity || count == 0) return out;
-    const uint32_t end = first + std::min(count, shared->capacity - first);
-    out.blocks.reserve(end - first);
+    if (first < shared_->capacity && count)
+        out.blocks.reserve(std::min(count, shared_->capacity - first));
+    observe_range_into(first, count, out);
+    return out;
+}
+
+void HistoricalKvRepository::observe_range_into(
+    uint32_t first, uint32_t count, RangeObservation & out) const {
+    const auto shared = shared_;
+    const uint32_t scan = first < shared->capacity
+        ? std::min(count, shared->capacity - first) : 0;
+    if (out.blocks.capacity() < scan)
+        throw std::length_error("historical KV observation scratch capacity exceeded");
+    out.blocks.clear();
+    out.ready = out.reserved = out.pending = 0;
+    const uint32_t end = first + scan;
     for (uint32_t index = first; index < end; ++index) {
         if (!shared->try_pin(index, kReadable)) {
             // Ready needs no payload metadata; if it races a reservation,
@@ -671,7 +683,6 @@ HistoricalKvRepository::RangeObservation HistoricalKvRepository::observe_range(
         if (meta.life == HistoricalKvLife::Retired) ++out.pending;
         out.blocks.push_back(meta);
     }
-    return out;
 }
 
 std::vector<HistoricalKvBlockMeta> HistoricalKvRepository::snapshot_range(

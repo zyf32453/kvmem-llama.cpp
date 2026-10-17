@@ -11,7 +11,8 @@ namespace kvmem {
 HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
                                std::unique_ptr<HistoricalKvPolicy> policy,
                                Config config)
-    : repository_(std::move(repository)), policy_(std::move(policy)), config_(config) {
+    : repository_(std::move(repository)), policy_(std::move(policy)), config_(config),
+      decisions_(repository_ ? std::min(config.batch_blocks, repository_->capacity()) : 0) {
     if (!repository_ || !policy_ || !repository_->capacity() ||
         ((config_.ready_low || config_.ready_high) &&
          (!config_.ready_low || !(config_.ready_low < config_.ready_high) ||
@@ -22,6 +23,8 @@ HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repositor
         throw std::invalid_argument("invalid historical KV GC configuration");
     }
     retry_.reserve(repository_->capacity());
+    round_.blocks.reserve(repository_->capacity());
+    observation_.blocks.reserve(repository_->capacity());
     seen_generation_.resize(repository_->capacity());
     shadow_generation_.resize(repository_->capacity());
     if (!repository_->claim_gc_owner())
@@ -103,8 +106,8 @@ void HistoricalKvGc::manual_tick() {
     const uint32_t capacity = repository_->capacity();
     const uint32_t reclaim_scan = std::min(config_.reclaim_blocks,
                                            capacity - reclaim_cursor_);
-    const auto observations = repository_->snapshot_range(reclaim_cursor_, reclaim_scan);
-    for (const auto & block : observations) {
+    repository_->observe_range_into(reclaim_cursor_, reclaim_scan, observation_);
+    for (const auto & block : observation_.blocks) {
             if (block.life != HistoricalKvLife::Retired &&
                 block.life != HistoricalKvLife::Releasing) continue;
             switch (repository_->try_reclaim(block.handle)) {
@@ -132,11 +135,11 @@ void HistoricalKvGc::manual_tick() {
     }
     if (policy_failed_) return;
 
-    if (!round_) {
-        round_ = std::make_unique<HistoricalKvSnapshot>();
-        round_->round_id = next_round_id_++;
-        round_->incarnation = repository_->incarnation();
-        round_->blocks.reserve(capacity);
+    if (!round_active_) {
+        round_active_ = true;
+        round_.round_id = next_round_id_++;
+        round_.incarnation = repository_->incarnation();
+        round_.blocks.clear();
         std::fill(seen_generation_.begin(), seen_generation_.end(), 0);
         collect_cursor_ = 0;
         pressure_.ready = 0;
@@ -148,14 +151,14 @@ void HistoricalKvGc::manual_tick() {
     // a half-built round. It retains the resulting snapshot across Yielded.
     if (collect_cursor_ < capacity) {
         const uint32_t scan = std::min(config_.scan_blocks, capacity - collect_cursor_);
-        auto slice = repository_->observe_range(collect_cursor_, scan);
-        pressure_.ready += slice.ready;
-        pressure_.pending_slot_credit += slice.pending;
+        repository_->observe_range_into(collect_cursor_, scan, observation_);
+        pressure_.ready += observation_.ready;
+        pressure_.pending_slot_credit += observation_.pending;
         if (config_.mode == Mode::Shadow) {
-            for (auto & block : slice.blocks) {
+            for (auto & block : observation_.blocks) {
                 if (block.handle.slot >= shadow_generation_.size() ||
                     shadow_generation_[block.handle.slot] != block.handle.generation ||
-                    !historical_kv_can_request_delete(block, round_->incarnation)) continue;
+                    !historical_kv_can_request_delete(block, round_.incarnation)) continue;
                 // A shadow candidate remains physically Live. Model the
                 // effect of its hypothetical retirement for the policy only.
                 block.life = HistoricalKvLife::Retired;
@@ -163,49 +166,53 @@ void HistoricalKvGc::manual_tick() {
                 ++pressure_.pending_slot_credit;
             }
         }
-        round_->blocks.insert(round_->blocks.end(), slice.blocks.begin(),
-                              slice.blocks.end());
+        round_.blocks.insert(round_.blocks.end(), observation_.blocks.begin(),
+                             observation_.blocks.end());
         collect_cursor_ += scan;
         if (collect_cursor_ < capacity) return;
     }
-    HistoricalKvDecisionBuffer out(config_.batch_blocks);
+    decisions_.clear_after_ack();
     HistoricalKvStepResult step;
     try {
-        step = policy_->step(*round_, pressure_,
-                             {config_.scan_blocks, config_.batch_blocks}, out);
+        step = policy_->step(round_, pressure_,
+                             {config_.scan_blocks, config_.batch_blocks}, decisions_);
     } catch (const std::exception & e) {
         ++policy_failures_;
         policy_failed_ = true;
-        round_.reset();
+        decisions_.clear_after_ack();
+        round_.blocks.clear();
+        round_active_ = false;
         collect_cursor_ = 0;
         std::fprintf(stderr, "[historical-kv-gc] policy disabled: %s\n", e.what());
         return;
     } catch (...) {
         ++policy_failures_;
         policy_failed_ = true;
-        round_.reset();
+        decisions_.clear_after_ack();
+        round_.blocks.clear();
+        round_active_ = false;
         collect_cursor_ = 0;
         std::fprintf(stderr, "[historical-kv-gc] policy disabled: unknown error\n");
         return;
     }
-    proposed_.fetch_add(out.values().size(), std::memory_order_relaxed);
-    for (const auto & intent : out.values()) {
+    proposed_.fetch_add(decisions_.values().size(), std::memory_order_relaxed);
+    for (const auto & intent : decisions_.values()) {
         // A policy cannot delete an arbitrary live block outside the fixed
         // observation it was given for this round.
-        // snapshot_range() returns blocks in slot order, and each slice is
+        // observe_range_into() returns blocks in slot order, and each slice is
         // appended in that order. An intent therefore needs one logarithmic
         // lookup instead of rescanning the full directory for every victim.
         const auto observed_slot = std::lower_bound(
-            round_->blocks.begin(), round_->blocks.end(), intent.victim.slot,
+            round_.blocks.begin(), round_.blocks.end(), intent.victim.slot,
             [](const HistoricalKvBlockMeta & block, uint32_t slot) {
                 return block.handle.slot < slot;
             });
-        const bool observed = intent.round_id == round_->round_id &&
-            observed_slot != round_->blocks.end() &&
+        const bool observed = intent.round_id == round_.round_id &&
+            observed_slot != round_.blocks.end() &&
             observed_slot->handle.slot == intent.victim.slot &&
             observed_slot->handle.incarnation == intent.victim.incarnation &&
             observed_slot->handle.generation == intent.victim.generation &&
-            historical_kv_can_request_delete(*observed_slot, round_->incarnation);
+            historical_kv_can_request_delete(*observed_slot, round_.incarnation);
         if (!observed) {
             acknowledge(intent, HistoricalKvCommitCode::Stale);
             continue;
@@ -233,9 +240,10 @@ void HistoricalKvGc::manual_tick() {
             if (!duplicate) retry_.push_back(intent);
         }
     }
-    out.clear_after_ack();
+    decisions_.clear_after_ack();
     if (step.status != HistoricalKvStepStatus::Yielded) {
-        round_.reset();
+        round_.blocks.clear();
+        round_active_ = false;
         collect_cursor_ = 0;
     }
 }

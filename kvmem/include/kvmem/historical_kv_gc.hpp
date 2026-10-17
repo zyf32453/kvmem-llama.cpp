@@ -69,7 +69,10 @@ private:
     std::unique_ptr<HistoricalKvPolicy> policy_;
     Config config_;
     mutable std::mutex tick_mu_;
-    std::unique_ptr<HistoricalKvSnapshot> round_;
+    HistoricalKvSnapshot round_;
+    bool round_active_ = false;
+    HistoricalKvRepository::RangeObservation observation_;
+    HistoricalKvDecisionBuffer decisions_;
     HistoricalKvPressure pressure_{};
     std::vector<HistoricalKvDeleteIntent> retry_;
     // One generation per physical slot is enough to suppress duplicate
