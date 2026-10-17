@@ -11,6 +11,7 @@ RDNA2_FATTN="$ROOT/patches/0005-hip-rdna2-quantized-kv-fa-vec.patch"
 QWEN3MOE_CAPTURE="$ROOT/patches/0006-qwen3moe-capture.patch"
 HISTORICAL_ACTIVE="$ROOT/patches/0007-historical-active-hook.patch"
 HISTORICAL_CELLS="$ROOT/patches/0008-historical-cell-index-reservation.patch"
+HISTORICAL_SLOTS="$ROOT/patches/0009-historical-slot-info-return.patch"
 BUDGET_UPGRADE="$ROOT/patches/reasoning-budget-upgrade.patch"
 REPLAY_UPGRADE="$ROOT/patches/replayssm-upgrade.patch"
 UPGRADE="$ROOT/patches/multimodal-upgrade.patch"
@@ -111,4 +112,12 @@ else
     git apply --check "$HISTORICAL_CELLS"
     git apply "$HISTORICAL_CELLS"
     echo "applied historical cell index reservation"
+fi
+
+if git apply --reverse --check "$HISTORICAL_SLOTS" 2>/dev/null; then
+    echo "historical slot info return already applied"
+else
+    git apply --check "$HISTORICAL_SLOTS"
+    git apply "$HISTORICAL_SLOTS"
+    echo "applied historical slot info return"
 fi

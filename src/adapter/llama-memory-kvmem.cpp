@@ -845,6 +845,8 @@ llama_memory_kvmem::llama_memory_kvmem(
     block_tokens_ = pool.block_tokens;
     kv_size_ = pool.kv_size;
     n_slots_ = pool.n_slots;
+    context_n_batch_ = cparams.n_batch;
+    context_n_ubatch_ = cparams.n_ubatch;
 
     // Both store configs are kept as members so a sibling store for another
     // conversation is configured identically.
@@ -1028,6 +1030,26 @@ struct llama_memory_kvmem::HistoricalCpuCleanup final : kvmem::HistoricalKvClean
     bool ready() const noexcept override { return !gc || gc->worker_finished(); }
 };
 
+// A decode context owns the prepared slot vectors while upstream is using
+// them. The base context has a virtual destructor, so return the same storage
+// to the request before the next decode instead of allocating another set.
+class llama_memory_kvmem::HistoricalBatchContext final : public llama_kv_cache_context {
+public:
+    HistoricalBatchContext(llama_memory_kvmem & owner, llama_kv_cache * kv,
+            llama_kv_cache::slot_info_vec_t sinfos, std::vector<llama_ubatch> ubatches) :
+        llama_kv_cache_context(kv, std::move(sinfos), std::move(ubatches)), owner_(owner) {}
+
+    ~HistoricalBatchContext() override {
+        // The request has only one live decode context. An unexpected second
+        // owner means reusing these buffers would invalidate an active decode.
+        if (!owner_.historical_slot_workspace_.slots.empty()) std::terminate();
+        owner_.historical_slot_workspace_.slots = take_slot_infos();
+    }
+
+private:
+    llama_memory_kvmem & owner_;
+};
+
 llama_memory_kvmem::~llama_memory_kvmem() {
     if (historical_capture_) historical_capture_->repository()->close();
     if (historical_gc_) historical_gc_->request_stop();
@@ -1156,6 +1178,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         if (input_tokens > SIZE_MAX - max_output_tokens)
             throw std::length_error("historical capture token count overflow");
         const size_t max_capture_tokens = static_cast<size_t>(input_tokens + max_output_tokens);
+        HistoricalSlotWorkspace slot_workspace;
+        slot_workspace.prepare(context_n_batch_, context_n_ubatch_, max_capture_tokens);
         // Each token has at most one original position and one capture range.
         // One extra copy can be held by a D2H slot. Four allocations per
         // one-token batch cover alignment padding in the fixed arena.
@@ -1213,6 +1237,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         historical_active_ = std::move(active);
         historical_active_workspace_ = std::move(active_workspace);
         cell_workspace_ = std::move(cells);
+        historical_slot_workspace_ = std::move(slot_workspace);
         pos_queue_.swap(queued_captures);
         capture_arena_.swap(capture_arena);
         capture_max_tokens_ = max_capture_tokens;
@@ -1224,6 +1249,9 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         const auto workspace = kvmem_capture_workspace_status();
         const auto cell_nodes = kv_->get_cells(0).index_status();
         LLAMA_LOG_INFO("KVMEM_CELL_INDEX nodes=%zu available=%zu\n", cell_nodes.nodes, cell_nodes.available);
+        LLAMA_LOG_INFO("KVMEM_SLOT_INFO slots=%zu bytes=%zu max_batch=%u ubatch=%u\n",
+            historical_slot_workspace_.slots.size(), historical_slot_workspace_.capacity_bytes(),
+            historical_slot_workspace_.max_tokens, historical_slot_workspace_.n_ubatch);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_ARENA bytes=%zu queue_capacity=%zu max_tokens=%zu\n",
             capture_arena_->capacity_bytes(), pos_queue_.capacity(), max_capture_tokens);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu layout_bytes=%zu layout_slots=%u layout_host_bytes=%zu\n",
@@ -2763,14 +2791,27 @@ bool llama_memory_kvmem::prepare_ubatches(
             row.token = ub.token ? ub.token[i] : LLAMA_TOKEN_NULL;
         }
     }
-    sinfos.clear();
-    sinfos.reserve(ubatches.size());
-    for (const auto & ubatch : ubatches) {
-        llama_kv_cache::slot_info sinfo;
-        if (!kvmem_fill_slot_info(runtime_->store(), block_tokens_, kv_size_, ubatch, sinfo)) {
-            return false;
+    if (historical_capture_) {
+        if (ubatches.size() > sinfos.size())
+            throw std::length_error("historical slot list exceeded request reservation");
+        for (size_t i = 0; i < ubatches.size(); ++i) {
+            auto & slot = sinfos[i];
+            if (slot.strm.size() != 1 || slot.idxs.size() != 1 ||
+                slot.idxs[0].capacity() < ubatches[i].n_tokens)
+                throw std::length_error("historical slot indexes exceeded request reservation");
+            if (!kvmem_fill_slot_info(runtime_->store(), block_tokens_, kv_size_, ubatches[i], slot))
+                return false;
         }
-        sinfos.push_back(std::move(sinfo));
+    } else {
+        sinfos.clear();
+        sinfos.reserve(ubatches.size());
+        for (const auto & ubatch : ubatches) {
+            llama_kv_cache::slot_info sinfo;
+            if (!kvmem_fill_slot_info(runtime_->store(), block_tokens_, kv_size_, ubatch, sinfo)) {
+                return false;
+            }
+            sinfos.push_back(std::move(sinfo));
+        }
     }
     pos_queue_.clear();
     for (const auto & ubatch : ubatches) {
@@ -2927,11 +2968,32 @@ llama_memory_context_ptr llama_memory_kvmem::init_batch(
         }
 
         llama_kv_cache::slot_info_vec_t sinfos;
+        if (historical_capture_) {
+            auto & ws = historical_slot_workspace_;
+            if (ws.slots.empty() || ubatches.empty() ||
+                n_ubatch != ws.n_ubatch || balloc.get_n_tokens() > ws.max_tokens ||
+                ubatches.size() > ws.slots.size()) {
+                historical_capture_->fail();
+                LLAMA_LOG_ERROR("historical capture: decode exceeds prepared slot bound\n");
+                break;
+            }
+            sinfos = std::move(ws.slots);
+        }
         if (!prepare_ubatches(ubatches, balloc.get_n_tokens(), sinfos)) {
-            if (historical_capture_) historical_capture_->fail();
+            if (historical_capture_) {
+                historical_capture_->fail();
+                historical_slot_workspace_.slots = std::move(sinfos);
+            }
             break;
         }
 
+        if (historical_capture_) {
+            // Allocate the context object before transferring the reusable
+            // vectors. A failed allocation leaves them with the request.
+            auto context = std::unique_ptr<HistoricalBatchContext>(new HistoricalBatchContext(
+                    *this, kv_, std::move(sinfos), std::move(ubatches)));
+            return context;
+        }
         return std::make_unique<llama_kv_cache_context>(
                 kv_, std::move(sinfos), std::move(ubatches));
     } while (false);

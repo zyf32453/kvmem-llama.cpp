@@ -12,6 +12,7 @@
 #include "kvmem/rope.hpp"
 
 #include <condition_variable>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -322,6 +323,37 @@ private:
                 tokens.capacity() * sizeof(llama_token);
         }
     } cell_workspace_;
+    // The actual slot_info vectors travel into one llama_kv_cache_context and
+    // return from its destructor. Only one decode context may own them at a
+    // time in the admitted single-request path.
+    struct HistoricalSlotWorkspace {
+        llama_kv_cache::slot_info_vec_t slots;
+        uint32_t n_batch = 0, n_ubatch = 0;
+        uint32_t max_tokens = 0;
+        void prepare(uint32_t batch, uint32_t ubatch, uint64_t request_tokens) {
+            if (!batch || !ubatch || !request_tokens) throw std::length_error("invalid historical slot workspace bound");
+            n_batch = batch; n_ubatch = ubatch;
+            max_tokens = static_cast<uint32_t>(std::min<uint64_t>(batch, request_tokens));
+            slots.resize((size_t(max_tokens) + ubatch - 1) / ubatch);
+            for (size_t i = 0; i < slots.size(); ++i) {
+                auto & slot = slots[i];
+                slot.s0 = slot.s1 = 0;
+                slot.resize(1); slot.strm[0] = 0;
+                slot.idxs[0].reserve(std::min<size_t>(ubatch, size_t(max_tokens) - i * ubatch));
+            }
+        }
+        size_t capacity_bytes() const noexcept {
+            size_t result = slots.capacity() * sizeof(llama_kv_cache::slot_info);
+            for (const auto & slot : slots) {
+                result += slot.strm.capacity() * sizeof(llama_seq_id) +
+                    slot.idxs.capacity() * sizeof(llama_kv_cache::slot_info::idx_vec_t);
+                for (const auto & idx : slot.idxs) result += idx.capacity() * sizeof(uint32_t);
+            }
+            return result;
+        }
+    } historical_slot_workspace_;
+    class HistoricalBatchContext;
+    uint32_t context_n_batch_ = 0, context_n_ubatch_ = 0;
     bool gpu_kv_already_resident(uint32_t block_id) const;
     bool gpu_kv_complete(uint32_t block_id, const llama_kv_cache * cache) const;
     std::vector<uint32_t> retrieval_mandatory() const;

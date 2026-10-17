@@ -435,6 +435,18 @@ ActiveSet 增加 `prepare`、`try_acquire` 和 `release`。复用的是对象和
 
 这一容量只覆盖采集位置、原始范围以及可能被 D2H 持有的一份副本；整个 `llama_ubatch::data_t`、上游 `llama_batch_allocr`、每批 `slot_info`、`llama_kv_cache_context` 和 backend 计算图仍会分配。当前入口只用于已支持的单序列 recency/RAM 请求，尚未实现跨请求 arena 复用、完整请求严格预约、server 或长期元数据有界，P3–P6 的原定交付范围保持不变。
 
+### 请求入口预约并复用真实 `slot_info` 存储（2026-10-17）
+
+此前 `init_batch` 每次解码都会创建 `slot_info_vec_t`，`prepare_ubatches` 再为每个微批次创建槽位对象和 cell 索引向量。现在受限 historical 请求在 RAM/元数据接纳前，按 `min(请求 token 上限, n_batch)` 和 `n_ubatch` 准备实际的外层列表、stream 列表及各微批次 cell 索引容量。已接纳请求填充原对象；若微批次超过预约边界，明确关闭请求。普通非 historical 路径保持原行为。
+
+上游补丁 `0009-historical-slot-info-return.patch` 为 `llama_kv_cache_context` 增加只在 `LLAMA_KVMEM` 下启用的槽位列表交还接口。适配器的解码上下文从请求取走这批缓冲区，在虚析构期间交回，下一次解码复用同一块存储；请求准备失败时，私有缓冲区不会被发布。Linux、Windows PowerShell 和 Windows HIP 补丁入口均纳入 `0009`。Linux 连续两次应用检查通过，第二次识别为已应用；PowerShell 构建脚本语法检查通过，未在本轮执行 Windows CUDA/HIP 全构建。
+
+真实模型的 **35/35** 个顶层场景在最终版本通过。新增检查覆盖请求准备失败后的槽位容量归零、每次 `llama_decode` 后外层和嵌套缓冲区地址/容量不变，以及在禁止 C++ 新分配期间填满一个已准备槽位的索引向量。测试用的 `n_batch=64, n_ubatch=16` 在入口取得 **4** 个槽位对象、容器持有容量 **592 字节**；正常 CLI 的 `n_batch=128, n_ubatch=16` 取得 **8** 个、**1184 字节**。这些字节数只计相应容器容量，不含对象、分配器或其它模型工作区。实际 GC 仍回收 CPU historical payload，槽位列表属于前台执行元数据，并不改变 GPU 工作集回收协议。源码、测试及补丁的本地与远程测试副本 SHA256 一致。
+
+最终版本的 recency CLI delete 完成 356-token 输入、8-token 生成并正常退出：`proposed=committed=reclaimed=6`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 均为 0。未启用 historical GC 的普通 retrieval CLI 同样正常退出，完成 `layout_writeback move=4` 和 64-token replay。模型及两条 CLI 的退出码均为 0；原始日志前缀为 `historical-slot-info-final-`，保存在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU` 及本地 `build-local/capture-session-validation/`。
+
+这一步只消除了已接纳 historical 请求中 `slot_info` 列表的反复分配。上游 `llama_batch_allocr`、完整 `llama_ubatch::data_t`、每次创建的执行上下文对象、rollback 快照及 backend 计算图仍可能分配；统一资源预算、完整 active 入口和长期有界复用也未完成。因此 P3 仍在推进，P4–P6 的原定交付范围不变。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

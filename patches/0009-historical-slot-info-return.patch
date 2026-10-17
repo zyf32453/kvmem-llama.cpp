@@ -1,0 +1,21 @@
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -7,4 +7,5 @@
+ 
+ #include <unordered_map>
++#include <utility>
+ #include <vector>
+ 
+@@ -383,6 +384,11 @@
+ 
+     virtual ~llama_kv_cache_context();
+ 
++#if defined(LLAMA_KVMEM)
++    // Move the actual slot buffers back to the request owner after decode.
++    slot_info_vec_t take_slot_infos() noexcept { return std::move(sinfos); }
++#endif
++
+     //
+     // llama_memory_context_i
+     //

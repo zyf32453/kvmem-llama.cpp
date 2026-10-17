@@ -2,6 +2,7 @@
 // a controlled fixture; it does not enable background GC in CLI/server runs.
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-batch.h"
+#include "llama-kvmem-batch.h"
 #include "llama-kvmem-hooks.h"
 #include "llama-kvmem-stagein.h"
 #include "ggml-backend.h"
@@ -45,6 +46,39 @@ struct DenyCppAllocation {
 };
 
 struct kvmem_transfer_test_access {
+    struct SlotWorkspaceStatus {
+        size_t bytes = 0;
+        std::vector<const void *> buffers;
+        std::vector<size_t> capacities;
+    };
+    static SlotWorkspaceStatus slot_workspace(const llama_memory_kvmem & mem) {
+        const auto & ws = mem.historical_slot_workspace_;
+        SlotWorkspaceStatus status;
+        status.bytes = ws.capacity_bytes();
+        status.buffers.push_back(ws.slots.data());
+        status.capacities.push_back(ws.slots.capacity());
+        for (const auto & slot : ws.slots) {
+            status.buffers.push_back(slot.strm.data());
+            status.buffers.push_back(slot.idxs.data());
+            status.buffers.push_back(slot.idxs.empty() ? nullptr : slot.idxs[0].data());
+            status.capacities.push_back(slot.strm.capacity());
+            status.capacities.push_back(slot.idxs.capacity());
+            status.capacities.push_back(slot.idxs.empty() ? 0 : slot.idxs[0].capacity());
+        }
+        return status;
+    }
+    static bool slot_fill_without_cpp_allocation(llama_memory_kvmem & mem) {
+        auto & slots = mem.historical_slot_workspace_.slots;
+        if (slots.empty() || slots[0].idxs.empty()) return false;
+        const auto count = slots[0].idxs[0].capacity();
+        std::vector<llama_pos> positions(count, 0);
+        llama_ubatch ubatch{};
+        ubatch.n_tokens = static_cast<uint32_t>(count);
+        ubatch.pos = positions.data();
+        DenyCppAllocation guard;
+        return kvmem_fill_slot_info(mem.runtime().store(), mem.block_tokens(),
+                mem.get_kv()->get_size(), ubatch, slots[0]);
+    }
     static std::array<const void *, 16> execution_buffers(const llama_memory_kvmem & mem) {
         const auto & a = mem.historical_active_workspace_;
         const auto & c = mem.cell_workspace_;
@@ -1458,6 +1492,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 !mem.runtime().historical_shadow_directory().size() &&
                 !mem.get_kv()->get_cells(0).index_status().reserved &&
                 kvmem_transfer_test_access::capture_arena_unpublished(mem) &&
+                !kvmem_transfer_test_access::slot_workspace(mem).bytes &&
                 kvmem_transfer_test_access::execution_storage_empty(mem),
                 "real request preparation failure published an owner or retained workspace");
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
@@ -1466,6 +1501,10 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     const auto table_bytes = mem.runtime().store().allocated_bytes();
     const auto execution_buffers = kvmem_transfer_test_access::execution_buffers(mem);
     const auto execution_bytes = kvmem_transfer_test_access::execution_bytes(mem);
+    const auto slot_workspace = kvmem_transfer_test_access::slot_workspace(mem);
+    require(slot_workspace.capacities.size() == 13 && slot_workspace.capacities[0] >= 4 &&
+            slot_workspace.capacities[3] >= 16 && slot_workspace.bytes,
+            "real request did not acquire four microbatch slot buffers before admission");
     const auto cell_nodes = mem.get_kv()->get_cells(0).index_status().nodes;
     require(mem.get_kv()->get_cells(0).index_status().reserved &&
             cell_nodes == size_t(mem.get_kv()->get_cells(0).size()) * 2,
@@ -1501,6 +1540,11 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         require(kvmem_transfer_test_access::execution_buffers(mem) == execution_buffers &&
                 kvmem_transfer_test_access::execution_bytes(mem) == execution_bytes,
                 "real capture changed prepared active or cell scratch storage");
+        const auto returned_slots = kvmem_transfer_test_access::slot_workspace(mem);
+        require(returned_slots.bytes == slot_workspace.bytes &&
+                returned_slots.buffers == slot_workspace.buffers &&
+                returned_slots.capacities == slot_workspace.capacities,
+                "real decode did not return the same prepared slot buffers");
         const auto & cells = mem.get_kv()->get_cells(0);
         const auto index = cells.index_status();
         require(index.reserved && index.nodes == cell_nodes &&
@@ -1537,6 +1581,8 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     });
     uint32_t position = 0;
     execute(tokens.data(), 48);
+    require(kvmem_transfer_test_access::slot_fill_without_cpp_allocation(mem),
+            "filling a prepared real-model slot list allocated C++ storage");
     if (check_capture_copy) {
         kvmem_transfer_test_access::on_submission(mem, {});
         require(copied_capture, "actual capture batch copy allocated outside its prepared arena");
