@@ -386,7 +386,9 @@ public:
     // inverse of register_append). Used by the kvmem prefix cache to rewind the
     // block table when resuming at a prompt-end checkpoint whose position is
     // BELOW the live end. A partially-covered trailing block is shrunk in place;
-    // fully-past blocks and detached tombstones are popped from the back.
+    // the legacy dense table pops fully-past blocks and detached tombstones.
+    // A reserved historical table instead keeps physical slots as reclaimed
+    // tombstones and removes the suffix by original-position order.
     // Returns the popped live blocks + their tier slots
     // so the caller can release CPU/NVMe storage. `token_pos >= total_tokens_`
     // is a no-op (returns empty).

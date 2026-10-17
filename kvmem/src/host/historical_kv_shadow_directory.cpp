@@ -204,7 +204,6 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
             entry.producer = context;
             entry.state = State::Bound;
             --r.recycled_ready;
-            recycled_table_slots_ = true;
         } else {
             const auto inserted = entries_.insert(r.nodes.extract(id));
             if (!inserted.inserted) std::terminate(); // impossible after owner-serialized validation
@@ -498,11 +497,33 @@ void HistoricalKvShadowDirectory::validate_truncate(
     if (!tail_span_matches(store))
         throw std::logic_error("historical shadow directory has a stale block span");
     if (token_pos >= store.total_tokens()) return;
-    // KvMemStore::truncate_to still removes the physical table's dense tail.
-    // Once a lower table slot has received a newer span, that operation can
-    // remove the wrong generation and leave position_order_ dangling.
-    if (recycled_table_slots_)
-        throw std::logic_error("cannot truncate a recycled historical block table");
+    if (reserved_append_mode_) {
+        // The reserved table keeps physical slots stable; truncate only
+        // generations whose exact release completed and whose device/tier
+        // users have already let go. Detached tombstones are already absent.
+        for (uint32_t id : store.position_order_) {
+            const auto & block = store.blocks_[id];
+            if (block.orig_pos_start >= token_pos &&
+                (!block.n_tokens || entries_.count(id) == 0))
+                throw std::logic_error("historical table suffix has no generation binding");
+        }
+        for (const auto & item : entries_) {
+            const auto id = item.first;
+            const auto & entry = item.second;
+            const auto & span = entry.binding;
+            if (span.original_begin + span.valid_tokens <= token_pos) continue;
+            if (id >= store.block_count() ||
+                !entry.repository || !entry.repository->reclaim_completed(span.handle, entry.repository_id) ||
+                !entry.producer.expired())
+                throw std::logic_error("cannot truncate an unreclaimed historical generation");
+            const auto & block = store.blocks()[id];
+            if (block.gpu_slot >= 0 || block.cpu_slot >= 0 || block.nvme_slot >= 0 ||
+                block.in_flight || block.in_working_set ||
+                (block.n_tokens && (token_pos > span.original_begin || !same_span(span, block))))
+                throw std::logic_error("cannot truncate an occupied historical table slot");
+        }
+        return;
+    }
     for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
         const auto & entry = it->second;
         const auto & span = entry.binding;

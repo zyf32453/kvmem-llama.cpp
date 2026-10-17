@@ -533,7 +533,7 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 
 预约追加现在可以在某个块完成精确代际 CPU payload 释放、producer 引用消失、GPU/CPU/NVMe 槽和执行权利归零、原跨度从位置索引脱离之后，显式准备该表下标的新 producer。准备在接纳时完成可能分配内存的工作；后续追加先用尚未使用的表下标，再选已准备的墓碑，把新逻辑身份、repository handle 和原始位置覆盖到同一物理表项。shadow directory 的节点和 `KvMemStore` 的块表/位置索引均保持固定容量；旧 handle 继续由 repository 的 generation 校验拒绝，旧位置也不能解析为新代。
 
-宿主回归使用 **2 个物理表项、2 个 repository/RAM 槽位累计追加 20 个真实 payload**，每次追加在禁止普通 C++ `new` 的区间执行，检查元数据容量恒定、旧句柄不可读取、旧位置缺失和最后 payload 全部归还。这是宿主组件级的 **10 倍循环**，不是 CLI 或 server 的生产长轨迹验收。复用以后，旧 `truncate_to` 仍按物理表的稠密尾部删除，可能删错新代；当前明确拒绝对已复用表的截断，待截断/回滚按位置顺序及精确代际重写后再开放。生产 capture session 尚未自动调用表项准备，也没有跨请求 admission；不能把此项报告成完整 P4。
+宿主回归使用 **2 个物理表项、2 个 repository/RAM 槽位累计追加 20 个真实 payload**，每次追加在禁止普通 C++ `new` 的区间执行，检查元数据容量恒定、旧句柄不可读取、旧位置缺失和最后 payload 全部归还。这是宿主组件级的 **10 倍循环**，不是 CLI 或 server 的生产长轨迹验收。当时旧 `truncate_to` 仍按物理表的稠密尾部删除，可能删错新代，因此暂时拒绝对已复用表的截断；后续改造见下节。生产 capture session 尚未自动调用表项准备，也没有跨请求 admission；不能把此项报告成完整 P4。
 
 另有混合批次回归：先保留一个旧块，再同时追加一个新表下标和一个已回收表下标；第二个 writer 位置错误时整个批次不提交，修正后在禁止 `new` 的区间原子提交。最终远程宿主 CTest **27/27**、相关 ASan/UBSan **3/3**、TSan **3/3** 均通过。真实 GGUF/CUDA 模型的既有 **35/35** 场景和 backend guard 通过；recency/RAM delete 请求完成 356-token 输入、8-token 输出，本次后台 `proposed=committed=reclaimed=8`、位置脱离 8 次、策略与 worker 错误为 0。该 CLI 路径目前未自动启用表项复用，模型结果是基线回归，不是生产复用验收。原始日志在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`，文件名前缀 `recycled-table-`。
 
@@ -544,6 +544,14 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 宿主测试覆盖计划准备后表发生追加而拒绝执行、pending 期间不许脱离/准备复用、以及复用后选择器仍按原始位置排序；完整宿主 CTest **27/27**、相关 ASan/UBSan **4/4**、TSan **4/4** 通过。这个保护覆盖 runtime 的计划执行入口，不等于已经把 server checkpoint、跨请求缓存的裸表下标全部升级为精确代际引用；那些入口在启用生产复用前仍需逐项改造。
 
 最终 CUDA 构建及真实 GGUF 测试 **35/35** 个场景和 backend guard 通过。相同模型的 recency/RAM delete 推理完成 356-token 输入、8-token 输出，后台 `proposed=committed=reclaimed=8`、位置索引脱离 8 次、策略及 worker 错误为 0；这个结果验证现有受限生产路径没有被计划检查误拒，仍不是跨请求表项复用验收。原始日志位于远程隔离目录，前缀 `plan-generation-final-`。
+
+### 已复用物理表的安全后缀截断（2026-10-17）
+
+旧截断从 `blocks_` 的物理尾部弹出，而复用后较小的表下标可能对应更新的原始位置。预约历史表现在改按 `position_order_` 找到要回滚的后缀：只有仓库确认该后缀每个精确 generation 的 CPU payload 已释放、producer 消失、GPU/CPU/NVMe 槽与执行/IO 权利均归零时，才把后缀从位置索引移除并将对应物理表项变成墓碑。块表和 shadow directory 不缩小，下一次接纳可以预备这些墓碑并用更高逻辑 ID 在回退后的位置再次追加。截断前验证整个后缀并预留返回列表，失败不改变块表；未执行的选择计划存在时，runtime 直接拒绝截断。
+
+宿主用例从物理顺序 `1,2,0` 的混合新旧表项出发，确认活着的代际、pending 计划、仍占用的 GPU 槽各自阻止截断；两段后缀精确释放后，回退到位置 4 保持 3 个物理表项、保留位置 2 的旧块，旧位置和旧句柄不复活，再用表项 0 接纳位置 4 的新代。宿主 CTest **27/27**、相关 ASan/UBSan **4/4**、TSan **4/4** 通过。这是宿主预约表的回滚能力；当前 CLI adapter 仍主动拒绝 historical 请求中的截断、reset、会话续接和 rollback，相关执行资源及检查点协议未接入，不能称生产回滚完成。
+
+最终 CUDA 构建和真实 GGUF 的 **35/35** 个模型场景及 backend guard 通过。recency/RAM delete 推理完成 356-token 输入、8-token 输出，本次 `proposed=committed=reclaimed=8`、位置脱离 8 次，策略/worker 错误为 0。该 CLI 不调用新增的截断路径，因此这里只证明既有推理未回归；原始日志在远程隔离目录，前缀 `recycled-truncate-`。
 
 ## 剩余生产接入与完整验收
 

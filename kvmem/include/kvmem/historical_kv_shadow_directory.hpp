@@ -74,6 +74,7 @@ public:
     // Only swaps privately prepared storage into an unchanged, empty runtime.
     // No allocation or publication of block identities occurs here.
     bool install_append_reservation(KvMemStore & store, AppendReservation & reservation) noexcept;
+    bool uses_reserved_table() const noexcept { return reserved_append_mode_; }
     // Admission-time preparation for one detached, exactly reclaimed table
     // slot. Allocates its next producer before an append enters the hot path.
     bool prepare_recycled_slot(KvMemStore & store, AppendReservation & reservation,
@@ -211,7 +212,6 @@ private:
     uint64_t repository_id_ = 0;
     uint32_t reserved_append_capacity_ = 0;
     bool reserved_append_mode_ = false;
-    bool recycled_table_slots_ = false;
 };
 
 } // namespace kvmem

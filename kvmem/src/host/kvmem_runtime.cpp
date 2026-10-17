@@ -93,6 +93,8 @@ void KvMemRuntime::register_append(uint32_t n_tokens) {
 }
 
 std::vector<KvMemDroppedBlock> KvMemRuntime::truncate_to(uint32_t token_pos) {
+    if (pending_ && historical_shadow_directory_.uses_reserved_table())
+        throw std::logic_error("cannot truncate a reserved historical table with an unapplied plan");
     // Reject before touching prefetch state. The store also validates direct
     // callers and prunes identities only after its dense blocks are removed.
     historical_shadow_directory_.validate_truncate(store_, token_pos);

@@ -323,6 +323,31 @@ std::vector<KvMemDroppedBlock> KvMemStore::truncate_to(uint32_t token_pos) {
         historical_shadow_directory_->validate_truncate(*this, token_pos);
     std::vector<KvMemDroppedBlock> dropped;
     if (token_pos >= total_tokens_) return dropped;
+    if (historical_shadow_directory_ && historical_shadow_directory_->uses_reserved_table()) {
+        // Logical rollback must not pop the physical tail: after slot reuse,
+        // the newest span can live at the smallest table index. Keep table
+        // slots and directory tombstones for the next admitted generation.
+        const auto first = std::lower_bound(position_order_.begin(), position_order_.end(), token_pos,
+            [this](uint32_t id, uint32_t pos) { return blocks_[id].orig_pos_start < pos; });
+        dropped.reserve(static_cast<size_t>(position_order_.end() - first));
+        for (auto it = first; it != position_order_.end(); ++it) {
+            const auto state = historical_shadow_directory_->observe(*it).state;
+            if (state != HistoricalKvShadowDirectory::State::Reclaimed &&
+                !historical_shadow_directory_->confirm_reclaimed(*it))
+                throw std::logic_error("historical suffix release changed before rollback");
+        }
+        for (auto it = first; it != position_order_.end(); ++it) {
+            auto & block = blocks_[*it];
+            dropped.push_back(KvMemDroppedBlock{block.block_id, block.tier,
+                                                block.gpu_slot, block.cpu_slot, block.nvme_slot});
+            block.n_tokens = 0;
+            block.tier = KvTier::CPU;
+        }
+        position_order_.erase(first, position_order_.end());
+        total_tokens_ = token_pos;
+        ++table_revision_;
+        return dropped;
+    }
     // Allocate before changing the dense table. An allocation failure must
     // not leave its historical identity directory describing removed blocks.
     const auto first_dropped = std::lower_bound(position_order_.begin(), position_order_.end(), token_pos,

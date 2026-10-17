@@ -489,6 +489,7 @@ static void reserved_metadata_mixes_fresh_and_recycled_slots_atomically() {
     auto reservation = runtime.prepare_historical_metadata(repo, storage, 3);
     check(reservation && runtime.install_historical_metadata(*reservation),
           "mixed table reservation failed");
+    const auto table_bytes = runtime.store().allocated_bytes();
     auto write = [&](uint64_t logical_id, uint32_t begin) {
         auto writer = repo->begin_write(logical_id, begin, 2, logical_id, 0,
             [weak = std::weak_ptr<HistoricalKvRepository>(repo), storage](HistoricalKvHandle handle) {
@@ -544,6 +545,63 @@ static void reserved_metadata_mixes_fresh_and_recycled_slots_atomically() {
           runtime.store().block_id_containing(6) == 0 &&
           !repo->acquire_read(old_handle) && !reservation->remaining(),
           "mixed fresh/recycled append lost atomic order or revived old generation");
+    bool blocked = false;
+    try { runtime.truncate_to(4); }
+    catch (const std::logic_error &) { blocked = true; }
+    check(blocked && runtime.store().total_tokens() == 8 &&
+          runtime.store().chronological_ids() == std::vector<uint32_t>({1, 2, 0}),
+          "rollback removed a live recycled generation");
+    const auto first_new = producers[0]->handle();
+    const auto second_new = producers[1]->handle();
+    complete(producers[0], 2);
+    complete(producers[1], 2);
+    check(repo->retire(first_new) == HistoricalKvRepository::RetireResult::Committed &&
+          repo->retire(second_new) == HistoricalKvRepository::RetireResult::Committed,
+          "mixed suffix retirement failed");
+    producers.clear(); writers.clear();
+    check(repo->try_reclaim(first_new) == HistoricalKvRepository::ReclaimResult::Complete &&
+          repo->try_reclaim(second_new) == HistoricalKvRepository::ReclaimResult::Complete,
+          "mixed suffix payloads did not release");
+    blocked = false;
+    try { runtime.truncate_to(5); }
+    catch (const std::logic_error &) { blocked = true; }
+    check(blocked && runtime.store().total_tokens() == 8,
+          "rollback cut through an immutable historical generation");
+    runtime.prepare_selection({});
+    blocked = false;
+    try { runtime.truncate_to(4); }
+    catch (const std::logic_error &) { blocked = true; }
+    check(blocked && runtime.store().total_tokens() == 8,
+          "rollback bypassed an unapplied selection plan");
+    runtime.discard_pending();
+    runtime.store().set_block_gpu_slot(0, 7);
+    blocked = false;
+    try { runtime.truncate_to(4); }
+    catch (const std::logic_error &) { blocked = true; }
+    check(blocked && runtime.store().chronological_ids() == std::vector<uint32_t>({1, 2, 0}),
+          "rollback released a suffix with an outstanding GPU slot");
+    runtime.store().set_block_gpu_slot(0, -1);
+    const auto before_rollback = runtime.store().table_revision();
+    const auto dropped = runtime.truncate_to(4);
+    check(dropped.size() == 2 && dropped[0].block_id == 2 && dropped[1].block_id == 0 &&
+          runtime.store().block_count() == 3 && runtime.store().allocated_bytes() == table_bytes &&
+          runtime.store().total_tokens() == 4 &&
+          runtime.store().table_revision() > before_rollback &&
+          runtime.store().chronological_ids() == std::vector<uint32_t>({1}) &&
+          runtime.store().block_id_containing(4) == -1 &&
+          runtime.historical_shadow_directory().size() == 3 &&
+          runtime.prepare_recycled_historical_slot(*reservation, 0) &&
+          runtime.prepare_recycled_historical_slot(*reservation, 2),
+          "rollback by original position lost stable recycled table slots");
+    writers.push_back(write(1004, 4));
+    allocation_budget = 0;
+    const bool resumed = runtime.register_historical_append(repo, storage, writers, producers, reservation.get());
+    allocation_budget = -1;
+    check(resumed && runtime.store().block_count() == 3 &&
+          runtime.store().chronological_ids() == std::vector<uint32_t>({1, 0}) &&
+          runtime.store().block_id_containing(4) == 0 &&
+          !repo->acquire_read(first_new) && !repo->acquire_read(second_new),
+          "rollback did not preserve bounded new-generation append");
 }
 
 static void unadmitted_rollback_with_stalled_cleanup() {
