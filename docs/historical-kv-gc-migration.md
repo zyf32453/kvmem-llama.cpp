@@ -421,6 +421,20 @@ ActiveSet 增加 `prepare`、`try_acquire` 和 `release`。复用的是对象和
 
 下一处明确缺口仍在 `init_batch` / `prepare_ubatches`：完整 `llama_ubatch::data_t`、slot_info 列表、memory context、采集位置/范围和 rollback 快照仍会动态分配。必须继续准备这些真实存储及其所有权，并纳入 backend、冷块恢复及 GPU 资源的统一计费。本轮 cell 恢复测试只证明已经存在的快照可复用索引节点，不代表快照创建、整个模型请求或完整生产 GC 已达到零动态分配和长期有界；P3 仍进行中，P4–P6 交付范围不变。
 
+### 请求入口预约采集位置与范围（2026-10-17）
+
+前一轮模型验证后，`prepare_ubatches` 仍为每个微批次创建位置向量；`capture_batch` 动态增长原始范围向量，D2H 槽位复制这些范围时还会再次分配。现在受限 historical 请求在 `begin_historical_capture` 的私有准备阶段取得固定字节 arena，并按输入加最大可接受输出的 token 总数预留位置队列。每个实际批次的位置和最多同数目的范围都从该 arena 取得；在已接纳请求中，arena 耗尽会明确失败，不回退到普通进程分配器。直接使用微批次的位置指针，删除了原先每批中间位置向量的复制。
+
+一个批次可移动至同步采集、异步 D2H 槽位和后台清理 owner。`CaptureBatch` 持有 arena 的共享所有权，使尚未完成的异步任务不会拿到已释放的内存；批次结束时，范围中的 writer 引用依旧按原生命周期析构，固定 arena 仅把字节容量留到请求安全退出。新请求要求旧位置队列及待处理批次为空。准备在 RAM/元数据接纳前完成，失败不会发布 arena 或队列；接受以后交换所有权，不新增分配。入口及完成日志分别记录预留字节、实际用量和累计位置数。
+
+最终真实模型的 **35/35** 个顶层场景通过，其中 160-token 输入加 3-token 输出的请求在入口准备 **30,016 字节**、163 个队列位置，完成时 arena 实际消耗 **9,792 字节**、累计位置数 **163/163**。提交前的测试钩子在禁止 C++ 新分配时复制真实 `CaptureBatch`，检查其仍由固定 arena 持有。原有逐层 GPU/CPU 字节比较、Writing 退休、D2H/Mean-K 故障、未确认设备完成及 CPU 回收回归继续通过。准备失败夹具确认 arena 和队列均未发布。
+
+固定 arena 的独立测试覆盖无新 C++ 分配的增长、复制与移动、所有权及容量耗尽。Windows 相关宿主 **14/14**、Linux 全部宿主 **27/27**，宿主 ASan/UBSan **3/3** 与 TSan **3/3** 通过；另有上轮 5 项 cell/CUDA 专项测试通过。Sanitizer 范围仅为宿主组件，不是 CUDA 适配器的 sanitizer 结论。
+
+同版 recency CLI delete 完成 356-token 输入、8-token 生成并正常退出。arena 入口预留 **66,976 字节**，完成时实际用去 **21,872 字节**，捕获位置 **364/364**；`proposed=committed=reclaimed=6`、`live_observed=14`、`task_references=0`，policy/worker failure 为 0。结束时的 payload 字节数仍可能包含后台待归还的私有预约，不能解释为最终 RSS。普通 retrieval（未开启 historical GC）也正常生成 8 token，实际移动 4 个驻留块并完成 64-token replay；退出时仍有上一轮已确认的 backend compute buffer 实际 **15.9652 MiB**、预估 **12.2700 MiB** 差异。模型及两条 CLI 的退出码均为 0。六个代码/构建文件与远程测试副本的 SHA256 全部一致。原始数据与上述模型、宿主、sanitizer 日志保存在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`，文件前缀为 `historical-capture-arena-`，本地副本放在 `build-local/capture-session-validation/`。
+
+这一容量只覆盖采集位置、原始范围以及可能被 D2H 持有的一份副本；整个 `llama_ubatch::data_t`、上游 `llama_batch_allocr`、每批 `slot_info`、`llama_kv_cache_context` 和 backend 计算图仍会分配。当前入口只用于已支持的单序列 recency/RAM 请求，尚未实现跨请求 arena 复用、完整请求严格预约、server 或长期元数据有界，P3–P6 的原定交付范围保持不变。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

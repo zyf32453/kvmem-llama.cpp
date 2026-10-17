@@ -1093,7 +1093,9 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
     if (historical_capture_ || method_ != 0 || multi_gpu_ || mtp_ || recr_ || v_trans_ ||
         replay_ || !kv_ || raw_cfg_.nvme_bytes || rt_cfg_.cpu_bytes || rt_cfg_.nvme_bytes ||
         raw_cfg_.historical_gc_attention_layers.empty() ||
-        !harvest_v_jobs_.empty() || !harvest_v_pending_.jobs.empty()) {
+        !harvest_v_jobs_.empty() || !harvest_v_pending_.jobs.empty() ||
+        !pos_queue_.empty() || !cur_capture_.positions.empty() ||
+        !decode_mean_pending_batch_.positions.empty()) {
         LLAMA_LOG_ERROR("historical capture: requires a fresh single-GPU recency RAM context without MTP/hybrid/spill tiers\n");
         return false;
     }
@@ -1151,8 +1153,21 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         active_workspace.reserve(n_slots_);
         CellWorkspace cells;
         cells.reserve(block_tokens_);
+        if (input_tokens > SIZE_MAX - max_output_tokens)
+            throw std::length_error("historical capture token count overflow");
+        const size_t max_capture_tokens = static_cast<size_t>(input_tokens + max_output_tokens);
+        // Each token has at most one original position and one capture range.
+        // One extra copy can be held by a D2H slot. Four allocations per
+        // one-token batch cover alignment padding in the fixed arena.
+        const size_t arena_per_token = 2 * (sizeof(llama_pos) + sizeof(MeanWriteRange) +
+                2 * alignof(std::max_align_t));
+        if (max_capture_tokens > SIZE_MAX / arena_per_token)
+            throw std::length_error("historical capture arena size overflow");
+        auto capture_arena = std::make_shared<kvmem::FixedByteArena>(max_capture_tokens * arena_per_token);
+        std::vector<CaptureBatch> queued_captures;
+        queued_captures.reserve(max_capture_tokens);
         std::vector<RowPosition> positions;
-        positions.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
+        positions.reserve(max_capture_tokens);
         std::vector<uint32_t> readers(n_slots_, 0);
         std::vector<uint8_t> retired(n_slots_, 0);
         std::vector<HarvestVJob> jobs, pending;
@@ -1198,6 +1213,10 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         historical_active_ = std::move(active);
         historical_active_workspace_ = std::move(active_workspace);
         cell_workspace_ = std::move(cells);
+        pos_queue_.swap(queued_captures);
+        capture_arena_.swap(capture_arena);
+        capture_max_tokens_ = max_capture_tokens;
+        capture_tokens_used_ = 0;
         harvest_v_job_limit_ = KVMEM_CAPTURE_MAX_JOBS;
         historical_cleanup_ticket_ = std::move(*cleanup_ticket);
         historical_cleanup_ = std::move(cleanup);
@@ -1205,6 +1224,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         const auto workspace = kvmem_capture_workspace_status();
         const auto cell_nodes = kv_->get_cells(0).index_status();
         LLAMA_LOG_INFO("KVMEM_CELL_INDEX nodes=%zu available=%zu\n", cell_nodes.nodes, cell_nodes.available);
+        LLAMA_LOG_INFO("KVMEM_CAPTURE_ARENA bytes=%zu queue_capacity=%zu max_tokens=%zu\n",
+            capture_arena_->capacity_bytes(), pos_queue_.capacity(), max_capture_tokens);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu layout_bytes=%zu layout_slots=%u layout_host_bytes=%zu\n",
             harvest_v_job_limit_, workspace.device_bytes, workspace.pinned_bytes,
             workspace.host_bytes + (harvest_v_jobs_.capacity() + harvest_v_pending_.jobs.capacity()) * sizeof(HarvestVJob),
@@ -1305,6 +1326,9 @@ bool llama_memory_kvmem::finish_historical_capture() {
             (unsigned long long) historical_capture_->payload_bytes(),
             (unsigned long long) historical_gpu_deferred_,
             (unsigned long long) historical_gpu_returned_);
+        LLAMA_LOG_INFO("KVMEM_CAPTURE_ARENA finish used_bytes=%zu capacity_bytes=%zu captured_tokens=%zu max_tokens=%zu\n",
+            capture_arena_->used_bytes(), capture_arena_->capacity_bytes(),
+            capture_tokens_used_, capture_max_tokens_);
         return true;
     } catch (const std::exception & e) {
         historical_capture_->fail();
@@ -2750,11 +2774,8 @@ bool llama_memory_kvmem::prepare_ubatches(
     }
     pos_queue_.clear();
     for (const auto & ubatch : ubatches) {
-        std::vector<llama_pos> p(ubatch.n_tokens);
-        for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
-            p[i] = ubatch.logical_pos ? ubatch.logical_pos[i] : ubatch.pos[i];
-        }
-        pos_queue_.push_back(capture_batch(p));
+        pos_queue_.push_back(capture_batch(
+                ubatch.logical_pos ? ubatch.logical_pos : ubatch.pos, ubatch.n_tokens));
     }
     if (historical_capture_) historical_capture_->producers_captured();
     return true;
@@ -3013,15 +3034,19 @@ void llama_memory_kvmem::state_read(llama_io_read_i & io, llama_seq_id seq_id, l
 }
 
 void llama_memory_kvmem::note_ubatch_pos(const std::vector<llama_pos> & pos) {
-    pos_queue_.push_back(capture_batch(pos));
+    pos_queue_.push_back(capture_batch(pos.data(), pos.size()));
 }
 
 llama_memory_kvmem::CaptureBatch llama_memory_kvmem::capture_batch(
-        const std::vector<llama_pos> & positions) const {
-    CaptureBatch batch;
-    batch.positions = positions;
+        const llama_pos * positions, size_t count) {
+    if (capture_arena_ && count > capture_max_tokens_ - capture_tokens_used_)
+        throw std::length_error("historical capture exceeded prepared position capacity");
+    CaptureBatch batch(capture_arena_);
+    if (!count) return batch;
+    batch.positions.assign(positions, positions + count);
+    batch.ranges.reserve(count);
     const auto & directory = runtime_->historical_shadow_directory();
-    for (uint32_t i = 0; i < positions.size();) {
+    for (uint32_t i = 0; i < count;) {
         if (positions[i] < 0) throw std::invalid_argument("negative historical capture position");
         MeanWriteRange range;
         range.source_token = i;
@@ -3041,7 +3066,7 @@ llama_memory_kvmem::CaptureBatch llama_memory_kvmem::capture_batch(
         if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged && found >= 0 &&
                 store.blocks()[bid].orig_pos_start != uint64_t(bid) * block_tokens_)
             throw std::logic_error("non-aligned capture requires a historical payload identity");
-        while (i + range.token_count < positions.size()) {
+        while (i + range.token_count < count) {
             const auto next = positions[i + range.token_count];
             if (next < 0 || static_cast<uint64_t>(next) !=
                     uint64_t(range.original_begin) + range.token_count ||
@@ -3070,6 +3095,7 @@ llama_memory_kvmem::CaptureBatch llama_memory_kvmem::capture_batch(
         batch.ranges.push_back(std::move(range));
         i += batch.ranges.back().token_count;
     }
+    if (capture_arena_) capture_tokens_used_ += count;
     return batch;
 }
 

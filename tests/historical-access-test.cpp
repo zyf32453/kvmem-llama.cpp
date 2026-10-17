@@ -192,6 +192,33 @@ struct kvmem_transfer_test_access {
     static void on_submission(llama_memory_kvmem & mem, std::function<void()> hook) {
         mem.historical_submission_test_hook_ = std::move(hook);
     }
+    static bool capture_copy_without_cpp_allocation(llama_memory_kvmem & mem) {
+        if (!mem.capture_arena_ || mem.pos_queue_.empty() ||
+                mem.pos_queue_.front().positions.empty()) return false;
+        const auto before = mem.capture_arena_->used_bytes();
+        bool copied = false;
+        {
+            DenyCppAllocation guard;
+            const auto clone = mem.pos_queue_.front();
+            copied = clone.positions.size() == mem.pos_queue_.front().positions.size() &&
+                    clone.ranges.size() == mem.pos_queue_.front().ranges.size() &&
+                    clone.arena == mem.capture_arena_;
+        }
+        return copied && mem.capture_arena_->used_bytes() > before &&
+                mem.capture_arena_->used_bytes() <= mem.capture_arena_->capacity_bytes();
+    }
+    static bool capture_arena_bounded(const llama_memory_kvmem & mem, size_t tokens) {
+        return mem.capture_arena_ && mem.capture_max_tokens_ == tokens &&
+               mem.capture_tokens_used_ <= tokens &&
+               mem.capture_arena_->used_bytes() <= mem.capture_arena_->capacity_bytes() &&
+               mem.pos_queue_.capacity() >= tokens;
+    }
+    static bool capture_arena_unpublished(const llama_memory_kvmem & mem) {
+        return !mem.capture_arena_ && mem.pos_queue_.empty();
+    }
+    static bool capture_tokens_complete(const llama_memory_kvmem & mem, size_t tokens) {
+        return mem.capture_tokens_used_ == tokens;
+    }
     static std::vector<kvmem::HistoricalKvHandle> active_handles(const llama_memory_kvmem & mem) {
         return mem.historical_active_ ? mem.historical_active_->handles() :
                                         std::vector<kvmem::HistoricalKvHandle>{};
@@ -1430,6 +1457,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 mem.runtime().store().allocated_bytes() == table_bytes &&
                 !mem.runtime().historical_shadow_directory().size() &&
                 !mem.get_kv()->get_cells(0).index_status().reserved &&
+                kvmem_transfer_test_access::capture_arena_unpublished(mem) &&
                 kvmem_transfer_test_access::execution_storage_empty(mem),
                 "real request preparation failure published an owner or retained workspace");
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
@@ -1442,6 +1470,8 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     require(mem.get_kv()->get_cells(0).index_status().reserved &&
             cell_nodes == size_t(mem.get_kv()->get_cells(0).size()) * 2,
             "real request did not reserve both cell indexes");
+    require(kvmem_transfer_test_access::capture_arena_bounded(mem, 163),
+            "real request did not reserve capture positions and ranges");
     const auto packed_workspace = kvmem_transfer_test_access::packed_workspace(mem);
     require(packed_workspace.capacity >= 2 * KVMEM_CAPTURE_MAX_JOBS && packed_workspace.fallback_bytes,
             "real request did not prepare both queues and fallback");
@@ -1466,6 +1496,8 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 "real capture reallocated a prepared queue or fallback buffer");
         require(mem.runtime().store().allocated_bytes() == table_bytes,
                 "real capture grew the prepared dense block table");
+        require(kvmem_transfer_test_access::capture_arena_bounded(mem, 163),
+                "real capture exceeded its admitted position/range arena");
         require(kvmem_transfer_test_access::execution_buffers(mem) == execution_buffers &&
                 kvmem_transfer_test_access::execution_bytes(mem) == execution_bytes,
                 "real capture changed prepared active or cell scratch storage");
@@ -1498,8 +1530,17 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
             }
         }
     };
+    bool copied_capture = false;
+    const bool check_capture_copy = retirement == RetirementPoint::None && !saturated_queue && !layout_case;
+    if (check_capture_copy) kvmem_transfer_test_access::on_submission(mem, [&] {
+        copied_capture = kvmem_transfer_test_access::capture_copy_without_cpp_allocation(mem);
+    });
     uint32_t position = 0;
     execute(tokens.data(), 48);
+    if (check_capture_copy) {
+        kvmem_transfer_test_access::on_submission(mem, {});
+        require(copied_capture, "actual capture batch copy allocated outside its prepared arena");
+    }
     position += 48;
     if (layout_case == 1) {
         const auto repository = kvmem_transfer_test_access::capture_repository(mem);
@@ -1829,6 +1870,9 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         cold |= mem.store().blocks()[expected.id].gpu_slot < 0;
     }
     require(cold && mem.store_n_tokens() == 163, "real capture did not exercise GPU eviction");
+    require(kvmem_transfer_test_access::capture_arena_bounded(mem, 163) &&
+            kvmem_transfer_test_access::capture_tokens_complete(mem, 163),
+            "real capture did not account for every executed position");
     if (stageout_fault) {
         require(fault.fired && fault.drains, "model did not execute the selected stageout failure path");
         std::printf("PASS real model stageout recovery: point=%s, %zu layer spans byte-equal, full request completed\n",

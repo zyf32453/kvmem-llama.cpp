@@ -7,6 +7,7 @@
 #include "kvmem/kvmem_runtime.hpp"
 #include "kvmem/historical_kv_cleanup.hpp"
 #include "kvmem/historical_kv_active_set.hpp"
+#include "kvmem/fixed_byte_arena.hpp"
 #include "kvmem/raw_kv_store.hpp"
 #include "kvmem/rope.hpp"
 
@@ -20,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 struct llama_model;
@@ -403,7 +405,7 @@ private:
                                          size_t nb0, size_t nb1, size_t nb2,
                                          std::vector<uint16_t> & out);
     struct CaptureBatch;
-    CaptureBatch capture_batch(const std::vector<llama_pos> & positions) const;
+    CaptureBatch capture_batch(const llama_pos * positions, size_t count);
     // Uses the producer and GPU source captured before execution. Only the
     // accepted prefix of this executed batch may enter the host payload.
     void harvest_captured_packed(const CaptureBatch & batch, uint32_t n_keep);
@@ -585,12 +587,30 @@ private:
         std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
     };
     struct CaptureBatch {
-        std::vector<llama_pos> positions;
-        std::vector<MeanWriteRange> ranges;
+        // Keep the arena alive through asynchronous copies. Destroy vectors
+        // first so their allocators never refer to an already freed arena.
+        std::shared_ptr<kvmem::FixedByteArena> arena;
+        std::vector<llama_pos, kvmem::FixedArenaAllocator<llama_pos>> positions;
+        std::vector<MeanWriteRange, kvmem::FixedArenaAllocator<MeanWriteRange>> ranges;
+        CaptureBatch() = default;
+        explicit CaptureBatch(std::shared_ptr<kvmem::FixedByteArena> prepared)
+            : arena(std::move(prepared)), positions(kvmem::FixedArenaAllocator<llama_pos>(arena.get())),
+              ranges(kvmem::FixedArenaAllocator<MeanWriteRange>(arena.get())) {}
+        CaptureBatch(const CaptureBatch &) = default;
+        CaptureBatch(CaptureBatch &&) noexcept = default;
+        CaptureBatch & operator=(CaptureBatch other) noexcept(false) { swap(other); return *this; }
+        void swap(CaptureBatch & other) noexcept {
+            positions.swap(other.positions);
+            ranges.swap(other.ranges);
+            arena.swap(other.arena);
+        }
     };
     // Positions and writer identity are captured together before model work.
     // Async workers consume their own batch, never a current directory lookup.
     std::vector<CaptureBatch> pos_queue_;
+    std::shared_ptr<kvmem::FixedByteArena> capture_arena_;
+    size_t capture_max_tokens_ = 0;
+    size_t capture_tokens_used_ = 0;
     CaptureBatch cur_capture_; // synchronous fallback only
     struct CaptureNode {
         ggml_tensor * t = nullptr;
