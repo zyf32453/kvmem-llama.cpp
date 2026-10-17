@@ -20,6 +20,7 @@ bool same_handle(HistoricalKvHandle a, HistoricalKvHandle b) {
 bool same_span(const HistoricalKvShadowDirectory::Binding & entry,
                const KvMemBlock & block) {
     return entry.block_id == block.block_id &&
+           entry.logical_id == block.logical_id &&
            entry.original_begin == block.orig_pos_start &&
            entry.valid_tokens == block.n_tokens;
 }
@@ -32,6 +33,7 @@ struct HistoricalKvShadowDirectory::AppendReservation::Impl {
     std::shared_ptr<HistoricalKvRepository> repository;
     std::shared_ptr<HistoricalKvRawStore> storage;
     uint32_t limit = 0, used = 0, block_tokens = 0;
+    uint64_t last_logical_id = 0;
     bool installed = false;
     std::map<uint32_t, Entry> nodes;
     std::vector<Producer> contexts;
@@ -105,6 +107,7 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
         writers.size() > producers.capacity() || store.blocks_.capacity() < r.limit) return false;
     r.pending.clear();
     uint64_t position = store.total_tokens();
+    uint64_t previous_logical_id = r.last_logical_id;
     for (size_t i = 0; i < writers.size(); ++i) {
         const uint32_t id = r.used + uint32_t(i);
         const auto & writer = writers[i];
@@ -114,16 +117,19 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
         if (node == r.nodes.end() || entries_.count(id) || !context || context->writer_ ||
             !repository->owns_writer(writer) || !meta ||
             (meta->life != HistoricalKvLife::Writing && meta->life != HistoricalKvLife::Retired) ||
-            meta->logical_id != id || meta->original_begin != position || !meta->valid_tokens ||
+            ((r.used || i) && meta->logical_id <= previous_logical_id) ||
+            meta->original_begin != position || !meta->valid_tokens ||
             meta->valid_tokens > r.block_tokens || position + meta->valid_tokens > UINT32_MAX) return false;
         const auto payload = storage->inspect(*repository, writer.handle());
         if (!payload || payload->original_begin != position || payload->valid_tokens != meta->valid_tokens)
             return false;
-        node->second.binding = {id, writer.handle(), position, meta->valid_tokens, {}};
+        node->second.binding = {id, meta->logical_id, writer.handle(), position, meta->valid_tokens, {}};
         KvMemBlock block;
-        block.block_id = id; block.orig_pos_start = uint32_t(position);
+        block.block_id = id; block.logical_id = meta->logical_id;
+        block.orig_pos_start = uint32_t(position);
         block.n_tokens = meta->valid_tokens; block.baked_pos = int64_t(position);
         r.pending.push_back(block);
+        previous_logical_id = meta->logical_id;
         position += meta->valid_tokens;
     }
     // Validation above changes only private records. Below, integer-key map
@@ -139,6 +145,7 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
     store.blocks_.insert(store.blocks_.end(), r.pending.begin(), r.pending.end());
     store.total_tokens_ = uint32_t(position);
     r.used += uint32_t(writers.size());
+    if (!writers.empty()) r.last_logical_id = previous_logical_id;
     return true;
 }
 
@@ -191,7 +198,7 @@ bool HistoricalKvShadowDirectory::bind_block(
     // writer. Failed binding must not silently abandon a Writing generation.
     auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, storage));
     Entry entry;
-    entry.binding = {block_id, handle, block.orig_pos_start,
+    entry.binding = {block_id, meta->logical_id, handle, block.orig_pos_start,
                      block.n_tokens, {}};
     entry.producer = context;
     entry.storage = std::move(storage);
@@ -247,7 +254,7 @@ bool HistoricalKvShadowDirectory::append_blocks(
             payload->valid_tokens != meta->valid_tokens) return false;
         auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, storage));
         Entry entry;
-        entry.binding = {id, writer.handle(), position, meta->valid_tokens, {}};
+        entry.binding = {id, meta->logical_id, writer.handle(), position, meta->valid_tokens, {}};
         entry.producer = context;
         entry.storage = storage;
         contexts.push_back(std::move(context));
@@ -256,6 +263,7 @@ bool HistoricalKvShadowDirectory::append_blocks(
         pending.emplace(id, std::move(entry));
         KvMemBlock block;
         block.block_id = id;
+        block.logical_id = meta->logical_id;
         block.orig_pos_start = static_cast<uint32_t>(position);
         block.n_tokens = meta->valid_tokens;
         block.baked_pos = static_cast<int64_t>(position);
@@ -293,6 +301,7 @@ HistoricalKvShadowDirectory::observe(uint32_t block_id) const {
     if (it == entries_.end()) return {};
     const auto & entry = it->second;
     return {entry.state, entry.binding.handle, entry.repository_id,
+            entry.binding.logical_id,
             entry.binding.original_begin, entry.binding.valid_tokens};
 }
 

@@ -287,6 +287,7 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
     while (remaining > 0) {
         KvMemBlock b;
         b.block_id = static_cast<uint32_t>(blocks_.size());
+        b.logical_id = b.block_id;
         b.orig_pos_start = total_tokens_;
         b.n_tokens = std::min(bt, remaining);
         b.baked_pos = static_cast<int64_t>(b.orig_pos_start);  // baked at true pos after prefill

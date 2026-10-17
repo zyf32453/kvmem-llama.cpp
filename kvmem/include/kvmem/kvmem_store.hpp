@@ -38,7 +38,8 @@ enum class KvTier : uint8_t { GPU = 0, CPU = 1, SSD = 2 };
 // has KV in every attention layer). Physical storage handles per tier are
 // added in the tiering task (#41); v1 tracks logical placement + remap state.
 struct KvMemBlock {
-    uint32_t block_id = 0;          // dense index in append order (0,1,2,...)
+    uint32_t block_id = 0;          // current table index (dense in the legacy path)
+    uint64_t logical_id = 0;        // stable historical identity, separate from the table index
     uint32_t orig_pos_start = 0;    // first original token position in block
     uint32_t n_tokens = 0;          // tokens in this block (<= block_tokens)
     KvTier   tier = KvTier::GPU;    // active copy; stage-out may retain clean copies

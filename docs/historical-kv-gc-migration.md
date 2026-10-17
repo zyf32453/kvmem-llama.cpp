@@ -507,6 +507,14 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 
 ## 剩余生产接入与完整验收
 
+### 逻辑身份与元数据表下标分离（2026-10-17）
+
+此前预约追加要求 repository 的 `logical_id` 等于 `KvMemStore` 的稠密 `block_id`。即使物理 repository/RAM 槽位已经按代回收，后续新代仍无法沿用一个旧表位置而拥有独立身份。本轮给块记录和 shadow directory 绑定增加 64 位 `logical_id`，预约追加按 repository 元数据写入它，并要求跨批次严格递增；`block_id` 继续作为现有表下标。旧式追加及单块绑定仍沿用 `logical_id == block_id`，保持现有选择器和适配器行为。绑定有效性检查同时比较逻辑身份，避免表项被替换后误认旧代。
+
+测试用表下标 0、1 搭配逻辑身份 1000、1001 成功登记，倒序身份 999 在发布前被拒绝且不消耗 writer 或表容量。隔离远程宿主 CTest **27/27**、相关 ASan/UBSan **3/3**、TSan **3/3**、真实 GGUF/CUDA 模型 **35/35** 及 backend guard 均通过。recency/RAM delete 实际推理完成 356-token 输入、8-token 输出，`proposed=committed=reclaimed=6`，policy/worker failure 为 0；原始日志以 `logical-id-` 开头，位于远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`。
+
+这是后续循环复用表项的身份准备，**尚未实现**生产 `KvMemStore::blocks_` 的槽位复用、长序列位置映射或跨请求接纳。当前完整生产请求的追加上界和单请求限制仍然存在，不能据此称 P4 的 10 倍容量长轨迹已经完成。
+
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；仍需接入 server、多请求生命周期及错误取消。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。

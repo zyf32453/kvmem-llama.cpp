@@ -82,6 +82,7 @@ public:
 
     struct Binding {
         uint32_t block_id = 0;
+        uint64_t logical_id = 0;
         HistoricalKvHandle handle;
         uint64_t original_begin = 0;
         uint32_t valid_tokens = 0;
@@ -94,6 +95,7 @@ public:
         State state = State::Unmanaged;
         HistoricalKvHandle handle{};
         uint64_t repository_id = 0;
+        uint64_t logical_id = 0;
         uint64_t original_begin = 0;
         uint32_t valid_tokens = 0;
     };

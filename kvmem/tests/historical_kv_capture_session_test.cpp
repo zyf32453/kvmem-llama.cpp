@@ -290,8 +290,10 @@ static void reserved_metadata_batch_is_atomic() {
     check(reservation && !other.install_historical_metadata(*reservation) &&
           runtime.install_historical_metadata(*reservation), "metadata ownership validation failed");
     const auto table_bytes = runtime.store().allocated_bytes();
-    auto write = [&](uint32_t id, uint32_t begin, uint32_t count) {
-        auto writer = repo->begin_write(id, begin, count, id + 1, 0,
+    auto write = [&](uint32_t id, uint32_t begin, uint32_t count,
+                     uint64_t logical_id = UINT64_MAX) {
+        auto writer = repo->begin_write(logical_id == UINT64_MAX ? 1000 + id : logical_id,
+            begin, count, id + 1, 0,
             [weak = std::weak_ptr<HistoricalKvRepository>(repo), storage](HistoricalKvHandle handle) {
                 auto owner = weak.lock();
                 return owner && storage->release(*owner, handle).code == HistoricalKvRawStore::ReleaseCode::Released;
@@ -314,6 +316,20 @@ static void reserved_metadata_batch_is_atomic() {
     check(repo->retire(bad) == HistoricalKvRepository::RetireResult::Committed, "bad writer retirement failed");
     writers[1].reset();
     check(repo->try_reclaim(bad) == HistoricalKvRepository::ReclaimResult::Complete, "bad writer cleanup failed");
+    writers[1] = write(1, 3, 2, 999);
+    allocation_budget = 0;
+    const bool out_of_order = runtime.register_historical_append(
+        repo, storage, writers, producers, reservation.get());
+    allocation_budget = -1;
+    check(!out_of_order && writers[0] && writers[1] && producers.empty() &&
+          reservation->remaining() == 2 && !runtime.store().block_count(),
+          "reserved append accepted a nonmonotonic logical identity");
+    const auto old_identity = writers[1].handle();
+    check(repo->retire(old_identity) == HistoricalKvRepository::RetireResult::Committed,
+          "nonmonotonic writer retirement failed");
+    writers[1].reset();
+    check(repo->try_reclaim(old_identity) == HistoricalKvRepository::ReclaimResult::Complete,
+          "nonmonotonic writer cleanup failed");
     writers[1] = write(1, 3, 2);
     std::vector<HistoricalKvShadowDirectory::Producer> no_room;
     check(!runtime.register_historical_append(repo, storage, writers, no_room, reservation.get()) &&
@@ -327,6 +343,12 @@ static void reserved_metadata_batch_is_atomic() {
     check(appended && !writers[0] && !writers[1] && !reservation->remaining() &&
           runtime.store().total_tokens() == 5 && runtime.store().allocated_bytes() == table_bytes,
           "reserved retry failed or grew metadata");
+    check(runtime.store().blocks()[0].block_id == 0 &&
+          runtime.store().blocks()[0].logical_id == 1000 &&
+          runtime.store().blocks()[1].block_id == 1 &&
+          runtime.store().blocks()[1].logical_id == 1001 &&
+          runtime.historical_shadow_directory().observe(1).logical_id == 1001,
+          "reserved metadata still conflated logical identity with table index");
     auto late = producers[1];
     complete(producers[0], 3);
     producers.clear();
