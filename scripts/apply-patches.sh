@@ -9,6 +9,7 @@ GDN_OUTPUT="$ROOT/patches/gdn-output-fusion.patch"
 GRAPH_REACTIVATION="$ROOT/patches/cuda-graph-reactivation.patch"
 RDNA2_FATTN="$ROOT/patches/0005-hip-rdna2-quantized-kv-fa-vec.patch"
 QWEN3MOE_CAPTURE="$ROOT/patches/0006-qwen3moe-capture.patch"
+HISTORICAL_ACTIVE="$ROOT/patches/0007-historical-active-hook.patch"
 BUDGET_UPGRADE="$ROOT/patches/reasoning-budget-upgrade.patch"
 REPLAY_UPGRADE="$ROOT/patches/replayssm-upgrade.patch"
 UPGRADE="$ROOT/patches/multimodal-upgrade.patch"
@@ -93,4 +94,12 @@ else
     git apply --ignore-space-change --check "$QWEN3MOE_CAPTURE"
     git apply --ignore-space-change "$QWEN3MOE_CAPTURE"
     echo "applied Qwen3 MoE Q/K/V capture patch"
+fi
+
+if git apply --reverse --check "$HISTORICAL_ACTIVE" 2>/dev/null; then
+    echo "historical active hook already applied"
+else
+    git apply --check "$HISTORICAL_ACTIVE"
+    git apply "$HISTORICAL_ACTIVE"
+    echo "applied historical active admission hook"
 fi

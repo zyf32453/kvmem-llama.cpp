@@ -2,6 +2,7 @@
 #include "llama-memory-kvmem.h"
 #include "kvmem/historical_kv_raw_store.hpp"
 #include "kvmem/historical_kv_capture_session.hpp"
+#include "kvmem/historical_kv_active_set.hpp"
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-memory-kvmem-mtp.h"
 
@@ -1108,7 +1109,7 @@ bool llama_memory_kvmem::finish_historical_capture() {
             return false;
         }
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish mode=off blocks=%u live=%u references=0 rows=%u payload_bytes=%llu\n",
-            historical_capture_->created_blocks(), historical_capture_->created_blocks(), store_n_tokens(),
+            historical_capture_->created_blocks(), historical_capture_->live_blocks_at_finish(), store_n_tokens(),
             (unsigned long long) historical_capture_->payload_bytes());
         return true;
     } catch (const std::exception & e) {
@@ -2572,6 +2573,92 @@ bool llama_memory_kvmem::prepare_ubatches(
     return false;
 }
 
+bool llama_memory_kvmem::begin_active_ubatch(
+        uint32_t n_tokens, const llama_pos * logical_positions) {
+    if (!historical_capture_) return true;
+    const auto reject = [&](const char * reason, uint32_t id = UINT32_MAX) {
+        LLAMA_LOG_ERROR("historical active admission: %s block=%u pos=%d tokens=%u\n",
+                reason, id, logical_positions ? logical_positions[0] : -1, n_tokens);
+        return false;
+    };
+    if (historical_active_ || !n_tokens || !logical_positions || logical_positions[0] < 0 ||
+        uint64_t(logical_positions[0]) + n_tokens > uint64_t(INT32_MAX))
+        return reject("invalid or overlapping active");
+    const uint64_t current_begin = uint64_t(logical_positions[0]);
+    const uint64_t current_end = current_begin + n_tokens;
+    for (uint32_t i = 1; i < n_tokens; ++i)
+        if (logical_positions[i] < 0 ||
+            uint64_t(logical_positions[i]) != current_begin + i)
+            return reject("noncontiguous logical positions");
+
+    auto repository = historical_capture_->repository();
+    const auto & directory = runtime_->historical_shadow_directory();
+    auto & store = runtime_->store();
+    std::vector<kvmem::HistoricalKvActiveRequest> requested;
+    std::vector<uint32_t> requested_ids;
+    std::vector<uint32_t> remove_ids;
+    requested.reserve(n_slots_);
+    requested_ids.reserve(n_slots_);
+    remove_ids.reserve(n_slots_);
+    for (const auto & block : store.blocks()) {
+        if (block.gpu_slot < 0 || !gpu_kv_already_resident(block.block_id)) continue;
+        // The request's producer already owns the current write range. These
+        // newly applied cells are not an old historical view being reselected.
+        if (uint64_t(block.orig_pos_end()) > current_begin &&
+            uint64_t(block.orig_pos_start) < current_end) continue;
+        const auto observation = directory.observe(block.block_id);
+        if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged)
+            return reject("unmanaged resident history", block.block_id);
+        if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Bound) {
+            const auto meta = repository->inspect(observation.handle);
+            if (meta && meta->life == kvmem::HistoricalKvLife::Live) {
+                requested.push_back({observation.handle, false});
+                requested_ids.push_back(block.block_id);
+                continue;
+            }
+            if (meta && meta->life == kvmem::HistoricalKvLife::Writing)
+                return reject("older writer not published", block.block_id);
+        }
+        remove_ids.push_back(block.block_id);
+    }
+    auto admitted = kvmem::HistoricalKvActiveSet::acquire(repository, requested);
+    if (!admitted) return reject("active set acquire failed");
+    const auto & handles = admitted.active->handles();
+    for (size_t i = 0; i < requested.size(); ++i) {
+        const auto target = requested[i].handle;
+        const bool permitted = std::any_of(handles.begin(), handles.end(),
+            [&](kvmem::HistoricalKvHandle handle) {
+                return handle.incarnation == target.incarnation && handle.slot == target.slot &&
+                       handle.generation == target.generation;
+            });
+        if (!permitted) remove_ids.push_back(requested_ids[i]);
+    }
+    for (uint32_t id : remove_ids) {
+        const auto block = store.blocks()[id];
+        if (!store.forget_retired_gpu_residency(id))
+            return reject("retired GPU residency changed", id);
+        kv_->seq_rm_logical(0, static_cast<llama_pos>(block.orig_pos_start),
+                            static_cast<llama_pos>(block.orig_pos_end()));
+        free_slot(block.gpu_slot);
+        ++attention_epoch_;
+        ++historical_active_skips_;
+        if (trace_) kvmem_diag("KVMEM_TRACE historical_active_skip block=%u slot=%d\n",
+                               id, block.gpu_slot);
+    }
+    historical_active_ = std::move(admitted.active);
+    return true;
+}
+
+void llama_memory_kvmem::mark_active_submission() {
+    if (historical_active_ &&
+        !historical_active_->mark_execution_submitted(historical_capture_->next_use_sequence()))
+        throw std::runtime_error("historical active submission could not record LRU use");
+}
+
+void llama_memory_kvmem::complete_active_ubatch() noexcept {
+    historical_active_.reset();
+}
+
 llama_memory_context_ptr llama_memory_kvmem::init_batch(
         llama_batch_allocr & balloc,
         uint32_t n_ubatch,
@@ -3482,6 +3569,11 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         // Recency has no Mean-K graph nodes. Consume the executed batch after
         // its packed jobs captured ownership, including between microbatches.
         if (managed_packed) pos_queue_.erase(pos_queue_.begin());
+        if (managed_packed && historical_capture_) {
+            // The next microbatch may attend to this one. Publish its Host
+            // payload before that new active boundary can acquire a Live lease.
+            harvest_gpu_v_commit();
+        }
         harvest_flush();
         if (sched) {
             ggml_backend_sched_synchronize(sched);

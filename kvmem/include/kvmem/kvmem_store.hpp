@@ -471,6 +471,10 @@ public:
                         int32_t cpu_slot = -1,
                         int32_t nvme_slot = -1);
     void set_block_gpu_slot(uint32_t block_id, int32_t gpu_slot);
+    // Foreground adapter calls this only after its old device use completed
+    // and an exact managed generation can no longer obtain new execution
+    // permission. The adapter separately clears cells and returns the GPU slot.
+    bool forget_retired_gpu_residency(uint32_t block_id);
     // Inclusive-copy metadata used by stage-out. These do not change which tier is
     // active, so evicting a CPU cache copy cannot accidentally mark a still-live
     // GPU block cold.

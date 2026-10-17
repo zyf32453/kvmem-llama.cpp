@@ -758,7 +758,8 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
 }
 
 // Real graph outputs, not fixture-written GPU tensors or manual bindings.
-static void check_request_capture(llama_context * ctx, llama_model * model, llama_memory_kvmem & mem) {
+static void check_request_capture(llama_context * ctx, llama_model * model,
+                                  llama_memory_kvmem & mem, bool retire_during_request = false) {
     std::string text;
     for (unsigned i = 0; i < 30; ++i) text += "The river passes a small village. The bridge is made of stone. ";
     const auto * vocab = llama_model_get_vocab(model);
@@ -809,7 +810,71 @@ static void check_request_capture(llama_context * ctx, llama_model * model, llam
         }
     };
     uint32_t position = 0;
-    for (uint32_t chunk : {48u, 32u, 48u, 32u}) {
+    execute(tokens.data(), 48);
+    position += 48;
+    uint32_t retired_during_request = UINT32_MAX;
+    if (retire_during_request) {
+        auto repository = kvmem_transfer_test_access::capture_repository(mem);
+        auto storage = kvmem_transfer_test_access::capture_storage(mem);
+        require(repository && storage, "running GC fixture has no capture owner");
+        const auto before_retire = repository->snapshot();
+        require(std::any_of(before_retire.begin(), before_retire.end(),
+                    [](const kvmem::HistoricalKvBlockMeta & block) {
+                        return block.life == kvmem::HistoricalKvLife::Live &&
+                               block.last_use_seq > block.birth_seq;
+                    }), "real submitted model computation did not update historical LRU use");
+        const auto & target = mem.store().blocks().back();
+        retired_during_request = target.block_id;
+        require(target.gpu_slot >= 0, "running GC fixture target is not GPU-resident");
+        const auto & directory = mem.runtime().historical_shadow_directory();
+        const auto handle = directory.observe(target.block_id).handle;
+        auto old_reader = directory.acquire_read(target.block_id);
+        require(bool(old_reader), "running GC fixture has no old reader");
+        const auto il = mem.raw().config().historical_gc_attention_layers.front();
+        const auto old_layer = old_reader.storage->read_layer(old_reader.lease, handle, il);
+        require(bool(old_layer), "running GC fixture has no original Host payload");
+        std::vector<uint8_t> gpu_before(old_layer->packed_k.size());
+        std::vector<uint8_t> gpu_after(gpu_before.size());
+        auto * gpu_tensor = mem.get_kv()->get_k_storage(il);
+        const auto gpu_offset = size_t(target.gpu_slot) * mem.block_tokens() * gpu_tensor->nb[1];
+        ggml_backend_tensor_get(gpu_tensor, gpu_before.data(), gpu_offset, gpu_before.size());
+        const auto bytes_before = storage->allocated_payload_bytes();
+        require(repository->retire(handle) == kvmem::HistoricalKvRepository::RetireResult::Committed &&
+                !directory.acquire_read(target.block_id),
+                "running GC did not close the next CPU read after retirement");
+        ggml_backend_tensor_get(gpu_tensor, gpu_after.data(), gpu_offset, gpu_after.size());
+        require(gpu_after == gpu_before,
+                "logical retirement changed an already submitted GPU payload");
+        require(repository->try_reclaim(handle) == kvmem::HistoricalKvRepository::ReclaimResult::Deferred,
+                "running GC released a block while the old reader was active");
+        kvmem::HistoricalKvGc::Config cfg;
+        cfg.mode = kvmem::HistoricalKvGc::Mode::Delete;
+        cfg.ready_low = cfg.ready_high = 0; // Only progress this explicit retirement.
+        cfg.scan_blocks = cfg.reclaim_blocks = repository->capacity();
+        cfg.batch_blocks = 1;
+        cfg.poll_ms = 1;
+        kvmem::HistoricalKvGc gc(repository,
+            std::make_unique<kvmem::HistoricalKvLruPolicy>(repository->capacity()), cfg);
+        gc.start();
+        const auto skips_before = mem.historical_active_skips();
+        execute(tokens.data() + position, 32);
+        position += 32;
+        require(mem.historical_active_skips() > skips_before,
+                "next real model active did not exclude the retired resident GPU block");
+        old_reader = {};
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!repository->reclaim_completed(handle, repository->repository_id()) &&
+                std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        gc.stop();
+        require(repository->reclaim_completed(handle, repository->repository_id()) &&
+                storage->allocated_payload_bytes() < bytes_before,
+                "running GC did not release retired real-model CPU payload");
+    } else {
+        execute(tokens.data() + position, 32);
+        position += 32;
+    }
+    for (uint32_t chunk : {48u, 32u}) {
         execute(tokens.data() + position, chunk);
         position += chunk;
     }
@@ -823,6 +888,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model, llam
     require(llama_kvmem_historical_capture_finish(), "real managed request failed completion verification");
     bool cold = false;
     for (const auto & expected : saved) {
+        if (expected.id == retired_during_request) continue;
         const auto & directory = mem.runtime().historical_shadow_directory();
         const auto binding = directory.find(expected.id);
         auto read = directory.acquire_read(expected.id);
@@ -832,6 +898,11 @@ static void check_request_capture(llama_context * ctx, llama_model * model, llam
         cold |= mem.store().blocks()[expected.id].gpu_slot < 0;
     }
     require(cold && mem.store_n_tokens() == 163, "real capture did not exercise GPU eviction");
+    if (retire_during_request) {
+        std::printf("PASS real model active retirement: type=%s, skipped GPU-resident historical block=%u, old reader delayed Host release, request completed\n",
+                ggml_type_name(mem.type_k()), retired_during_request);
+        return;
+    }
     // Let LRU reclaim real graph-produced allocations. With all model
     // work drained, the background manager must return Host bytes and Ready
     // slots while leaving the adapter's existing GPU cells untouched.
@@ -925,13 +996,13 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u}) {
+        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u}) {
             if (scenario >= 3) {
                 kp.method = 0;
                 kp.budget = 96;
                 llama_kvmem_set_params(&kp);
                 cp.n_ubatch = 16;
-                if (scenario == 4) cp.type_k = cp.type_v = GGML_TYPE_Q8_0;
+                cp.type_k = cp.type_v = scenario == 4 ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
             }
             std::unique_ptr<llama_context, decltype(&llama_free)> ctx(
                 llama_init_from_model(model.get(), cp), llama_free);
@@ -940,7 +1011,7 @@ int main(int argc, char ** argv) {
             if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
-            if (scenario >= 3) check_request_capture(ctx.get(), model.get(), *mem);
+            if (scenario >= 3) check_request_capture(ctx.get(), model.get(), *mem, scenario == 5);
             else if (scenario == 2) check_partial_rollover(*mem);
             else if (scenario == 1) check_managed_async_harvest(*mem);
             else {

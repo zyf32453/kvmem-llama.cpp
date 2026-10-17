@@ -75,6 +75,32 @@ static void quotas_and_handoff() {
     check(bool(access), "published identity unreadable after producer exit");
 }
 
+static void retired_blocks_do_not_invalidate_completed_request() {
+    KvMemRuntime runtime(runtime_config());
+    auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, demand(8, 0, 1));
+    check(session && session->append(8), "retired completion fixture append failed");
+    auto first = runtime.historical_shadow_directory().find(0)->writer_context;
+    auto second = runtime.historical_shadow_directory().find(1)->writer_context;
+    const auto first_handle = first->handle();
+    const auto second_handle = second->handle();
+    session->producers_captured();
+    complete(first, 4);
+    complete(second, 4);
+    first.reset();
+    second.reset();
+    check(session->end_input(), "retired completion fixture input remained open");
+    const auto repository = session->repository();
+    check(repository->retire(first_handle) == HistoricalKvRepository::RetireResult::Committed &&
+          repository->retire(second_handle) == HistoricalKvRepository::RetireResult::Committed,
+          "completed historical block could not retire");
+    check(repository->try_reclaim(first_handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "first retired block did not reclaim");
+    check(session->finish() && session->payload_bytes() == 20,
+          "completed request rejected reclaimed or still-retired historical blocks");
+    check(repository->try_reclaim(second_handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          session->payload_bytes() == 0, "retired payload did not finish releasing after request");
+}
+
 static void boundary_limit() {
     KvMemRuntime runtime(runtime_config());
     auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, demand(9, 0, 1));
@@ -147,6 +173,7 @@ static void failures_are_atomic() {
 int main() {
     try {
         quotas_and_handoff();
+        retired_blocks_do_not_invalidate_completed_request();
         boundary_limit();
         cancelled_owner_keeps_tasks();
         failures_are_atomic();

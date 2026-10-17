@@ -23,7 +23,7 @@ struct llama_memory_params;
 struct ggml_tensor;
 class llama_memory_recurrent;
 class llama_memory_kvmem_mtp;
-namespace kvmem { class HistoricalKvCaptureSession; }
+namespace kvmem { class HistoricalKvCaptureSession; class HistoricalKvActiveSet; }
 
 // Bounded block-slot pool over a llama_kv_cache.
 //
@@ -101,6 +101,10 @@ public:
     bool capture_can_reuse(uint32_t n_tokens, uint32_t n_pos, const llama_pos * pos) const;
     uint64_t capture_stamp() const;
     void harvest_pending(struct ggml_backend_sched * sched);
+    bool begin_active_ubatch(uint32_t n_tokens, const llama_pos * logical_positions);
+    void mark_active_submission();
+    void complete_active_ubatch() noexcept;
+    uint64_t historical_active_skips() const noexcept { return historical_active_skips_; }
     void harvest_flush();
     void harvest_perf_print_sum();
     void harvest_capture(struct ggml_tensor * t, int il, char which);
@@ -422,6 +426,8 @@ private:
     std::unique_ptr<kvmem::KvMemRuntime> runtime_;
     std::unique_ptr<kvmem::RawKvStore> raw_;
     std::unique_ptr<kvmem::HistoricalKvCaptureSession> historical_capture_;
+    std::unique_ptr<kvmem::HistoricalKvActiveSet> historical_active_;
+    uint64_t historical_active_skips_ = 0;
     std::vector<int32_t> free_slots_;
     struct RowPosition {
         std::array<llama_pos, 4> pos{};

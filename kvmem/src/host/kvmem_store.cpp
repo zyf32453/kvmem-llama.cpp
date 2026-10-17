@@ -392,6 +392,18 @@ void KvMemStore::set_block_gpu_slot(uint32_t block_id, int32_t gpu_slot) {
     blocks_[block_id].gpu_slot = gpu_slot;
 }
 
+bool KvMemStore::forget_retired_gpu_residency(uint32_t block_id) {
+    if (block_id >= block_count() || !historical_shadow_directory_ ||
+        historical_shadow_directory_->observe(block_id).state ==
+            HistoricalKvShadowDirectory::State::Unmanaged ||
+        is_live(block_id)) return false;
+    KvMemBlock & block = blocks_[block_id];
+    if (block.gpu_slot < 0 || block.cpu_slot >= 0 || block.nvme_slot >= 0) return false;
+    set_block_tier(block_id, KvTier::CPU);
+    block.in_working_set = false;
+    return true;
+}
+
 void KvMemStore::set_block_cpu_copy(uint32_t block_id, int32_t cpu_slot) {
     if (block_id >= block_count()) return;
     blocks_[block_id].cpu_slot = cpu_slot;

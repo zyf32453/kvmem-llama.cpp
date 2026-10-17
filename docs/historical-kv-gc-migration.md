@@ -174,6 +174,14 @@ GPU 验收在原有已知张量用例之外，新增真正调用 `llama_decode` 
 
 2026-10-17 补充了真实图数据进入新 LRU 回收器的端到端验证：上述 F16、Q8_0 两个模型场景在请求完成并排空设备任务后，对同一按句柄仓库启动后台 LRU，分别退休并物理归还 2 个真实历史块。F16 释放 **6,291,456 bytes**，Q8_0 释放 **3,342,336 bytes**；Ready 增加，已回收代拒绝新 CPU 读取，已有 GPU 工作集字节保持不变。测试使用真实模型自动采集的 payload，没有手工写入或绑定。它验证了真实数据的回收闭环，但删除发生在请求完成后；普通 CLI/server 仍未启动生产 GC，也尚未证明执行中的 active 许可、长期复用和已接纳请求的完整资源保证。GPU 原始日志保存在本地 `build-local/capture-session-validation/historical-real-gc-postrequest-test.log`，以及远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-real-gc-postrequest-test.log`。
 
+### 微批次执行许可与请求中退休（2026-10-17）
+
+托管 recency 的正常 `llama_decode` 在每个微批次应用 KV cell 后、构图前为仍驻留的历史块取得新的 `ExecLease`。已退休块不能借旧 GPU 槽绕过许可：适配器从后续 attention cell 视图移除该块并归还槽位；成功提交模型计算才更新这些获准块的 LRU `last_use`，许可持有到图同步与采集回调完成。无托管采集时该 hook 保持原路径。执行入口补丁为 `patches/0007-historical-active-hook.patch`。
+
+模型实测暴露了一个生产者时序：刚完成 GPU 计算的块可能仍在异步 packed K/V 的 Host 拷贝中，仓库状态仍是 `Writing`。首版受限采集模式在进入下一微批次前结算这批 packed 拷贝，确保该块已发布 `Live` 后才授予新的执行许可。这增加 Host 采集等待，尚未做稳定性能对照；后续可设计区分 GPU 已可执行与 CPU payload 已完整发布的许可，以恢复重叠，而不能直接把 `Writing` 当作 `Live` 放行。
+
+远程真实模型测试保留了原 F16、Q8_0 的请求后 LRU 回收检查，并新增 F16 请求中退休：第一段 48 token 之后退休一个当时 GPU 驻留的块，旧 CPU `ReadLease` 持有期间仓库拒绝物理释放，新 CPU 读立即关闭；继续第二段真实 `llama_decode` 时，新 active 跳过该块并从 GPU 工作集去掉它；旧读者退出后后台 worker 归还对应 Host payload，余下 160-token 输入和 3-token 生成正常完成。请求结束校验现在允许确实已退休、释放中或同代已回收的块，不再错误要求每个创建块仍为 `Live`。本地 capture-session 测试及远程五项相关宿主 CTest 均通过；隔离远程日志为 `historical-active-midrequest-gpu-test.log`。此用例的退休发生在两次 `llama_decode` 之间，**尚未验证退休与已提交的 GPU kernel 真正重叠**，也未证明普通 CLI/server 自动启动生产 GC。
+
 原始日志保存在远程隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-capture-session-*` 文件，并复制到本地 `build-local/capture-session-validation/`；最终逐层模型检查使用 `historical-capture-session-quant-gpu-test.log`。首次失败日志也保留。9 个变更源码/构建文件的本地与远程 SHA256 一致，远程原工作仓库未改动。
 
 ## 剩余生产接入与完整验收

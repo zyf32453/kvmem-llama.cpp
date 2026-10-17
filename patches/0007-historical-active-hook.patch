@@ -1,0 +1,15 @@
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -1409,1 +1409,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
++#if defined(LLAMA_KVMEM)
++    if (!llama_kvmem_begin_ubatch(ubatch.n_tokens,
++            ubatch.logical_pos ? ubatch.logical_pos : ubatch.pos,
++            gtype == LLM_GRAPH_TYPE_DECODER_MTP)) {
++        LLAMA_LOG_ERROR("%s: historical active admission failed\n", __func__);
++        ret = GGML_STATUS_FAILED;
++        return nullptr;
++    }
++#endif
++
+     static const bool decode_slots = [] {

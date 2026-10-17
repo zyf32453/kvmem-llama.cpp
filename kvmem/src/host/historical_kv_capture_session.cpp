@@ -29,6 +29,9 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_crea
         if (!ram) return {};
         result->reservation_ = std::move(ram);
         result->reserved_blocks_ = static_cast<uint32_t>(required);
+        // Birth sequences are the admitted slot ordinal + 1. Every actual
+        // model submission must sort after those stable initial LRU values.
+        result->last_use_sequence_ = required;
         result->input_remaining_ = demand.uncached_input_tokens;
         result->output_remaining_ = *demand.max_accepted_output_tokens;
         result->appends_remaining_ = demand.max_append_boundaries;
@@ -122,11 +125,20 @@ bool HistoricalKvCaptureSession::end_input() noexcept {
 
 bool HistoricalKvCaptureSession::finish() {
     if (failed_ || finished_ || input_ || !producers_.empty()) return false;
+    uint32_t live = 0;
     for (const auto handle : handles_) {
         const auto meta = repository_->inspect(handle);
-        if (!meta || meta->life != HistoricalKvLife::Live || meta->references) return false;
+        if (!meta) {
+            if (!repository_->reclaim_completed(handle, repository_->repository_id())) return false;
+            continue;
+        }
+        if (meta->references || (meta->life != HistoricalKvLife::Live &&
+                meta->life != HistoricalKvLife::Retired &&
+                meta->life != HistoricalKvLife::Releasing)) return false;
+        if (meta->life == HistoricalKvLife::Live) ++live;
     }
     reservation_.reset();
+    live_blocks_at_finish_ = live;
     finished_ = true;
     return true;
 }

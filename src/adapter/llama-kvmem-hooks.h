@@ -74,6 +74,12 @@ LLAMA_API void llama_kvmem_register_capture(struct ggml_tensor * t, int il, char
 // is_mtp: 1 when the llama_context building this graph is the MTP draft.
 // Trunk and MTP must not clear each other's capture pending.
 LLAMA_API void llama_kvmem_capture_on_new_graph(int is_mtp);
+// After applying a ubatch's new KV cells and before building its graph, obtain
+// fresh execution permission for historical cells still visible on the GPU.
+// A retired optional block is removed from this new attention view.
+LLAMA_API bool llama_kvmem_begin_ubatch(uint32_t n_tokens,
+                                        const llama_pos * logical_positions,
+                                        int is_mtp);
 LLAMA_API void llama_kvmem_harvest_ubatch(struct ggml_backend_sched * sched, int is_mtp);
 // True when this ubatch overlaps [query_begin, query_end) and Q nodes should
 // be present. n_pos is the per-token position stride (1 for 1-D RoPE).

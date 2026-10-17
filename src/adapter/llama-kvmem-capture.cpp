@@ -79,7 +79,9 @@ void kvmem_capture_harvest_ubatch(struct ggml_backend_sched * sched, int is_mtp)
         return;
     }
     if (kvmem_current_execution().memory) {
+        kvmem_current_execution().memory->mark_active_submission();
         kvmem_current_execution().memory->harvest_pending(sched);
+        kvmem_current_execution().memory->complete_active_ubatch();
     }
 }
 
@@ -130,6 +132,12 @@ void llama_kvmem_register_capture(struct ggml_tensor * t, int il, char which) {
 
 void llama_kvmem_capture_on_new_graph(int is_mtp) {
     kvmem_capture_on_new_graph(is_mtp);
+}
+
+bool llama_kvmem_begin_ubatch(uint32_t n_tokens,
+                              const llama_pos * logical_positions, int is_mtp) {
+    if (is_mtp || !kvmem_current_execution().memory) return true;
+    return kvmem_current_execution().memory->begin_active_ubatch(n_tokens, logical_positions);
 }
 
 void llama_kvmem_harvest_ubatch(struct ggml_backend_sched * sched, int is_mtp) {

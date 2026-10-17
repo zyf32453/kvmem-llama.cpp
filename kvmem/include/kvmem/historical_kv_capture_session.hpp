@@ -26,19 +26,22 @@ public:
     // Call only after EVERY ubatch for the append has captured its producer.
     void producers_captured() noexcept { producers_.clear(); }
     bool end_input() noexcept;
-    // Caller first drains graph, D2H and accumulators. Requires automatic
-    // publication and zero task references; returns unused private RAM credits.
+    // Caller first drains graph, D2H and accumulators. Remaining Live blocks
+    // must be published; blocks retired during the request may already be
+    // releasing or reclaimed. No task references may remain.
     bool finish();
     void fail() noexcept;
     bool failed() const noexcept { return failed_; }
     bool finished() const noexcept { return finished_; }
     uint32_t created_blocks() const noexcept { return static_cast<uint32_t>(handles_.size()); }
+    uint32_t live_blocks_at_finish() const noexcept { return live_blocks_at_finish_; }
     uint32_t reserved_blocks() const noexcept { return reserved_blocks_; }
     uint64_t payload_bytes() const noexcept { return storage_->allocated_payload_bytes(); }
     // The request owner may attach one GC manager to this exact repository.
     // Keeping these owners alive also keeps late release callbacks' target alive.
     std::shared_ptr<HistoricalKvRepository> repository() const noexcept { return repository_; }
     std::shared_ptr<HistoricalKvRawStore> storage() const noexcept { return storage_; }
+    uint64_t next_use_sequence() noexcept { return ++last_use_sequence_; }
     uint64_t input_remaining() const noexcept { return input_remaining_; }
     uint64_t output_remaining() const noexcept { return output_remaining_; }
     uint64_t appends_remaining() const noexcept { return appends_remaining_; }
@@ -54,7 +57,9 @@ private:
     std::vector<HistoricalKvShadowDirectory::Producer> producers_;
     std::vector<HistoricalKvHandle> handles_;
     uint64_t input_remaining_ = 0, output_remaining_ = 0, appends_remaining_ = 0;
+    uint64_t last_use_sequence_ = 0;
     uint32_t expected_rows_ = 0, expected_blocks_ = 0, reserved_blocks_ = 0;
+    uint32_t live_blocks_at_finish_ = 0;
     bool input_ = true, failed_ = false, finished_ = false;
 };
 
