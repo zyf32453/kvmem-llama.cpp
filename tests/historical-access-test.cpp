@@ -750,6 +750,88 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
     std::puts("PASS managed partial rollover: spans=[0,3),[3,8),[8,35), CPU slot reused, GPU unchanged");
 }
 
+// Real graph outputs, not fixture-written GPU tensors or manual bindings.
+static void check_request_capture(llama_context * ctx, llama_model * model, llama_memory_kvmem & mem) {
+    std::string text;
+    for (unsigned i = 0; i < 30; ++i) text += "The river passes a small village. The bridge is made of stone. ";
+    const auto * vocab = llama_model_get_vocab(model);
+    const int count = -llama_tokenize(vocab, text.c_str(), text.size(), nullptr, 0, true, true);
+    require(count >= 160, "real capture fixture needs enough prompt tokens");
+    std::vector<llama_token> tokens(count);
+    require(llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(), tokens.size(), true, true) == count,
+            "real capture prompt tokenization failed");
+    require(!llama_kvmem_historical_capture_begin(1, 160, 3, 7) && mem.store_n_tokens() == 0,
+            "insufficient capture reservation changed runtime");
+    require(llama_kvmem_historical_capture_begin(12, 160, 3, 7), "real request capture admission failed");
+    require(!llama_kvmem_historical_capture_begin(12, 160, 3, 7), "duplicate capture owner accepted");
+    struct Saved { uint32_t id, il; uint64_t k, v; };
+    std::vector<Saved> saved;
+    const auto hash = [](const std::vector<uint8_t> & bytes) {
+        uint64_t value = 14695981039346656037ull;
+        for (auto byte : bytes) value = (value ^ byte) * 1099511628211ull;
+        return value;
+    };
+    const auto execute = [&](llama_token * input, uint32_t n) {
+        const auto first = mem.store().block_count();
+        auto batch = llama_batch_get_one(input, n);
+        require(llama_decode(ctx, batch) == 0, "real managed graph failed");
+        llama_synchronize(ctx);
+        mem.harvest_flush();
+        kvmem_transfer_test_access::commit(mem);
+        for (uint32_t id = first; id < mem.store().block_count(); ++id) {
+            const auto & block = mem.store().blocks()[id];
+            const auto & dir = mem.runtime().historical_shadow_directory();
+            const auto binding = dir.find(id);
+            require(binding && !binding->writer_context && block.gpu_slot >= 0,
+                    "actual graph retained creation writer or lost incoming GPU slot");
+            auto access = dir.acquire_read(id);
+            require(bool(access), "actual graph did not automatically publish packed KV");
+            for (auto il : mem.raw().config().historical_gc_attention_layers) {
+                const auto layer = access.storage->read_layer(access.lease, binding->handle, il);
+                require(bool(layer), "actual graph CPU layer unavailable");
+                for (bool is_k : {true, false}) {
+                    auto * tensor = is_k ? mem.get_kv()->get_k_storage(il) : mem.get_kv()->get_v_storage(il);
+                    const auto & expected = is_k ? layer->packed_k : layer->packed_v;
+                    std::vector<uint8_t> gpu(expected.size());
+                    const size_t cell = size_t(block.gpu_slot) * mem.block_tokens();
+                    ggml_backend_tensor_get(tensor, gpu.data(), cell * tensor->nb[1], gpu.size());
+                    require(gpu == expected, "actual graph CPU payload differs from GPU output");
+                }
+                saved.push_back({id, il, hash(layer->packed_k), hash(layer->packed_v)});
+            }
+        }
+    };
+    uint32_t position = 0;
+    for (uint32_t chunk : {48u, 32u, 48u, 32u}) {
+        execute(tokens.data() + position, chunk);
+        position += chunk;
+    }
+    llama_kvmem_end_prefill_capture();
+    for (unsigned i = 0; i < 3; ++i) {
+        const auto * logits = llama_get_logits_ith(ctx, -1);
+        require(logits != nullptr, "real capture graph has no logits");
+        llama_token next = std::max_element(logits, logits + llama_vocab_n_tokens(vocab)) - logits;
+        execute(&next, 1);
+    }
+    require(llama_kvmem_historical_capture_finish(), "real managed request failed completion verification");
+    bool cold = false;
+    for (const auto & expected : saved) {
+        const auto & directory = mem.runtime().historical_shadow_directory();
+        const auto binding = directory.find(expected.id);
+        auto read = directory.acquire_read(expected.id);
+        const auto layer = read.storage->read_layer(read.lease, binding->handle, expected.il);
+        require(layer && hash(layer->packed_k) == expected.k && hash(layer->packed_v) == expected.v,
+                "GPU eviction/reuse changed captured CPU payload");
+        cold |= mem.store().blocks()[expected.id].gpu_slot < 0;
+    }
+    require(cold && mem.store_n_tokens() == 163, "real capture did not exercise GPU eviction");
+    auto extra = llama_batch_get_one(tokens.data(), 1);
+    require(llama_decode(ctx, extra) != 0 && mem.store_n_tokens() == 163,
+            "finished capture session accepted another append");
+    std::printf("PASS real model historical capture: type=%s, 160 input + 3 generated tokens, 16-token microbatches, %zu layer spans byte-equal, cold CPU payload preserved, deletion OFF\n",
+                ggml_type_name(mem.type_k()), saved.size());
+}
+
 int main(int argc, char ** argv) {
     if (argc != 2) {
         std::fprintf(stderr, "Usage: %s model.gguf (requires CUDA)\n", argv[0]);
@@ -777,7 +859,14 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario : {0u, 1u, 2u}) {
+        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u}) {
+            if (scenario >= 3) {
+                kp.method = 0;
+                kp.budget = 96;
+                llama_kvmem_set_params(&kp);
+                cp.n_ubatch = 16;
+                if (scenario == 4) cp.type_k = cp.type_v = GGML_TYPE_Q8_0;
+            }
             std::unique_ptr<llama_context, decltype(&llama_free)> ctx(
                 llama_init_from_model(model.get(), cp), llama_free);
             require(bool(ctx), "context init failed");
@@ -785,7 +874,8 @@ int main(int argc, char ** argv) {
             if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
-            if (scenario == 2) check_partial_rollover(*mem);
+            if (scenario >= 3) check_request_capture(ctx.get(), model.get(), *mem);
+            else if (scenario == 2) check_partial_rollover(*mem);
             else if (scenario == 1) check_managed_async_harvest(*mem);
             else {
                 check_mean_ranges(*mem);

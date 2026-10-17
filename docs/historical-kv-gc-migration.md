@@ -6,6 +6,8 @@
 
 本项目原有的 `PinnedKvTier` LRU 管理 CPU 缓存，session cache 管理整段会话；两者都不会删除任意 historical block。本次迁移已加入 Qwen3 的独立 CPU worker 和 `KvMemStore` 的可选逻辑块接口，但**未接入服务器的生产删除路径**。没有配置项会启动这套 worker；默认运行行为保持原样。下文记录了当前新增的仓库/策略解耦与受限的 RAM 物理释放接口；服务端的安全 lease、检查点失效和压力策略仍需完成后才能启用真实删除。
 
+2026-10-17 新增 CLI 的显式实验入口 `--kvmem-historical-capture N`：普通模型请求可以自动预约 RAM、创建按句柄历史块并完成 packed K/V 采集。它是**删除关闭的采集基线**，仅支持单请求、单 GPU、单序列文本、recency、flash attention、RAM；不启动 GC，不等于完整生产删除或整请求资源准入。默认不加该参数时仍走原路径。
+
 后续实施以导师的 `historical-kv-gc-implementation-lru-policy-template.md`（2026-10-15）为目标：策略可以退休 Writing、未封口、active 和在途块；机制只延后物理释放，不能以年龄、驻留或引用数否决退休。旧 `KvMemGc` 的保护/rescue 行为仅留作原始移植与回归参考，完整交付使用新的 repository/manager 协议。完整交付还要求长期元数据有界、真实请求预约和实际模型/agent 对照证据，不能用受限完整块测试替代这些要求。
 
 ## 2026-10-17 阶段进度
@@ -142,11 +144,41 @@ Mean-K、decode Mean-K 和 packed 分量每次成功写入后调用完整性发�
 2. `KvMemStore` 可在追加历史前挂接 GC；追加/截断/换层/IO 状态同步到 worker。top-k、prefill pressure、semantic group 与媒体约束在新目录中跳过已删除的块；显式要求的已删除块会失败，检查点可检查其必要前缀是否完整。
 3. 单测覆盖策略优先级、all-fit 分支不复活“洞”、旧目录仍可读、延迟释放，以及晚到 lease 撤销退休。普通构建不创建 worker，不会改变既有选块结果。
 
+### 有限请求的实际模型采集入口（2026-10-17）
+
+新增 `HistoricalKvCaptureSession`，把此前各自验证的 RAM 预约、固定 span 登记和 producer 交接接到正常请求。CLI 在分词和 batch 限制确定后，以输入长度、有限的 `-n` 和最坏追加次数申请真实仓库槽位与 full-slot payload；容量不足在首次 decode 前拒绝。输入与输出额度分别扣减，不能把未用输出额度冒充输入额度；每次非空追加扣减一次边界额度。结束输入前必须用完输入额度，允许 EOS 提前结束输出。短块不借用上代尾部，身份与原位置保持不变。
+
+`prepare_working_set` 消费预约并登记新身份；`prepare_ubatches` 为全部微批次捕获身份后归还请求持有的 producer。recency 没有 Mean-K 图节点，因此 packed 任务接过身份后也必须消费对应位置批次；否则多微批次会重复读取第一批并留下 writer。结束入口排空采集，检查每个已创建块均为 Live 且任务引用为零，才报告成功并归还未用私有 payload。这个归还量不是 GC 删除历史块的收益。
+
+实际模型暴露并修正了短块的 GPU 容量判断问题：原逻辑只用 resident token 数判断压力，多次单 token 追加可能已经占满物理槽。托管目录存在时，追加还会核对所需新 GPU 槽与实际空槽，不足时走原有工作集换出规划。该检查服务于正常 GPU 工作集调度，不把 CPU GC 改成 GPU 回收策略。
+
+此 owner 明确限定为单次采集基线。它预留了 RAM、释放回调和请求记录，并预留有限行位置表；目录节点、全部 GPU 页、staging scratch、后端工作区和 rollback 仍未统一预约。登记或执行失败后上下文必须退出，不能通过截断尚有任务的历史块来伪造回滚；未用的私有 payload 可立即取消，已安装 payload 保留到任务及所属域退出。CLI 的该模式在提前返回时也会析构上下文并排空采集。跨 owner 的异步任务保留原存储，后台完成后不存在回调引用环。这里尚未实现生产 GC 的后台取消队列及所有设备错误恢复。
+
+入口拒绝 retrieval、MTP、hybrid、跨设备 KV、CPU spill arena、NVMe、非连续位置及多序列输入。续接、reset、truncate、replay、snapshot/restore、位置平移和切换会话也不能用于此基线。后续须补齐对应协议后逐项开放，不能将当前限制作为完整交付范围。
+
+命令示例（`MODEL` 是本机 GGUF 路径；N 是历史物理槽位数，不是 GPU token 预算）：
+
+```sh
+build-cuda/bin/llama-kvmem-cli -m "$MODEL" -f prompt.txt -n 8 -c 1024 \
+  -b 128 -ub 16 --kvmem --kvmem-budget 512 --kvmem-method recency \
+  --kvmem-historical-capture 32 --tokens-only
+```
+
+宿主测试新增容量拒绝、输入/输出/边界额度、未交接 producer、未发布及仍有任务时禁止完成、EOS 归还私有容量、分配点故障注入、失败状态关闭和取消后异步 writer 完成。本轮相关本地测试 **14/14**，Linux 宿主 **23/23**，宿主 ASan/UBSan **11/11**；补充后台完成用例后，该项在三套构建分别重跑通过。独立 TSan 的新增 capture-session 用例 **1/1** 通过，沿用只对测试子进程设置的 `setarch x86_64 -R`。这些 sanitizer 结果不覆盖 CUDA adapter。
+
+普通 CLI 已使用提供的 Qwen3MoE GGUF、Q8_0 KV 和 356-token 提示词生成 8 个 token，自动登记 20 个历史块，结束记录 `live=20 references=0 rows=364 payload_bytes=33423360`。没有手工绑定 writer 或调用发布接口。该运行删除关闭，不证明 CPU 历史自动回收，也不是质量或性能验收。
+
+同模型、同提示词、同 `-n 8 -c 1024 -b 128 -ub 16`、recency 预算 512 的原路径对照，8 个 greedy 输出 token 与开启采集时完全相同（原始 token 文件 `cmp` 返回 0）。这仅是一个全历史可驻留样例的功能对照。生成 wall time 本次原路径为 487.98 ms、采集路径为 567.64 ms，采集增加了工作；单次短样例不能代替稳定吞吐、长上下文或 agent 质量评测，也不能当作 off/shadow/delete 策略对比。
+
+GPU 验收在原有已知张量用例之外，新增真正调用 `llama_decode` 的两个场景（F16、Q8_0）。每个场景输入 160 token，使用 16-token 微批次并生成 3 token，自动建立 9 个 span；逐层比较新块 CPU payload 与实际 GPU K/V，分别检查 **432 个块×层** 的字节一致性。主动覆盖 GPU 物理槽压力换出，最后重新读取冷历史并比较保存的内容 hash；所有块均 Live、引用归零，超出已完成请求的下一次追加被拒绝。最初运行准确复现短块物理槽不足，修复后两种格式及原有 GC/异步 fixture 全部通过。该真实图测试仍未开启策略退休，不能把已有 fixture 的 CPU 释放量计入它。
+
+原始日志保存在远程隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-capture-session-*` 文件，并复制到本地 `build-local/capture-session-validation/`；最终逐层模型检查使用 `historical-capture-session-quant-gpu-test.log`。首次失败日志也保留。9 个变更源码/构建文件的本地与远程 SHA256 一致，远程原工作仓库未改动。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
-1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有受控接线。还需由正常请求的资源 owner 自动预约/创建身份、调用登记入口、向全部任务交接 producer，并统一错误取消和销毁。批量登记本身不承诺后续请求还有足够资源。
+1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 采集基线现能自动预约 RAM、创建身份并向任务交接 producer；仍需与可删除的生产 owner、server、多请求生命周期及错误取消统一。这个删除关闭的入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch 预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、元数据、各后端和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。

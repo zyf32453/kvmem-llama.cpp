@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@ static void print_usage(const char * argv0) {
             "  --tokens-only              print generated token ids, one per line\n"
             "  --no-prompt                do not echo the prompt (generation only)\n"
             "  --kvmem                    enable KVMem slot-pool memory\n"
+            "  --kvmem-historical-capture N  experimental reserved RAM slots; recency single-request capture, deletion OFF\n"
             "  --kvmem-block-tokens N     block size (default 32)\n"
             "  --kvmem-budget N           GPU working-set tokens; 0 = n_ctx (identity)\n"
             "  --kvmem-gen-reserve N      extra GPU tokens for decode (default 256)\n"
@@ -83,6 +85,7 @@ int main(int argc, char ** argv) {
     float temp = 0.0f;
     bool tokens_only = false;
     bool no_prompt = false;
+    uint32_t historical_capacity = 0;
 
     llama_kvmem_params kparams = {};
     kparams.block_tokens = 32;
@@ -152,6 +155,15 @@ int main(int argc, char ** argv) {
             no_prompt = true;
         } else if (eq(arg, "--kvmem")) {
             kparams.enabled = true;
+        } else if (eq(arg, "--kvmem-historical-capture")) {
+            const char * value = need(arg);
+            char * end = nullptr;
+            const auto parsed = std::strtoull(value, &end, 10);
+            if (value[0] < '0' || value[0] > '9' || !end || *end || !parsed || parsed > INT32_MAX) {
+                fprintf(stderr, "--kvmem-historical-capture requires a positive slot count <= INT32_MAX\n");
+                return 1;
+            }
+            historical_capacity = static_cast<uint32_t>(parsed);
         } else if (eq(arg, "--kvmem-block-tokens")) {
             kparams.block_tokens = static_cast<uint32_t>(std::atoi(need(arg)));
         } else if (eq(arg, "--kvmem-budget")) {
@@ -257,6 +269,11 @@ int main(int argc, char ** argv) {
     }
 #endif
     // Validate before backend initialization and loading a potentially large model.
+    if (historical_capacity && (!kparams.enabled || kparams.method != 0 || spec_mtp ||
+        n_predict < 0 || kparams.raw_k_nvme || kparams.nvme_bytes || kparams.cpu_bytes || dump_kv)) {
+        fprintf(stderr, "historical capture requires --kvmem --kvmem-method recency, finite -n >= 0, no MTP/NVMe/CPU spill/dump; deletion is OFF\n");
+        return 1;
+    }
     if (!kvmem_cache_types_ok(cache_type_k, cache_type_v)) {
         fprintf(stderr, "incompatible KV cache types: K=%s, V=%s; quantized K/V must both use q8_0, q5_0 or q4_0; "
                 "set both -ctk and -ctv, or use --kv-dtype TYPE to set both\n",
@@ -407,6 +424,7 @@ int main(int argc, char ** argv) {
     ctx_params.no_perf = false;
     ctx_params.type_k = cache_type_k;
     ctx_params.type_v = cache_type_v;
+    if (historical_capacity) ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     if (spec_mtp) {
         const uint32_t n_out = (uint32_t) (1 + std::max(0, spec_n_max));
         ctx_params.n_outputs_max = n_out;
@@ -420,6 +438,22 @@ int main(int argc, char ** argv) {
     if (!ctx) {
         fprintf(stderr, "failed to create llama_context\n");
         return 1;
+    }
+    // The opt-in owner must drain even when a later decode returns an error.
+    // The existing MTP/session teardown order is unchanged outside this mode.
+    std::unique_ptr<llama_context, decltype(&llama_free)> capture_context(
+        historical_capacity ? ctx : nullptr, llama_free);
+    const auto free_context = [&] {
+        capture_context.release();
+        llama_free(ctx);
+    };
+    if (historical_capacity) {
+        const uint64_t appends = (uint64_t(n_prompt) + n_batch - 1) / n_batch + uint64_t(n_predict);
+        if (!llama_kvmem_historical_capture_begin(historical_capacity, n_prompt, n_predict, appends)) {
+            free_context();
+            llama_model_free(model);
+            return 1;
+        }
     }
 
     kvmem_spec_session spec_sess;
@@ -624,7 +658,7 @@ int main(int argc, char ** argv) {
         if (gst.failed) {
             kvmem_spec_stop(spec_sess);
             llama_sampler_free(smpl);
-            llama_free(ctx);
+            free_context();
             llama_model_free(model);
             return 1;
         }
@@ -662,6 +696,12 @@ int main(int argc, char ** argv) {
 
     llama_synchronize(ctx);
     const char * hash_gdn = std::getenv("KVMEM_GDN_HASH");
+    if (historical_capacity && !llama_kvmem_historical_capture_finish()) {
+        llama_sampler_free(smpl);
+        free_context();
+        llama_model_free(model);
+        return 1;
+    }
     if (hash_gdn && hash_gdn[0] == '1' && llama_kvmem_has_recurrent()) {
         const llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
         const size_t size = llama_state_seq_get_size_ext(ctx, 0, flags);
@@ -703,7 +743,7 @@ int main(int argc, char ** argv) {
 
     kvmem_spec_stop(spec_sess);
     llama_sampler_free(smpl);
-    llama_free(ctx);
+    free_context();
     llama_model_free(model);
     return 0;
 }

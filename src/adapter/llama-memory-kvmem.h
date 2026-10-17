@@ -23,6 +23,7 @@ struct llama_memory_params;
 struct ggml_tensor;
 class llama_memory_recurrent;
 class llama_memory_kvmem_mtp;
+namespace kvmem { class HistoricalKvCaptureSession; }
 
 // Bounded block-slot pool over a llama_kv_cache.
 //
@@ -135,7 +136,12 @@ public:
     bool want_decode_mean() const {
         return retrieval_pinned_ && method_ == 1 && !replay_;
     }
-    void end_prefill_capture() { prefill_capture_ = false; }
+    void end_prefill_capture();
+    // Finite single-request, recency, RAM capture baseline. Policy deletion
+    // remains off until all production execution boundaries are lease-gated.
+    bool begin_historical_capture(uint32_t capacity, uint64_t input_tokens,
+                                  uint64_t max_output_tokens, uint64_t max_appends);
+    bool finish_historical_capture();
     // Next request continues this sequence: flush decode mean, unpin
     // retrieval, harvest mean-K for the suffix. Does not wipe prefix KV.
     void begin_cached_turn(bool reset_query = true);
@@ -171,7 +177,7 @@ public:
         query_end_ = end;
     }
     void set_force_pos(int32_t pos) { force_pos_ = pos; }
-    void set_mtp_follower(llama_memory_kvmem_mtp * mtp) { mtp_ = mtp; }
+    void set_mtp_follower(llama_memory_kvmem_mtp * mtp);
     llama_memory_kvmem_mtp * mtp_follower() { return mtp_; }
 
     const kvmem::RopeConfig & rope() const { return rope_; }
@@ -415,6 +421,7 @@ private:
     kvmem::RawKvStoreConfig raw_cfg_{};
     std::unique_ptr<kvmem::KvMemRuntime> runtime_;
     std::unique_ptr<kvmem::RawKvStore> raw_;
+    std::unique_ptr<kvmem::HistoricalKvCaptureSession> historical_capture_;
     std::vector<int32_t> free_slots_;
     struct RowPosition {
         std::array<llama_pos, 4> pos{};

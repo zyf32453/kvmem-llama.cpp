@@ -1,0 +1,159 @@
+#include "kvmem/historical_kv_capture_session.hpp"
+
+#include <cstdio>
+#include <cstdlib>
+#include <atomic>
+#include <new>
+#include <stdexcept>
+#include <thread>
+
+static thread_local int64_t allocation_budget = -1;
+void * operator new(size_t size) {
+    if (!allocation_budget) throw std::bad_alloc();
+    if (allocation_budget > 0) --allocation_budget;
+    if (void * p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void * operator new[](size_t size) { return ::operator new(size); }
+void operator delete(void * p) noexcept { std::free(p); }
+void operator delete[](void * p) noexcept { std::free(p); }
+void operator delete(void * p, size_t) noexcept { std::free(p); }
+void operator delete[](void * p, size_t) noexcept { std::free(p); }
+
+using namespace kvmem;
+static void check(bool ok, const char * message) {
+    if (!ok) throw std::runtime_error(message);
+}
+static KvMemRuntimeConfig runtime_config() {
+    KvMemRuntimeConfig cfg;
+    cfg.store.block_tokens = 4;
+    return cfg;
+}
+static HistoricalKvRawStoreConfig storage_config() { return {1, 4, 2, 3, 0, {}}; }
+static HistoricalKvRamDemand demand(uint64_t input, uint64_t output, uint64_t appends) {
+    HistoricalKvRamDemand d;
+    d.uncached_input_tokens = input;
+    d.max_accepted_output_tokens = output;
+    d.max_append_boundaries = appends;
+    return d;
+}
+static void complete(const HistoricalKvShadowDirectory::Producer & task, uint32_t n) {
+    const auto & s = task->storage();
+    check(s->write_layer(task->writer(), task->handle(), 0,
+                        std::vector<uint8_t>(2 * n, 17), std::vector<uint8_t>(3 * n, 23), {}, 0),
+          "task failed to write captured payload");
+    check(s->publish_complete(task->repository(), task->writer(), task->handle()), "complete task did not publish");
+}
+
+static void quotas_and_handoff() {
+    KvMemRuntime runtime(runtime_config());
+    auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 6, demand(6, 3, 5));
+    check(session && session->reserved_blocks() == 6 && session->payload_bytes() == 120, "wrong real reservation");
+    check(!session->end_input() && !session->finish(), "unfinished input accepted");
+    check(!session->append(7) && !runtime.store().block_count(), "input quota exceeded");
+    for (unsigned id = 0; id < 2; ++id) {
+        check(session->append(3), "input append failed");
+        auto task = runtime.historical_shadow_directory().find(id)->writer_context;
+        check(!session->append(1), "producer handoff bypassed");
+        session->producers_captured();
+        complete(task, 3);
+    }
+    check(session->end_input() && !session->append(4), "output quota not enforced");
+    check(session->append(1), "output append failed");
+    auto task = runtime.historical_shadow_directory().find(2)->writer_context;
+    session->producers_captured();
+    check(!session->finish(), "Writing span accepted as complete");
+    complete(task, 1);
+    check(!session->finish(), "outstanding task accepted as complete");
+    task.reset();
+    check(session->finish() && session->payload_bytes() == 60 && session->output_remaining() == 2,
+          "early EOS did not return unused private payloads");
+    check(!session->append(1) && !session->finish() && !session->end_input(), "finished session admitted work");
+    check(runtime.store().blocks()[1].orig_pos_start == 3 &&
+          runtime.store().blocks()[2].orig_pos_start == 6, "short spans were repacked");
+    auto access = runtime.historical_shadow_directory().acquire_read(2);
+    check(bool(access), "published identity unreadable after producer exit");
+}
+
+static void boundary_limit() {
+    KvMemRuntime runtime(runtime_config());
+    auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, demand(9, 0, 1));
+    check(session && session->append(1), "bounded first append failed");
+    session->producers_captured();
+    check(!session->append(8) && runtime.store().total_tokens() == 1 && session->input_remaining() == 8,
+          "append budget bypassed by unused token/slot credits");
+    session->fail();
+    check(session->failed() && !session->append(0), "failed session reopened");
+}
+
+static void cancelled_owner_keeps_tasks() {
+    std::weak_ptr<HistoricalKvRawStore> observed;
+    HistoricalKvShadowDirectory::Producer task;
+    std::atomic<bool> finish_task{false}, succeeded{false};
+    std::thread worker;
+    {
+        KvMemRuntime runtime(runtime_config());
+        auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 2, demand(3, 1, 2));
+        check(session && session->append(3), "cancel fixture append failed");
+        task = runtime.historical_shadow_directory().find(0)->writer_context;
+        observed = task->storage();
+        session->producers_captured();
+        session->fail();
+        check(task->storage()->allocated_payload_bytes() == 20 && task->repository().closed(),
+              "cancel freed installed payload or kept admission open");
+        worker = std::thread([captured = task, &finish_task, &succeeded] {
+            while (!finish_task.load(std::memory_order_acquire)) std::this_thread::yield();
+            try { complete(captured, 3); succeeded = true; } catch (...) {}
+        });
+        task.reset();
+    }
+    const bool survived = !observed.expired();
+    finish_task.store(true, std::memory_order_release);
+    worker.join();
+    check(survived && succeeded, "background task lost owner at runtime destruction");
+    check(observed.expired(), "repository release callback retained ownership cycle");
+}
+
+static void failures_are_atomic() {
+    KvMemRuntime runtime(runtime_config());
+    check(!HistoricalKvCaptureSession::try_create(runtime, storage_config(), 1, demand(3, 1, 2)),
+          "insufficient capacity accepted");
+    bool reached_success = false;
+    for (int64_t budget = 0; budget < 500; ++budget) {
+        allocation_budget = budget;
+        auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, demand(9, 0, 1));
+        allocation_budget = -1;
+        check(!runtime.store().block_count(), "admission changed runtime");
+        if (session) { reached_success = true; break; }
+    }
+    check(reached_success, "admission fault sweep never succeeded");
+    reached_success = false;
+    unsigned failures = 0;
+    for (int64_t budget = 0; budget < 100; ++budget) {
+        KvMemRuntime rt(runtime_config());
+        auto session = HistoricalKvCaptureSession::try_create(rt, storage_config(), 3, demand(9, 0, 1));
+        bool appended = false;
+        allocation_budget = budget;
+        try { appended = session->append(9); }
+        catch (const std::bad_alloc &) { ++failures; }
+        allocation_budget = -1;
+        if (appended) { reached_success = true; break; }
+        check(session->failed() && !session->append(9) && !rt.store().block_count(),
+              "failed registration changed runtime or admitted a retry");
+    }
+    check(reached_success && failures, "metadata fault sweep did not cover failure and success");
+}
+
+int main() {
+    try {
+        quotas_and_handoff();
+        boundary_limit();
+        cancelled_owner_keeps_tasks();
+        failures_are_atomic();
+        std::puts("PASS historical capture session: bounded quotas, producer handoff, publication, terminal cancellation, allocation faults");
+    } catch (const std::exception & e) {
+        allocation_budget = -1;
+        std::fprintf(stderr, "FAIL historical capture session: %s\n", e.what());
+        return 1;
+    }
+}

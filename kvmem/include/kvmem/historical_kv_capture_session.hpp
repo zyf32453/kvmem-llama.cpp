@@ -1,0 +1,57 @@
+#pragma once
+
+#include "kvmem/historical_kv_ram_reservation.hpp"
+#include "kvmem/kvmem_runtime.hpp"
+
+namespace kvmem {
+
+// A finite, single-request capture baseline with deletion OFF. It connects
+// actual appends to the RAM reservation and producer handoff. This is NOT
+// full production request admission: directory/GPU/backend allocations are
+// still fallible, and a failed session must be discarded after draining its
+// tasks. No reset, continuation, streaming or policy deletion is supported.
+class HistoricalKvCaptureSession {
+public:
+    static std::unique_ptr<HistoricalKvCaptureSession> try_create(
+        KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
+        uint32_t capacity, const HistoricalKvRamDemand & demand);
+    ~HistoricalKvCaptureSession();
+    HistoricalKvCaptureSession(const HistoricalKvCaptureSession &) = delete;
+    HistoricalKvCaptureSession & operator=(const HistoricalKvCaptureSession &) = delete;
+
+    // Append immutable spans using only this request's reserved RAM credits.
+    // Quota/state rejection does not change the runtime. Allocation/installation
+    // failure closes the session, retaining installed data until domain teardown.
+    bool append(uint32_t tokens);
+    // Call only after EVERY ubatch for the append has captured its producer.
+    void producers_captured() noexcept { producers_.clear(); }
+    bool end_input() noexcept;
+    // Caller first drains graph, D2H and accumulators. Requires automatic
+    // publication and zero task references; returns unused private RAM credits.
+    bool finish();
+    void fail() noexcept;
+    bool failed() const noexcept { return failed_; }
+    bool finished() const noexcept { return finished_; }
+    uint32_t created_blocks() const noexcept { return static_cast<uint32_t>(handles_.size()); }
+    uint32_t reserved_blocks() const noexcept { return reserved_blocks_; }
+    uint64_t payload_bytes() const noexcept { return storage_->allocated_payload_bytes(); }
+    uint64_t input_remaining() const noexcept { return input_remaining_; }
+    uint64_t output_remaining() const noexcept { return output_remaining_; }
+    uint64_t appends_remaining() const noexcept { return appends_remaining_; }
+
+private:
+    explicit HistoricalKvCaptureSession(KvMemRuntime & runtime) : runtime_(runtime) {}
+    KvMemRuntime & runtime_;
+    std::shared_ptr<HistoricalKvRepository> repository_;
+    std::shared_ptr<HistoricalKvRawStore> storage_;
+    std::optional<HistoricalKvRamReservation> reservation_;
+    std::vector<HistoricalKvRepository::ReleaseCallback> callbacks_;
+    std::vector<HistoricalKvRepository::Lease> writers_;
+    std::vector<HistoricalKvShadowDirectory::Producer> producers_;
+    std::vector<HistoricalKvHandle> handles_;
+    uint64_t input_remaining_ = 0, output_remaining_ = 0, appends_remaining_ = 0;
+    uint32_t expected_rows_ = 0, expected_blocks_ = 0, reserved_blocks_ = 0;
+    bool input_ = true, failed_ = false, finished_ = false;
+};
+
+} // namespace kvmem

@@ -1,6 +1,7 @@
 #include "llama-kvmem-diag.h"
 #include "llama-memory-kvmem.h"
 #include "kvmem/historical_kv_raw_store.hpp"
+#include "kvmem/historical_kv_capture_session.hpp"
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-memory-kvmem-mtp.h"
 
@@ -1011,6 +1012,7 @@ llama_memory_kvmem::~llama_memory_kvmem() {
     decode_mean_discard();
     decode_mean_print_sum();
     harvest_flush();
+    if (historical_capture_) harvest_gpu_v_commit();
     harvest_worker_stop();
     harvest_perf_print_sum();
     d2h_free();
@@ -1022,6 +1024,98 @@ llama_memory_kvmem::~llama_memory_kvmem() {
     }
     kvmem_conv_pool_unbind(this);
     kvmem_capture_unbind(this);
+}
+
+bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t input_tokens,
+        uint64_t max_output_tokens, uint64_t max_appends) {
+    if (historical_capture_ || method_ != 0 || multi_gpu_ || mtp_ || recr_ || v_trans_ ||
+        replay_ || !kv_ || raw_cfg_.nvme_bytes || rt_cfg_.cpu_bytes || rt_cfg_.nvme_bytes ||
+        raw_cfg_.historical_gc_attention_layers.empty()) {
+        LLAMA_LOG_ERROR("historical capture: requires a fresh single-GPU recency RAM context without MTP/hybrid/spill tiers\n");
+        return false;
+    }
+    try {
+        kvmem::HistoricalKvRawStoreConfig cfg;
+        cfg.n_layer = n_layer_;
+        cfg.max_tokens_per_slot = block_tokens_;
+        cfg.packed_k_bytes_per_token = ggml_row_size(type_k_, n_embd_k_);
+        cfg.packed_v_bytes_per_token = ggml_row_size(type_v_, n_embd_v_);
+        cfg.attention_layers = raw_cfg_.historical_gc_attention_layers;
+        // Recency needs the packed KV only. Mean-K/retrieval joins this owner
+        // after replay and execution admission are integrated.
+        int storage_device = -1;
+        for (uint32_t il : cfg.attention_layers) {
+            auto * k = kv_->get_k_storage(il);
+            auto * v = kv_->get_v_storage(il);
+            if (!k || !v || k->nb[1] != cfg.packed_k_bytes_per_token ||
+                v->nb[1] != cfg.packed_v_bytes_per_token)
+                throw std::runtime_error("historical capture requires uniform packed attention rows");
+            for (auto * tensor : {k, v}) {
+                const auto * ptr = kvmem_cuda_tensor_ptr(tensor);
+                cudaPointerAttributes attrs{};
+                if (!ptr || cudaPointerGetAttributes(&attrs, ptr) != cudaSuccess ||
+                    attrs.type != cudaMemoryTypeDevice ||
+                    (storage_device >= 0 && attrs.device != storage_device))
+                    throw std::runtime_error("historical capture requires all attention KV on one CUDA device");
+                storage_device = attrs.device;
+            }
+        }
+        kvmem::HistoricalKvRamDemand demand;
+        demand.uncached_input_tokens = input_tokens;
+        demand.max_accepted_output_tokens = max_output_tokens;
+        demand.max_append_boundaries = max_appends;
+        auto session = kvmem::HistoricalKvCaptureSession::try_create(*runtime_, cfg, capacity, demand);
+        if (!session) {
+            LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM capacity\n");
+            return false;
+        }
+        // Row positions have a known finite bound in this baseline. Directory,
+        // staging scratch and backend work allocations still need admission.
+        row_positions_.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
+        historical_capture_ = std::move(session);
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin mode=off capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu\n",
+            capacity, historical_capture_->reserved_blocks(),
+            (unsigned long long) historical_capture_->payload_bytes(),
+            (unsigned long long) input_tokens, (unsigned long long) max_output_tokens,
+            (unsigned long long) max_appends);
+        return true;
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("historical capture begin: %s\n", e.what());
+        return false;
+    }
+}
+
+void llama_memory_kvmem::end_prefill_capture() {
+    if (historical_capture_ && !historical_capture_->end_input()) {
+        historical_capture_->fail();
+        LLAMA_LOG_ERROR("historical capture: input quota or producer handoff incomplete; context closed\n");
+    }
+    prefill_capture_ = false;
+}
+
+void llama_memory_kvmem::set_mtp_follower(llama_memory_kvmem_mtp * mtp) {
+    if (mtp && historical_capture_) throw std::runtime_error("historical capture baseline does not support MTP");
+    mtp_ = mtp;
+}
+
+bool llama_memory_kvmem::finish_historical_capture() {
+    if (!historical_capture_) return false;
+    try {
+        harvest_flush();
+        harvest_gpu_v_commit();
+        if (!historical_capture_->finish()) {
+            LLAMA_LOG_ERROR("historical capture: incomplete publication or outstanding producers\n");
+            return false;
+        }
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish mode=off blocks=%u live=%u references=0 rows=%u payload_bytes=%llu\n",
+            historical_capture_->created_blocks(), historical_capture_->created_blocks(), store_n_tokens(),
+            (unsigned long long) historical_capture_->payload_bytes());
+        return true;
+    } catch (const std::exception & e) {
+        historical_capture_->fail();
+        LLAMA_LOG_ERROR("historical capture finish: %s\n", e.what());
+        return false;
+    }
 }
 
 void llama_memory_kvmem::reset_slots() {
@@ -1058,6 +1152,7 @@ void llama_memory_kvmem::reset_policy() {
 }
 
 void llama_memory_kvmem::begin_cached_turn(bool reset_query) {
+    if (historical_capture_) throw std::runtime_error("historical capture baseline does not support continuation");
     harvest_flush();
     query_frozen_ = false;
     decode_mean_flush();
@@ -1074,6 +1169,7 @@ void llama_memory_kvmem::truncate_cached(uint32_t n_past) {
     // Keyed off the block table alone, so it cannot reach a host mirror the
     // full-seq_rm branch left behind: see host_mirror_stale_ there.
     if (runtime_ && n_past >= runtime_->store().total_tokens()) return;
+    if (historical_capture_) throw std::runtime_error("historical capture baseline does not support truncation");
     ++attention_epoch_;
     harvest_flush();
     harvest_gpu_v_commit();
@@ -1088,6 +1184,7 @@ void llama_memory_kvmem::truncate_cached(uint32_t n_past) {
 }
 
 void llama_memory_kvmem::set_replay(bool replay) {
+    if (replay && historical_capture_) throw std::runtime_error("historical capture baseline does not support replay");
     if (replay && !replay_) {
         harvest_flush();
         harvest_gpu_v_commit();
@@ -1100,6 +1197,7 @@ void llama_memory_kvmem::set_replay(bool replay) {
 }
 
 bool llama_memory_kvmem::conv_swap_supported(std::string & reason) const {
+    if (historical_capture_) { reason = "historical_capture_single_request"; return false; }
     if (!runtime_ || !raw_ || !kv_) {
         reason = "no_store";
         return false;
@@ -1953,6 +2051,7 @@ llama_pos llama_memory_kvmem::model_pos(uint32_t logical) const {
 }
 
 bool llama_memory_kvmem::remove_logical(llama_context * ctx, llama_pos begin, llama_pos end) {
+    if (historical_capture_) return false;
     ++attention_epoch_;
     if (mtp_ && llama_get_memory(ctx) == mtp_) return mtp_->remove_logical(begin, end);
     // Recurrent rollback is only valid across consecutive text positions.
@@ -2301,6 +2400,8 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
 }
 
 bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
+    if (historical_capture_ && (historical_capture_->failed() || historical_capture_->finished() || replay_))
+        return false;
     if (n_new_tokens == 0) {
         return true;
     }
@@ -2309,9 +2410,17 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
     }
     auto & store = runtime_->store();
     const uint32_t t0 = store.total_tokens();
-    if (!replay_) {
+    if (historical_capture_) {
+        if (!historical_capture_->append(n_new_tokens)) return false;
+    } else if (!replay_) {
         runtime_->register_append(n_new_tokens);
     }
+    const auto cancel_append = [&] {
+        // A managed span cannot be truncated while its actual tasks own it.
+        // This baseline rejects the context; teardown drains tasks first.
+        if (historical_capture_) historical_capture_->fail();
+        else runtime_->truncate_to(t0);
+    };
     const uint32_t t1 = store.total_tokens();
 
     std::vector<uint32_t> incoming;
@@ -2329,11 +2438,21 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
     // working set and place decode tokens into gen_reserve slots.
     if (!retrieval_pinned_ && !keep_selected_) {
         try {
-            need_offload = runtime_->maybe_offload_during_prefill(
-                    n_new_tokens, resident_tokens(), kv_size_, incoming);
+            const auto slots_needed = std::count_if(incoming.begin(), incoming.end(),
+                [&](uint32_t id) { return store.blocks()[id].gpu_slot < 0; });
+            if (runtime_->historical_shadow_directory().size() &&
+                    static_cast<size_t>(slots_needed) > free_slots_.size()) {
+                // Fixed short spans occupy full physical slots. Token counts
+                // alone can report room even when every slot is occupied.
+                runtime_->prepare_prefill_pressure(incoming);
+                need_offload = true;
+            } else {
+                need_offload = runtime_->maybe_offload_during_prefill(
+                        n_new_tokens, resident_tokens(), kv_size_, incoming);
+            }
         } catch (const std::exception & e) {
             LLAMA_LOG_ERROR("%s: KVMem reselect failed: %s\n", __func__, e.what());
-            runtime_->truncate_to(t0);
+            cancel_append();
             return false;
         }
     }
@@ -2357,7 +2476,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
             }
         } catch (const std::exception & e) {
             LLAMA_LOG_ERROR("%s: KVMem reselect failed: %s\n", __func__, e.what());
-            runtime_->truncate_to(t0);
+            cancel_append();
             return false;
         }
     } else {
@@ -2370,7 +2489,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
                 // Pinned retrieval will not evict the working set. gen_reserve
                 // exhaustion is a known v1 limit (see docs/architecture.md).
                 LLAMA_LOG_ERROR("%s: no free GPU slot for block %u\n", __func__, id);
-                runtime_->truncate_to(t0);
+                cancel_append();
                 return false;
             }
             store.set_block_gpu_slot(id, slot);
@@ -2381,7 +2500,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
     for (uint32_t id : incoming) {
         if (id < store.block_count() && store.blocks()[id].gpu_slot < 0) {
             LLAMA_LOG_ERROR("%s: incoming block %u was not placed on GPU\n", __func__, id);
-            runtime_->truncate_to(t0);
+            cancel_append();
             return false;
         }
     }
@@ -2391,8 +2510,22 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
 bool llama_memory_kvmem::prepare_ubatches(
         const std::vector<llama_ubatch> & ubatches,
         uint32_t n_new_tokens,
-        llama_kv_cache::slot_info_vec_t & sinfos) {
+        llama_kv_cache::slot_info_vec_t & sinfos) try {
     const uint32_t old_rows = store_n_tokens();
+    if (historical_capture_) {
+        uint64_t row = old_rows;
+        for (const auto & ub : ubatches) {
+            if (!ub.token || ub.n_pos != 1 || ub.n_seqs_unq != 1 || !ub.seq_id_unq || ub.seq_id_unq[0] != 0)
+                throw std::runtime_error("historical capture requires single-sequence text appends");
+            for (uint32_t i = 0; i < ub.n_tokens; ++i, ++row) {
+                const auto logical = ub.logical_pos ? ub.logical_pos[i] : ub.pos[i];
+                if (logical < 0 || uint64_t(logical) != row || ub.pos[i] != logical)
+                    throw std::runtime_error("historical capture requires consecutive new positions");
+            }
+        }
+        if (row - old_rows != n_new_tokens)
+            throw std::runtime_error("historical capture append token count mismatch");
+    }
     for (const auto & ub : ubatches) {
         for (uint32_t i = 0; i < ub.n_tokens; ++i) {
             const llama_pos row = ub.logical_pos ? ub.logical_pos[i] : ub.pos[i];
@@ -2430,7 +2563,13 @@ bool llama_memory_kvmem::prepare_ubatches(
         }
         pos_queue_.push_back(capture_batch(p));
     }
+    if (historical_capture_) historical_capture_->producers_captured();
     return true;
+} catch (const std::exception & e) {
+    if (!historical_capture_) throw;
+    historical_capture_->fail();
+    LLAMA_LOG_ERROR("historical capture prepare: %s\n", e.what());
+    return false;
 }
 
 llama_memory_context_ptr llama_memory_kvmem::init_batch(
@@ -2457,6 +2596,7 @@ llama_memory_context_ptr llama_memory_kvmem::init_batch(
 
         llama_kv_cache::slot_info_vec_t sinfos;
         if (!prepare_ubatches(ubatches, balloc.get_n_tokens(), sinfos)) {
+            if (historical_capture_) historical_capture_->fail();
             break;
         }
 
@@ -2476,6 +2616,7 @@ llama_memory_context_ptr llama_memory_kvmem::init_update(llama_context * lctx, b
 }
 
 void llama_memory_kvmem::clear(bool data) {
+    if (historical_capture_) throw std::runtime_error("historical capture baseline requires context teardown for reset");
     harvest_flush();
     harvest_gpu_v_commit();
     if (kv_) {
@@ -2485,6 +2626,7 @@ void llama_memory_kvmem::clear(bool data) {
 }
 
 bool llama_memory_kvmem::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    if (historical_capture_) return false;
     ++attention_epoch_;
     const bool ok = kv_->seq_rm(seq_id, p0, p1);
     if (!ok) {
@@ -2513,21 +2655,25 @@ bool llama_memory_kvmem::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1)
 }
 
 void llama_memory_kvmem::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
+    if (historical_capture_) throw std::runtime_error("historical capture baseline does not support sequence copies");
     ++attention_epoch_;
     kv_->seq_cp(seq_id_src, seq_id_dst, p0, p1);
 }
 
 void llama_memory_kvmem::seq_keep(llama_seq_id seq_id) {
+    if (historical_capture_) throw std::runtime_error("historical capture baseline does not support sequence mutation");
     ++attention_epoch_;
     kv_->seq_keep(seq_id);
 }
 
 void llama_memory_kvmem::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
+    if (historical_capture_) throw std::runtime_error("historical capture baseline does not support position shifts");
     ++attention_epoch_;
     kv_->seq_add(seq_id, p0, p1, shift);
 }
 
 void llama_memory_kvmem::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
+    if (historical_capture_) throw std::runtime_error("historical capture baseline does not support position shifts");
     ++attention_epoch_;
     kv_->seq_div(seq_id, p0, p1, d);
 }
@@ -2545,10 +2691,12 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_memory_kvmem::memory_breakdow
 }
 
 void llama_memory_kvmem::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+    if (historical_capture_) throw std::runtime_error("historical capture baseline does not support snapshots");
     kv_->state_write(io, seq_id, flags);
 }
 
 void llama_memory_kvmem::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    if (historical_capture_) throw std::runtime_error("historical capture baseline does not support restore");
     ++attention_epoch_;
     kv_->state_read(io, seq_id, flags);
 }
@@ -3304,10 +3452,11 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         return;
     }
     const int64_t t_entry = ggml_time_us();
-    if (!pos_queue_.empty() && std::any_of(pos_queue_.front().ranges.begin(),
+    const bool managed_packed = !pos_queue_.empty() && std::any_of(pos_queue_.front().ranges.begin(),
             pos_queue_.front().ranges.end(), [](const MeanWriteRange & range) {
                 return range.route == MeanWriteRange::Route::Managed;
-            })) {
+            });
+    if (managed_packed) {
         // Packed KV is produced by the graph, unlike the pre-RoPE Mean-K
         // tensors. Finish that graph before gathering its accepted KV rows.
         // Keep the original batch alive until both producer routes own it.
@@ -3330,6 +3479,9 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         d2h_commit(d2h_->next == 0 ? 1 : 0);
     }
     if (pending_capture_.empty() || pos_queue_.empty()) {
+        // Recency has no Mean-K graph nodes. Consume the executed batch after
+        // its packed jobs captured ownership, including between microbatches.
+        if (managed_packed) pos_queue_.erase(pos_queue_.begin());
         harvest_flush();
         if (sched) {
             ggml_backend_sched_synchronize(sched);
@@ -5178,6 +5330,17 @@ bool llama_kvmem_gdn_replay_commit(llama_context * ctx, uint32_t n_keep) {
 bool llama_kvmem_want_decode_mean(void) {
     llama_memory_kvmem * mem = kvmem_capture_active();
     return mem && mem->want_decode_mean();
+}
+
+bool llama_kvmem_historical_capture_begin(uint32_t capacity, uint64_t input_tokens,
+        uint64_t max_output_tokens, uint64_t max_appends) {
+    auto * mem = kvmem_capture_active();
+    return mem && mem->begin_historical_capture(capacity, input_tokens, max_output_tokens, max_appends);
+}
+
+bool llama_kvmem_historical_capture_finish(void) {
+    auto * mem = kvmem_capture_active();
+    return mem && mem->finish_historical_capture();
 }
 
 void llama_kvmem_decode_mean_commit(uint32_t n_keep) {
