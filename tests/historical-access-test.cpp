@@ -1106,6 +1106,11 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     auto storage = kvmem_transfer_test_access::capture_storage(mem);
     require(repository && storage && repository->capacity() == 12,
             "real capture owner did not retain the managed RAM repository");
+    // Request finish only hands unused RAM to the cleanup worker. Wait here
+    // solely to isolate the following GC-release byte measurement.
+    const auto cleanup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (repository->ready_count() != 3 && std::chrono::steady_clock::now() < cleanup_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     const auto bytes_before_gc = storage->allocated_payload_bytes();
     const auto ready_before_gc = repository->ready_count();
     require(bytes_before_gc > 0 && ready_before_gc == 3,
@@ -1165,6 +1170,37 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                  (unsigned long long) (bytes_before_gc - storage->allocated_payload_bytes()));
 }
 
+static void check_context_close_with_paused_worker(
+        std::unique_ptr<llama_context, decltype(&llama_free)> & ctx, llama_memory_kvmem & mem) {
+    auto gate = std::make_shared<HistoricalPolicyGate>();
+    struct Unpause { std::shared_ptr<HistoricalPolicyGate> gate; ~Unpause() { gate->open(); } } unpause{gate};
+    std::weak_ptr<kvmem::HistoricalKvRepository> repository =
+        kvmem_transfer_test_access::capture_repository(mem);
+    std::weak_ptr<kvmem::HistoricalKvRawStore> storage =
+        kvmem_transfer_test_access::capture_storage(mem);
+    kvmem_transfer_test_access::install_gc_policy(mem, std::make_unique<PausedHistoricalPolicy>(gate));
+    require(gate->entered_signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+            "close fixture worker did not reach policy barrier");
+    std::promise<void> returned;
+    auto signal = returned.get_future();
+    auto watchdog = std::async(std::launch::async, [gate, signal = std::move(signal)]() mutable {
+        const bool did_return = signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        gate->open();
+        return did_return;
+    });
+    // Exercise actual llama/context/adapter destruction on the GPU owner.
+    ctx.reset();
+    const bool retained_while_paused = !repository.expired() && !storage.expired();
+    returned.set_value();
+    const bool closed_without_wait = watchdog.get();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while ((!repository.expired() || !storage.expired()) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    require(closed_without_wait && retained_while_paused && repository.expired() && storage.expired(),
+            "context close joined paused GC, lost CPU ownership early, or leaked the closed domain");
+    std::puts("PASS real context teardown: returned before paused GC resumed, CPU owners retained then released on cleanup worker");
+}
+
 int main(int argc, char ** argv) {
     if (argc != 2) {
         std::fprintf(stderr, "Usage: %s model.gguf (requires CUDA)\n", argv[0]);
@@ -1192,7 +1228,7 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u}) {
+        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u}) {
             if (scenario >= 3) {
                 kp.method = 0;
                 kp.budget = 96;
@@ -1218,6 +1254,7 @@ int main(int argc, char ** argv) {
                 check_mean_ranges(*mem);
                 check_access(*mem);
             }
+            if (scenario == 9) check_context_close_with_paused_worker(ctx, *mem);
         }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FAIL historical adapter access: %s\n", e.what());

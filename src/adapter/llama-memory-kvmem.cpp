@@ -1009,8 +1009,30 @@ llama_memory_kvmem::llama_memory_kvmem(
             (unsigned long long) pool.block_bytes);
 }
 
+// Only the admitted RAM-only domain can use this task. Its runtime has no
+// prefetch/NVMe workers, and destruction does not invoke SlotBackend. GPU
+// buffers, streams, graph completion and source-slot accounting stay with
+// the adapter. Do not extend this handoff to other modes without that audit.
+struct llama_memory_kvmem::HistoricalCpuCleanup final : kvmem::HistoricalKvCleanup::Task {
+    std::unique_ptr<kvmem::KvMemRuntime> runtime;
+    std::unique_ptr<kvmem::RawKvStore> raw;
+    std::unique_ptr<kvmem::HistoricalKvCaptureSession> capture;
+    std::unique_ptr<kvmem::HistoricalKvActiveSet> active;
+    std::vector<RowPosition> positions;
+    std::vector<CaptureBatch> queued_captures;
+    CaptureBatch current_capture, pending_mean;
+    MeanWriteRange mean_target;
+    std::vector<HarvestVJob> packed_jobs;
+    HarvestVBatch pending_packed;
+    std::function<void()> submission_hook;
+    // Destroy the manager before directory/session/storage ownership.
+    std::unique_ptr<kvmem::HistoricalKvGc> gc;
+    bool ready() const noexcept override { return !gc || gc->worker_finished(); }
+};
+
 llama_memory_kvmem::~llama_memory_kvmem() {
-    if (historical_gc_) historical_gc_->stop();
+    if (historical_capture_) historical_capture_->repository()->close();
+    if (historical_gc_) historical_gc_->request_stop();
     decode_mean_flush();
     decode_mean_discard();
     decode_mean_print_sum();
@@ -1027,6 +1049,26 @@ llama_memory_kvmem::~llama_memory_kvmem() {
     }
     kvmem_conv_pool_unbind(this);
     kvmem_capture_unbind(this);
+    if (historical_cleanup_) {
+        // All adapter-owned GPU work has completed above. Move the entire
+        // CPU ownership graph, so no foreground directory/shared_ptr teardown
+        // can become the last owner of historical payloads.
+        auto & cleanup = *historical_cleanup_;
+        cleanup.runtime = std::move(runtime_);
+        cleanup.raw = std::move(raw_);
+        cleanup.capture = std::move(historical_capture_);
+        cleanup.active = std::move(historical_active_);
+        cleanup.gc = std::move(historical_gc_);
+        cleanup.positions = std::move(row_positions_);
+        cleanup.queued_captures = std::move(pos_queue_);
+        cleanup.current_capture = std::move(cur_capture_);
+        cleanup.pending_mean = std::move(decode_mean_pending_batch_);
+        cleanup.mean_target = std::move(decode_mean_target_);
+        cleanup.packed_jobs = std::move(harvest_v_jobs_);
+        cleanup.pending_packed = std::move(harvest_v_pending_);
+        cleanup.submission_hook = std::move(historical_submission_test_hook_);
+        historical_cleanup_ticket_.submit(std::move(historical_cleanup_));
+    }
 }
 
 bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t input_tokens,
@@ -1067,9 +1109,16 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         demand.uncached_input_tokens = input_tokens;
         demand.max_accepted_output_tokens = max_output_tokens;
         demand.max_append_boundaries = max_appends;
+        auto & cleanup_service = kvmem::HistoricalKvCleanup::process();
+        auto cleanup_ticket = cleanup_service.try_reserve();
+        if (!cleanup_ticket) {
+            LLAMA_LOG_ERROR("historical capture: CPU cleanup capacity exhausted before admission\n");
+            return false;
+        }
+        auto cleanup = std::make_unique<HistoricalCpuCleanup>();
         auto session = kvmem::HistoricalKvCaptureSession::try_create(*runtime_, cfg, capacity, demand);
         if (!session) {
-            LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM capacity\n");
+            LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM or CPU cleanup capacity\n");
             return false;
         }
         // Row positions have a known finite bound in this baseline. Directory,
@@ -1077,6 +1126,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         row_positions_.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
         historical_gpu_readers_.assign(n_slots_, 0);
         historical_gpu_retired_.assign(n_slots_, 0);
+        historical_cleanup_ticket_ = std::move(*cleanup_ticket);
+        historical_cleanup_ = std::move(cleanup);
         historical_capture_ = std::move(session);
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu\n",
             capacity, historical_capture_->reserved_blocks(),

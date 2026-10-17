@@ -218,6 +218,28 @@ shadow 不退休块、不释放 payload；相同配置结束为 `committed=0, re
 
 这只证明当前受限请求的计算与完成检查不依赖 worker 继续推进。未使用的私有 RAM 预约仍在 `finish()` 中销毁，上下文销毁仍需停止 worker；CLI 进程退出不等于上述请求完成边界。还需把私有预约清理和域退出交给后台、有界管理结束中的 owner，并补全 GPU/metadata/backend/rollback 预约及取消恢复，才可宣称完整生产请求没有 GC 等待与前台释放。实际 GPU 提交/完成失败的取消协议也尚待验收。
 
+### 未用预约与 CPU 域退出的有界后台清理（2026-10-17）
+
+上一节列出的两个前台清理点现已迁移：`HistoricalKvCaptureSession::finish/fail` 将未用 RAM 预约移交后台；受限采集上下文退出时不再 join GC，而是发出停止请求，在原 GPU owner 完成既有图、采集和设备资源清理后，将 CPU owner 整体交给后台。GPU 完成等待仍由正常设备生命周期负责，不能把这次改动解释成“不等待任何 GPU 工作”。
+
+新增 `HistoricalKvCleanup`，采用固定槽位和一个 CPU worker。默认进程服务有 64 个清理槽；当前适配器在请求进入 active 前预约两个槽，分别用于未用预约和上下文退出，并提前分配对应任务对象。入队只移动所有权并发布原子状态，不申请内存、不获取 worker 锁，也不在调用线程销毁任务。槽位满时在入口拒绝新请求，没有同步释放或无限扩张队列的兜底。实际销毁结束后才归还清理槽；未用 payload/scratch 也先销毁，再归还仓库 Reserved 槽。这是清理任务数的有界保证，尚不是跨请求总 RAM 预算或全部生产元数据的有界证明。
+
+`HistoricalKvGc` 分开提供停止请求和 worker 退出观察。清理 worker 对尚未退出的 GC 域只检查就绪状态，继续处理其他就绪任务；不在一个暂停的策略上 join 并阻塞整条清理队列。确认 GC 已退出后，才销毁 manager、会话、Raw store、历史目录和相关 CPU 记录。当前 RAM-only runtime 的析构不会调用适配器的 GPU backend；该限制不能直接推广到 NVMe、混合模型或未排空的异步设备任务。清理服务自身在进程/测试服务退出时仍会排空并 join，因此“请求结束、上下文销毁不等 GC”和“进程关闭绝不等待”是不同的承诺。
+
+未用预约在 `finish()` 返回时可能尚未释放，所以结束日志中的 `payload_bytes` 是即时观测，不能当作最终历史存量，也不能把私有预约归还量计入 LRU 回收收益。模型测试只有在测量后续 LRU 释放量时，才显式等待私有预约完成归还；生产请求完成入口没有添加这项等待。
+
+新增验收证据：
+
+- 清理单测验证预约饱和与取消、禁止分配时发布、发布线程零 `delete`、未就绪任务不阻止其他任务，以及 4 个生产线程在 4 个槽位上完成 320 次唯一移交。这个循环只验证清理组件，不替代 P4 的完整生产长轨迹。
+- 请求单测用显式屏障暂停清理 worker，再调用真实 `finish()`；其返回时没有新分配或 `delete`，未用 payload 仍占用真实容量，且第二个请求因清理槽已满而在入口失败。打开屏障后，未用 payload/scratch 和 Reserved 槽才归还，已安装历史仍可读取。既有分配故障、取消后旧 writer 完成等用例也通过。
+- 实际 CUDA 模型新增第 10 个顶层场景：完成模型请求后，将策略 worker 停在屏障内，调用真实 `llama_free` 销毁上下文。只有该调用返回才打开屏障；期间弱引用确认 CPU 仓库和存储仍被持有，恢复后两者均过期，验证既不提前释放也不泄漏。5 秒 watchdog 仅用于让“错误地等待 GC”的回归失败，正常通过不依靠延时碰撞。
+
+本轮 Windows 相关测试 **12/12**、Linux 全部宿主测试 **24/24**、cleanup/capture-session/GC 的 ASan/UBSan **3/3** 与独立 TSan **3/3** 均通过。CUDA CLI 与模型测试构建通过，全部 **10 个顶层模型场景** 通过，保留 F16/Q8_0 的 432 个逐层 span 比较、Writing/已提交 active 退休和精确 D2H 源槽归还等回归。Sanitizer 结果覆盖宿主组件，不覆盖 CUDA 适配器。十二个变更源码/构建文件的本地与远程 SHA256 一致。原始日志为 `historical-cleanup-{windows,host,asan,tsan}-test.log` 和 `historical-cleanup-gpu-test.log`，保存在本地 `build-local/capture-session-validation/`；远程验证始终使用 `/tmp/kvmem-gc-99bef27.3CD9MU` 隔离目录。
+
+普通 CLI delete 使用相同模型、356-token 提示词、8-token 输出、容量/水位 32/14/16，生成与进程退出正常；本轮 `committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 为 0。完成时 `payload_bytes=26738688` 尚包含两个未用的私有预约块，符合异步清理语义；它不是 14 个 Live 块的最终占用。原始输出和日志为 `historical-cleanup-cli-delete.tokens/.log`。
+
+目前仍是单请求、单 GPU、recency、RAM 的阶段实现。设备提交/完成失败时的取消与源数据保护尚需专门验收；server、多请求、所有 active 入口、GPU/metadata/backend/rollback 的完整预约、长期有界和实际 agent 效果均未完成。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

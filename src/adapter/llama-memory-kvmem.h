@@ -5,6 +5,7 @@
 #include "llama-kvmem-hooks.h"
 
 #include "kvmem/kvmem_runtime.hpp"
+#include "kvmem/historical_kv_cleanup.hpp"
 #include "kvmem/raw_kv_store.hpp"
 #include "kvmem/rope.hpp"
 
@@ -431,6 +432,9 @@ private:
     kvmem::RawKvStoreConfig raw_cfg_{};
     std::unique_ptr<kvmem::KvMemRuntime> runtime_;
     std::unique_ptr<kvmem::RawKvStore> raw_;
+    struct HistoricalCpuCleanup;
+    kvmem::HistoricalKvCleanup::Ticket historical_cleanup_ticket_;
+    std::unique_ptr<HistoricalCpuCleanup> historical_cleanup_;
     std::unique_ptr<kvmem::HistoricalKvCaptureSession> historical_capture_;
     std::unique_ptr<kvmem::HistoricalKvGc> historical_gc_;
     int historical_gc_mode_ = 0;

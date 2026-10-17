@@ -6,9 +6,15 @@
 
 namespace kvmem {
 
+struct HistoricalKvCaptureSession::ReservationCleanup final : HistoricalKvCleanup::Task {
+    std::optional<HistoricalKvRamReservation> ram;
+};
+
+HistoricalKvCaptureSession::HistoricalKvCaptureSession(KvMemRuntime & runtime) : runtime_(runtime) {}
+
 std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_create(
         KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
-        uint32_t capacity, const HistoricalKvRamDemand & demand) {
+        uint32_t capacity, const HistoricalKvRamDemand & demand, HistoricalKvCleanup * cleanup) {
     if (!capacity || runtime.store().total_tokens() || runtime.store().block_count() ||
         runtime.pending() || runtime.historical_shadow_directory().size() ||
         runtime.config().cpu_bytes || runtime.config().nvme_bytes ||
@@ -22,12 +28,16 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_crea
         throw std::invalid_argument("capture request exceeds logical position range");
     if (required > capacity) return {};
     try {
+        auto ticket = (cleanup ? *cleanup : HistoricalKvCleanup::process()).try_reserve();
+        if (!ticket) return {};
         auto result = std::unique_ptr<HistoricalKvCaptureSession>(new HistoricalKvCaptureSession(runtime));
+        result->cleanup_ticket_ = std::move(*ticket);
+        result->reservation_ = std::make_unique<ReservationCleanup>();
         result->repository_ = std::make_shared<HistoricalKvRepository>(capacity);
         result->storage_ = std::make_shared<HistoricalKvRawStore>(std::move(config), capacity);
         auto ram = HistoricalKvRamReservation::try_reserve(result->repository_, result->storage_, demand);
         if (!ram) return {};
-        result->reservation_ = std::move(ram);
+        result->reservation_->ram = std::move(ram);
         result->reserved_blocks_ = static_cast<uint32_t>(required);
         // Birth sequences are the admitted slot ordinal + 1. Every actual
         // model submission must sort after those stable initial LRU values.
@@ -52,6 +62,7 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_crea
                        released == HistoricalKvRawStore::ReleaseCode::Absent;
             });
         }
+        result->admitted_ = true;
         return result;
     } catch (const std::bad_alloc &) {
         return {};
@@ -64,6 +75,11 @@ HistoricalKvCaptureSession::~HistoricalKvCaptureSession() {
     // Tasks retain their own repository/storage/context. Closing admission
     // does not revoke their existing writer or free their installed payload.
     if (repository_) repository_->close();
+    if (admitted_) release_unused();
+}
+
+void HistoricalKvCaptureSession::release_unused() noexcept {
+    if (reservation_) cleanup_ticket_.submit(std::move(reservation_));
 }
 
 void HistoricalKvCaptureSession::fail() noexcept {
@@ -71,7 +87,7 @@ void HistoricalKvCaptureSession::fail() noexcept {
     repository_->close();
     producers_.clear();
     writers_.clear();
-    reservation_.reset(); // Only unused private allocations are returned here.
+    release_unused(); // Only unused private allocations, on the CPU worker.
 }
 
 bool HistoricalKvCaptureSession::append(uint32_t tokens) {
@@ -83,7 +99,7 @@ bool HistoricalKvCaptureSession::append(uint32_t tokens) {
     if (!tokens) return true;
     const uint32_t block_tokens = storage_->config().max_tokens_per_slot;
     const uint64_t count = (uint64_t(tokens) + block_tokens - 1) / block_tokens;
-    if (count > reservation_->slots().remaining()) return false;
+    if (count > reservation_->ram->slots().remaining()) return false;
     try {
         writers_.clear();
         uint32_t position = expected_rows_;
@@ -91,8 +107,8 @@ bool HistoricalKvCaptureSession::append(uint32_t tokens) {
         for (uint64_t i = 0; i < count; ++i) {
             const auto index = static_cast<uint32_t>(handles_.size());
             const auto n = std::min(left, block_tokens);
-            auto & payload = reservation_->payload(index);
-            auto writer = repository_->begin_reserved_write(reservation_->slots(),
+            auto & payload = reservation_->ram->payload(index);
+            auto writer = repository_->begin_reserved_write(reservation_->ram->slots(),
                 expected_blocks_ + i, position, n, uint64_t(index) + 1,
                 payload.payload_bytes(), std::move(callbacks_[index]));
             if (!writer) throw std::runtime_error("capture reserved writer admission failed");
@@ -134,7 +150,7 @@ bool HistoricalKvCaptureSession::finish() {
         case HistoricalKvRepository::CompletionState::Retired: break;
         }
     }
-    reservation_.reset();
+    release_unused();
     live_blocks_at_finish_ = live;
     finished_ = true;
     return true;

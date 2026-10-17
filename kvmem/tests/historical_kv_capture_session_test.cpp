@@ -25,6 +25,7 @@ struct HistoricalKvCaptureSessionTestAccess {
 }
 
 static thread_local int64_t allocation_budget = -1;
+static thread_local uint64_t foreground_frees = 0;
 void * operator new(size_t size) {
     if (!allocation_budget) throw std::bad_alloc();
     if (allocation_budget > 0) --allocation_budget;
@@ -32,14 +33,19 @@ void * operator new(size_t size) {
     throw std::bad_alloc();
 }
 void * operator new[](size_t size) { return ::operator new(size); }
-void operator delete(void * p) noexcept { std::free(p); }
-void operator delete[](void * p) noexcept { std::free(p); }
-void operator delete(void * p, size_t) noexcept { std::free(p); }
-void operator delete[](void * p, size_t) noexcept { std::free(p); }
+void operator delete(void * p) noexcept { if (p) ++foreground_frees; std::free(p); }
+void operator delete[](void * p) noexcept { ::operator delete(p); }
+void operator delete(void * p, size_t) noexcept { ::operator delete(p); }
+void operator delete[](void * p, size_t) noexcept { ::operator delete(p); }
 
 using namespace kvmem;
 static void check(bool ok, const char * message) {
     if (!ok) throw std::runtime_error(message);
+}
+static void wait_cleanup(HistoricalKvCleanup & cleanup = HistoricalKvCleanup::process()) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (cleanup.occupied() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    check(!cleanup.occupied(), "background private reservation cleanup did not finish");
 }
 static KvMemRuntimeConfig runtime_config() {
     KvMemRuntimeConfig cfg;
@@ -83,7 +89,9 @@ static void quotas_and_handoff() {
     complete(task, 1);
     check(!session->finish(), "outstanding task accepted as complete");
     task.reset();
-    check(session->finish() && session->payload_bytes() == 60 && session->output_remaining() == 2,
+    check(session->finish(), "early EOS did not finish");
+    wait_cleanup();
+    check(session->payload_bytes() == 60 && session->output_remaining() == 2,
           "early EOS did not return unused private payloads");
     check(!session->append(1) && !session->finish() && !session->end_input(), "finished session admitted work");
     check(runtime.store().blocks()[1].orig_pos_start == 3 &&
@@ -201,6 +209,7 @@ static void cancelled_owner_keeps_tasks() {
         observed = task->storage();
         session->producers_captured();
         session->fail();
+        wait_cleanup();
         check(task->storage()->allocated_payload_bytes() == 20 && task->repository().closed(),
               "cancel freed installed payload or kept admission open");
         worker = std::thread([captured = task, &finish_task, &succeeded] {
@@ -212,6 +221,7 @@ static void cancelled_owner_keeps_tasks() {
     const bool survived = !observed.expired();
     finish_task.store(true, std::memory_order_release);
     worker.join();
+    wait_cleanup();
     check(survived && succeeded, "background task lost owner at runtime destruction");
     check(observed.expired(), "repository release callback retained ownership cycle");
 }
@@ -229,6 +239,7 @@ static void failures_are_atomic() {
         if (session) { reached_success = true; break; }
     }
     check(reached_success, "admission fault sweep never succeeded");
+    wait_cleanup();
     reached_success = false;
     unsigned failures = 0;
     for (int64_t budget = 0; budget < 100; ++budget) {
@@ -242,8 +253,60 @@ static void failures_are_atomic() {
         if (appended) { reached_success = true; break; }
         check(session->failed() && !session->append(9) && !rt.store().block_count(),
               "failed registration changed runtime or admitted a retry");
+        wait_cleanup();
     }
     check(reached_success && failures, "metadata fault sweep did not cover failure and success");
+}
+
+static void unused_reservation_handoff_with_stalled_cleanup() {
+    std::promise<void> entered, resume;
+    auto entered_signal = entered.get_future();
+    auto resume_signal = resume.get_future().share();
+    HistoricalKvCleanup cleanup(2);
+    // Simulate a slow CPU allocator on the worker. Production tasks use
+    // nonblocking ready() to postpone domains with unfinished GC callbacks.
+    struct Stall final : HistoricalKvCleanup::Task {
+        std::promise<void> & entered;
+        std::shared_future<void> resume;
+        Stall(std::promise<void> & e, std::shared_future<void> r) : entered(e), resume(std::move(r)) {}
+        ~Stall() override { entered.set_value(); resume.wait(); }
+    };
+    struct Unblock {
+        std::promise<void> & resume;
+        bool opened = false;
+        void open() { if (!opened) { resume.set_value(); opened = true; } }
+        ~Unblock() { open(); }
+    } unblock{resume};
+    auto ticket = cleanup.try_reserve();
+    ticket->submit(std::make_unique<Stall>(entered, resume_signal));
+    check(entered_signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+          "cleanup stall barrier was not reached");
+    KvMemRuntime runtime(runtime_config());
+    auto d = demand(4, 4, 2);
+    d.private_scratch_bytes = 4096;
+    auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, d, &cleanup);
+    check(session && session->append(4), "stalled cleanup fixture was not admitted");
+    auto producer = runtime.historical_shadow_directory().find(0)->writer_context;
+    session->producers_captured();
+    complete(producer, 4);
+    producer.reset();
+    check(session->end_input(), "stalled cleanup fixture input did not end");
+    const auto frees_before = foreground_frees;
+    allocation_budget = 0;
+    const bool finished = session->finish();
+    allocation_budget = -1;
+    check(finished && foreground_frees == frees_before &&
+          session->payload_bytes() == 60 && cleanup.occupied() == 2,
+          "finish waited, freed unused RAM, or returned credit before worker cleanup");
+    KvMemRuntime another(runtime_config());
+    check(!HistoricalKvCaptureSession::try_create(another, storage_config(), 3, d, &cleanup) &&
+          !another.store().total_tokens(), "full cleanup queue admitted another request");
+    unblock.open();
+    wait_cleanup(cleanup);
+    check(session->payload_bytes() == 20 && session->repository()->ready_count() == 2,
+          "worker did not return unused payload and slot credits");
+    auto access = runtime.historical_shadow_directory().acquire_read(0);
+    check(bool(access), "private cleanup released installed history");
 }
 
 int main() {
@@ -252,8 +315,11 @@ int main() {
         retired_blocks_do_not_invalidate_completed_request();
         request_finishes_while_background_release_is_blocked();
         boundary_limit();
+        wait_cleanup();
         cancelled_owner_keeps_tasks();
         failures_are_atomic();
+        wait_cleanup();
+        unused_reservation_handoff_with_stalled_cleanup();
         std::puts("PASS historical capture session: bounded quotas, producer handoff, publication, terminal cancellation, allocation faults");
     } catch (const std::exception & e) {
         allocation_budget = -1;

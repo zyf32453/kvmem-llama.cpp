@@ -37,11 +37,13 @@ void HistoricalKvGc::start() {
     std::lock_guard<std::mutex> guard(tick_mu_);
     if (worker_.joinable()) throw std::logic_error("historical KV GC already started");
     stopping_.store(false, std::memory_order_release);
-    worker_ = std::thread([this] { run(); });
+    worker_finished_.store(false, std::memory_order_release);
+    try { worker_ = std::thread([this] { run(); }); }
+    catch (...) { worker_finished_.store(true, std::memory_order_release); throw; }
 }
 
 void HistoricalKvGc::stop() noexcept {
-    stopping_.store(true, std::memory_order_release);
+    request_stop();
     if (worker_.joinable()) worker_.join();
 }
 
@@ -61,6 +63,7 @@ void HistoricalKvGc::run() noexcept {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(config_.poll_ms));
     }
+    worker_finished_.store(true, std::memory_order_release);
 }
 
 HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & intent) {

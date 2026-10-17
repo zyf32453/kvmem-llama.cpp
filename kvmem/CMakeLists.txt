@@ -11,6 +11,7 @@ endif()
 add_library(kvmem
     src/host/historical_kv_active_set.cpp
     src/host/historical_kv_capture_session.cpp
+    src/host/historical_kv_cleanup.cpp
     src/host/historical_kv_gc.cpp
     src/host/historical_kv_policy_lru.cpp
     src/host/historical_kv_ram_reservation.cpp
@@ -53,6 +54,7 @@ kvmem_add_test(kvmem_gc_test)
 kvmem_add_test(historical_kv_active_set_test)
 kvmem_add_test(historical_kv_append_test)
 kvmem_add_test(historical_kv_capture_session_test)
+kvmem_add_test(historical_kv_cleanup_test)
 kvmem_add_test(historical_kv_gc_test)
 kvmem_add_test(historical_kv_legacy_raw_bridge_test)
 kvmem_add_test(historical_kv_policy_test)

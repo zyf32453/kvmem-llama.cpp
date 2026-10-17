@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kvmem/historical_kv_ram_reservation.hpp"
+#include "kvmem/historical_kv_cleanup.hpp"
 #include "kvmem/kvmem_runtime.hpp"
 
 namespace kvmem {
@@ -15,7 +16,8 @@ class HistoricalKvCaptureSession {
 public:
     static std::unique_ptr<HistoricalKvCaptureSession> try_create(
         KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
-        uint32_t capacity, const HistoricalKvRamDemand & demand);
+        uint32_t capacity, const HistoricalKvRamDemand & demand,
+        HistoricalKvCleanup * cleanup = nullptr);
     ~HistoricalKvCaptureSession();
     HistoricalKvCaptureSession(const HistoricalKvCaptureSession &) = delete;
     HistoricalKvCaptureSession & operator=(const HistoricalKvCaptureSession &) = delete;
@@ -31,6 +33,8 @@ public:
     // must be published; blocks retired during the request may already be
     // releasing or reclaimed. No task references may remain; background
     // metadata guards/release callbacks do not delay this request boundary.
+    // Unused private allocations are submitted to the pre-reserved cleanup
+    // cell. payload_bytes() may still include them until its worker runs.
     bool finish();
     void fail() noexcept;
     bool failed() const noexcept { return failed_; }
@@ -50,11 +54,14 @@ public:
 
 private:
     friend struct HistoricalKvCaptureSessionTestAccess;
-    explicit HistoricalKvCaptureSession(KvMemRuntime & runtime) : runtime_(runtime) {}
+    explicit HistoricalKvCaptureSession(KvMemRuntime & runtime);
     KvMemRuntime & runtime_;
     std::shared_ptr<HistoricalKvRepository> repository_;
     std::shared_ptr<HistoricalKvRawStore> storage_;
-    std::optional<HistoricalKvRamReservation> reservation_;
+    struct ReservationCleanup;
+    HistoricalKvCleanup::Ticket cleanup_ticket_;
+    std::unique_ptr<ReservationCleanup> reservation_;
+    void release_unused() noexcept;
     std::vector<HistoricalKvRepository::ReleaseCallback> callbacks_;
     std::vector<HistoricalKvRepository::Lease> writers_;
     std::vector<HistoricalKvShadowDirectory::Producer> producers_;
@@ -63,7 +70,7 @@ private:
     uint64_t last_use_sequence_ = 0;
     uint32_t expected_rows_ = 0, expected_blocks_ = 0, reserved_blocks_ = 0;
     uint32_t live_blocks_at_finish_ = 0;
-    bool input_ = true, failed_ = false, finished_ = false;
+    bool input_ = true, failed_ = false, finished_ = false, admitted_ = false;
 };
 
 } // namespace kvmem

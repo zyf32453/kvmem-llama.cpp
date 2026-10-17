@@ -53,6 +53,8 @@ public:
 
     // start() is explicit so tests can deterministically drive manual_tick().
     void start();
+    void request_stop() noexcept { stopping_.store(true, std::memory_order_release); }
+    bool worker_finished() const noexcept { return worker_finished_.load(std::memory_order_acquire); }
     void stop() noexcept;
     void manual_tick();
     Stats stats() const;
@@ -80,6 +82,7 @@ private:
     uint32_t reclaim_cursor_ = 0;
     uint32_t collect_cursor_ = 0;
     std::atomic<bool> stopping_{false};
+    std::atomic<bool> worker_finished_{true};
     std::thread worker_;
     std::atomic<uint64_t> ticks_{0}, proposed_{0}, committed_{0}, shadow_{0};
     std::atomic<uint64_t> reclaimed_{0}, deferred_{0}, stale_{0};
