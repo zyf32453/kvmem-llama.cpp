@@ -292,6 +292,9 @@ private:
         ggml_tensor * vt = nullptr;
         size_t tensor_off = 0;
         uint32_t token_offset = 0;
+        // Present only for the finite managed capture owner. The physical
+        // slot cannot be reused until this queued source has completed.
+        int32_t historical_gpu_slot = -1;
         bool committed = false;
         // Captured before D2H submission. Commit uses this exact writer and
         // allocation even after the foreground retires/unbinds the block.
@@ -299,6 +302,7 @@ private:
     };
     void commit_harvest_packed(const HarvestVJob & job, const uint8_t * bytes);
     void enqueue_harvest_packed(HarvestVJob job);
+    void complete_historical_gpu_source(int32_t slot);
     struct HarvestVBatch {
         int slot = -1;
         std::vector<HarvestVJob> jobs;
@@ -435,7 +439,12 @@ private:
     // harvest synchronization. Empty in production requests.
     std::function<void()> historical_submission_test_hook_;
     uint64_t historical_active_skips_ = 0;
-    uint64_t historical_active_pending_drains_ = 0;
+    // Foreground-owned, fixed-size accounting; the CPU GC never touches GPU
+    // slots. Retired cells disappear immediately, source slots return later.
+    std::vector<uint32_t> historical_gpu_readers_;
+    std::vector<uint8_t> historical_gpu_retired_;
+    uint64_t historical_gpu_deferred_ = 0;
+    uint64_t historical_gpu_returned_ = 0;
     std::vector<int32_t> free_slots_;
     struct RowPosition {
         std::array<llama_pos, 4> pos{};

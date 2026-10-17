@@ -1075,6 +1075,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         // Row positions have a known finite bound in this baseline. Directory,
         // staging scratch and backend work allocations still need admission.
         row_positions_.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
+        historical_gpu_readers_.assign(n_slots_, 0);
+        historical_gpu_retired_.assign(n_slots_, 0);
         historical_capture_ = std::move(session);
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu\n",
             capacity, historical_capture_->reserved_blocks(),
@@ -1140,6 +1142,11 @@ bool llama_memory_kvmem::finish_historical_capture() {
     try {
         harvest_flush();
         harvest_gpu_v_commit();
+        if (std::any_of(historical_gpu_readers_.begin(), historical_gpu_readers_.end(),
+                        [](uint32_t readers) { return readers != 0; }) ||
+            std::any_of(historical_gpu_retired_.begin(), historical_gpu_retired_.end(),
+                        [](uint8_t retired) { return retired != 0; }))
+            throw std::logic_error("historical request still owns pending GPU source slots");
         // Stop short metadata observations before the request's final
         // zero-task-reference check. The worker never releases on this thread.
         if (historical_gc_) historical_gc_->stop();
@@ -1160,9 +1167,11 @@ bool llama_memory_kvmem::finish_historical_capture() {
                 (unsigned long long) historical_capture_->payload_bytes());
             if (stats.policy_failures || stats.worker_failures) return false;
         }
-        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live=%u references=0 rows=%u payload_bytes=%llu\n",
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live=%u references=0 rows=%u payload_bytes=%llu gpu_deferred=%llu gpu_returned=%llu\n",
             historical_capture_->created_blocks(), historical_capture_->live_blocks_at_finish(), store_n_tokens(),
-            (unsigned long long) historical_capture_->payload_bytes());
+            (unsigned long long) historical_capture_->payload_bytes(),
+            (unsigned long long) historical_gpu_deferred_,
+            (unsigned long long) historical_gpu_returned_);
         return true;
     } catch (const std::exception & e) {
         historical_capture_->fail();
@@ -1172,6 +1181,11 @@ bool llama_memory_kvmem::finish_historical_capture() {
 }
 
 void llama_memory_kvmem::reset_slots() {
+    if (std::any_of(historical_gpu_readers_.begin(), historical_gpu_readers_.end(),
+                   [](uint32_t readers) { return readers != 0; }) ||
+        std::any_of(historical_gpu_retired_.begin(), historical_gpu_retired_.end(),
+                   [](uint8_t retired) { return retired != 0; }))
+        throw std::logic_error("GPU slot reset before historical sources completed");
     free_slots_.clear();
     free_slots_.reserve(n_slots_);
     for (int32_t i = static_cast<int32_t>(n_slots_) - 1; i >= 0; --i) {
@@ -1890,7 +1904,22 @@ void llama_memory_kvmem::free_slot(int32_t slot) {
     if (slot < 0) {
         return;
     }
+    if (size_t(slot) < historical_gpu_readers_.size() &&
+            (historical_gpu_readers_[slot] || historical_gpu_retired_[slot]))
+        throw std::logic_error("GPU slot returned before historical sources completed");
     free_slots_.push_back(slot);
+}
+
+void llama_memory_kvmem::complete_historical_gpu_source(int32_t slot) {
+    if (slot < 0) return;
+    if (size_t(slot) >= historical_gpu_readers_.size() || !historical_gpu_readers_[slot])
+        throw std::logic_error("historical GPU source completion without ownership");
+    if (--historical_gpu_readers_[slot] == 0 && historical_gpu_retired_[slot]) {
+        historical_gpu_retired_[slot] = 0;
+        free_slot(slot);
+        ++historical_gpu_returned_;
+        if (trace_) kvmem_diag("KVMEM_TRACE historical_gpu_return slot=%d\n", slot);
+    }
 }
 
 int32_t llama_memory_kvmem::peek_free_slot() const {
@@ -2658,6 +2687,8 @@ bool llama_memory_kvmem::begin_active_ubatch(
         // newly applied cells are not an old historical view being reselected.
         if (uint64_t(block.orig_pos_end()) > current_begin &&
             uint64_t(block.orig_pos_start) < current_end) continue;
+        if (uint64_t(block.orig_pos_end()) > current_begin)
+            return reject("future resident span is not GPU-complete history", block.block_id);
         const auto observation = directory.observe(block.block_id);
         if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged)
             return reject("unmanaged resident history", block.block_id);
@@ -2690,23 +2721,23 @@ bool llama_memory_kvmem::begin_active_ubatch(
             });
         if (!permitted) remove_ids.push_back(requested_ids[i]);
     }
-    if (!remove_ids.empty()) {
-        // A retired block can still have an admitted packed-K/V D2H copy
-        // reading its old GPU slot. Drain those producers before returning
-        // the slot to the allocator; this waits on our transfer, not GC.
-        const size_t pending = harvest_v_jobs_.size() + harvest_v_pending_.jobs.size();
-        historical_active_pending_drains_ += pending != 0;
-        if (trace_) kvmem_diag("KVMEM_TRACE historical_active_drain retired=%zu pending=%zu\n",
-                remove_ids.size(), pending);
-        harvest_gpu_v_commit();
-    }
     for (uint32_t id : remove_ids) {
         const auto block = store.blocks()[id];
         if (!store.forget_retired_gpu_residency(id))
             return reject("retired GPU residency changed", id);
         kv_->seq_rm_logical(0, static_cast<llama_pos>(block.orig_pos_start),
                             static_cast<llama_pos>(block.orig_pos_end()));
-        free_slot(block.gpu_slot);
+        // Removing cells changes only the next attention view. A queued D2H
+        // may still read this physical slot, so retain its allocation without
+        // waiting here; ordinary transfer completion returns it exactly once.
+        if (historical_gpu_readers_[block.gpu_slot]) {
+            historical_gpu_retired_[block.gpu_slot] = 1;
+            ++historical_gpu_deferred_;
+            if (trace_) kvmem_diag("KVMEM_TRACE historical_gpu_defer slot=%d readers=%u\n",
+                block.gpu_slot, historical_gpu_readers_[block.gpu_slot]);
+        } else {
+            free_slot(block.gpu_slot);
+        }
         ++attention_epoch_;
         ++historical_active_skips_;
         if (trace_) kvmem_diag("KVMEM_TRACE historical_active_skip block=%u slot=%d\n",
@@ -3973,6 +4004,11 @@ void llama_memory_kvmem::commit_harvest_packed(const HarvestVJob & job, const ui
 }
 
 void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) {
+    if (job.historical_gpu_slot >= 0 &&
+            (size_t(job.historical_gpu_slot) >= historical_gpu_readers_.size() ||
+             historical_gpu_retired_[job.historical_gpu_slot] ||
+             historical_gpu_readers_[job.historical_gpu_slot] == UINT32_MAX))
+        throw std::logic_error("historical GPU source admission has no live slot");
     if (multi_gpu_) {
         std::vector<uint8_t> packed(job.nbytes);
         kvmem_tensor_get(job.vt, packed.data(), job.tensor_off, job.nbytes);
@@ -3988,6 +4024,7 @@ void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) {
             harvest_v_jobs_.reserve(std::max<size_t>(8, harvest_v_jobs_.capacity() * 2));
         job.pin_off = kvmem_stageout_used();
         if (!kvmem_stageout_enqueue(job.gpu_src, job.nbytes)) return false;
+        if (job.historical_gpu_slot >= 0) ++historical_gpu_readers_[job.historical_gpu_slot];
         harvest_v_jobs_.push_back(std::move(job));
         return true;
     };
@@ -4055,6 +4092,7 @@ void llama_memory_kvmem::harvest_captured_packed(const CaptureBatch & batch, uin
                 HarvestVJob job;
                 const size_t row = is_k ? krow : vrow;
                 job.writer = writer;
+                if (historical_capture_) job.historical_gpu_slot = range.gpu_slot;
                 job.il = il;
                 job.is_k = is_k;
                 job.token_offset = prefix;
@@ -4113,6 +4151,7 @@ void llama_memory_kvmem::harvest_write_batch() {
         // A later job may throw (for example allocation failure). Retrying
         // this batch must not submit an already committed write-once slice.
         j.committed = true;
+        complete_historical_gpu_source(j.historical_gpu_slot);
     }
     if (retr_.enabled) {
         retr_.stage_out_host_us += ggml_time_us() - t0;
