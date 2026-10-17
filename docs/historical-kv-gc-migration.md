@@ -182,6 +182,8 @@ GPU 验收在原有已知张量用例之外，新增真正调用 `llama_decode` 
 
 远程真实模型测试保留了原 F16、Q8_0 的请求后 LRU 回收检查，并新增 F16 请求中退休：第一段 48 token 之后退休一个当时 GPU 驻留的块，旧 CPU `ReadLease` 持有期间仓库拒绝物理释放，新 CPU 读立即关闭；继续第二段真实 `llama_decode` 时，新 active 跳过该块并从 GPU 工作集去掉它；旧读者退出后后台 worker 归还对应 Host payload，余下 160-token 输入和 3-token 生成正常完成。请求结束校验现在允许确实已退休、释放中或同代已回收的块，不再错误要求每个创建块仍为 `Live`。本地 capture-session 测试及远程五项相关宿主 CTest 均通过；隔离远程日志为 `historical-active-midrequest-gpu-test.log`。此用例的退休发生在两次 `llama_decode` 之间，**尚未验证退休与已提交的 GPU kernel 真正重叠**。
 
+随后增加一个默认空的测试回调，位于真实图计算成功提交、LRU 使用序列已记录之后，但在 `harvest_pending` 的显式设备同步之前。新增 F16 模型场景从当次实际取得的 `ExecLease` 中选一个 GPU 驻留历史块，在这个确定的边界退休它；仓库仍报告该执行许可有效，回收尝试只能延期。紧接着的微批次跳过退休块，旧许可退出后后台 worker 归还 CPU payload，完整请求继续生成。`historical-submitted-retire-gpu-test.log` 同时保留了两种请求中退休场景及 F16/Q8_0 旧回归。该回调为空时不影响普通请求；测试证明了**提交至显式同步期间的 lease 生命周期**，但没有量到 CUDA kernel 在退休瞬间是否仍实际运行。
+
 ### 受限 CLI 的 off/shadow/delete（2026-10-17）
 
 CLI 的 `--kvmem-historical-capture N` 现在可配 `--kvmem-historical-gc-mode off|shadow|delete` 和成对的 `--kvmem-historical-gc-low/--kvmem-historical-gc-high`。默认 off；显式 shadow/delete 在请求仓库上启动唯一后台 manager，退出请求时先停止 worker，再检查发布与任务引用。阈值要求 `0 < low < high <= N`；未给时取容量的约四分之一与二分之一。首版只使用独立的按句柄 RAM 存储，不能用于 server、检索、MTP、NVMe、CPU spill arena、hybrid、多请求或会话恢复。

@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -430,6 +431,9 @@ private:
     std::unique_ptr<kvmem::HistoricalKvGc> historical_gc_;
     int historical_gc_mode_ = 0;
     std::unique_ptr<kvmem::HistoricalKvActiveSet> historical_active_;
+    // Deterministic test seam immediately after graph submission and before
+    // harvest synchronization. Empty in production requests.
+    std::function<void()> historical_submission_test_hook_;
     uint64_t historical_active_skips_ = 0;
     std::vector<int32_t> free_slots_;
     struct RowPosition {

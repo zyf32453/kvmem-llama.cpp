@@ -2705,6 +2705,7 @@ void llama_memory_kvmem::mark_active_submission() {
     if (historical_active_ &&
         !historical_active_->mark_execution_submitted(historical_capture_->next_use_sequence()))
         throw std::runtime_error("historical active submission could not record LRU use");
+    if (historical_submission_test_hook_) historical_submission_test_hook_();
 }
 
 void llama_memory_kvmem::complete_active_ubatch() noexcept {
