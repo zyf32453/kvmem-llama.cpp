@@ -313,6 +313,58 @@ static void test_repository_identity_and_releasing_authority() {
           "second repository did not acknowledge its own release");
 }
 
+static void test_final_publication_under_ref_churn_and_retirement() {
+    using Repo = HistoricalKvRepository;
+    Repo repo(1);
+    for (uint32_t round = 0; round < 200; ++round) {
+        auto writer = repo.begin_write(round, round, 1, round + 1, 8, [](auto) { return true; });
+        check(writer.has_value(), "publication race could not reuse slot");
+        const auto handle = writer->handle();
+        std::atomic<bool> start{false}, done{false};
+        std::thread observer([&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            while (!done.load(std::memory_order_acquire)) (void) repo.inspect(handle);
+        });
+        start.store(true, std::memory_order_release);
+        // Metadata pins constantly change refs. The last producer must still
+        // publish in one operation; it cannot wait for another future write.
+        check(repo.publish_write(*writer), "reference churn lost final publication");
+        check(!repo.publish_write(*writer), "duplicate publication changed a Live phase");
+        done.store(true, std::memory_order_release);
+        observer.join();
+        check(repo.inspect(handle)->references == 1, "publication changed reference bits");
+        check(repo.retire(handle) == Repo::RetireResult::Committed, "publication cleanup retirement failed");
+        check(!repo.publish_write(*writer) && repo.inspect(handle)->life == HistoricalKvLife::Retired,
+              "completion resurrected a retired generation");
+        writer->reset();
+        check(!repo.publish_write(*writer) && repo.try_reclaim(handle) == Repo::ReclaimResult::Complete,
+              "completed writer could modify/release the wrong phase");
+
+        writer = repo.begin_write(round, round, 1, round + 1, 8, [](auto) { return true; });
+        check(writer.has_value(), "retirement race could not reuse slot");
+        const auto next = writer->handle();
+        std::atomic<bool> race{false};
+        Repo::RetireResult retired = Repo::RetireResult::Retry;
+        std::thread retire([&] {
+            while (!race.load(std::memory_order_acquire)) std::this_thread::yield();
+            // Retire retains its bounded-CAS retry contract. Only this test
+            // actor retries; publication itself has no retry loop.
+            for (unsigned attempt = 0; attempt < 100 && retired == Repo::RetireResult::Retry; ++attempt)
+                retired = repo.retire(next);
+        });
+        race.store(true, std::memory_order_release);
+        (void) repo.publish_write(*writer);
+        retire.join();
+        check(retired == Repo::RetireResult::Committed &&
+              repo.inspect(next)->life == HistoricalKvLife::Retired &&
+              repo.inspect(next)->references == 1 && !repo.publish_write(*writer),
+              "publication and retirement did not preserve sticky retirement/refs");
+        writer->reset();
+        check(repo.try_reclaim(next) == Repo::ReclaimResult::Complete,
+              "publication race lost physical release");
+    }
+}
+
 int main() {
     test_retire_closes_new_entry_but_keeps_old_reader();
     test_writing_retire_cannot_resurrect();
@@ -322,5 +374,6 @@ int main() {
     test_bounded_observation_counts_each_slot_once();
     test_close_blocks_new_work_but_old_lease_can_finish();
     test_repository_identity_and_releasing_authority();
+    test_final_publication_under_ref_churn_and_retirement();
     std::cout << "historical KV repository checks passed\n";
 }

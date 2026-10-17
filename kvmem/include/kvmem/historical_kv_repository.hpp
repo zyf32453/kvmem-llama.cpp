@@ -107,6 +107,9 @@ public:
         Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
         uint32_t valid_tokens, uint64_t birth_seq,
         uint64_t payload_bytes, ReleaseCallback release);
+    // One atomic phase-bit update under the original writer: only Writing
+    // becomes Live. Retirement is sticky and refcount churn cannot postpone
+    // the last producer's completion publication.
     bool publish_write(const Lease & writer);
     // A retired block never grants a new lease, even if old leases remain.
     // acquire_new is the execution permission used at each active boundary.

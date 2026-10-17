@@ -22,7 +22,10 @@ struct kvmem_transfer_test_access {
         mem.write_block_to_gpu(id);
     }
     static void capture(llama_memory_kvmem & mem, uint32_t id) { mem.harvest_gpu_v(id); }
-    static void capture_fixed_spans(llama_memory_kvmem & mem) { mem.harvest_full_blocks_async(); }
+    static void capture_current(llama_memory_kvmem & mem) {
+        if (mem.pos_queue_.empty()) throw std::runtime_error("fixture has no admitted capture batch");
+        mem.harvest_captured_packed(mem.pos_queue_.front(), mem.pos_queue_.front().positions.size());
+    }
     static void place(llama_memory_kvmem & mem, uint32_t id) {
         const auto slot = mem.alloc_slot();
         if (slot < 0) throw std::runtime_error("fixture has no GPU slot");
@@ -45,6 +48,11 @@ struct kvmem_transfer_test_access {
     static void mean_positions(llama_memory_kvmem & mem, const std::vector<llama_pos> & positions) {
         mem.pos_queue_.clear();
         mem.note_ubatch_pos(positions);
+    }
+    static void mean_nodes(llama_memory_kvmem & mem, const std::vector<ggml_tensor *> & tensors) {
+        mem.pending_capture_.clear();
+        const auto & layers = mem.raw().config().historical_gc_attention_layers;
+        for (size_t i = 0; i < layers.size(); ++i) mem.register_capture(tensors[i], layers[i], 'k');
     }
     static bool mean_submit(llama_memory_kvmem & mem) {
         // Deterministic barrier: queue the real DMA but do not let its worker
@@ -371,11 +379,53 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         require(runtime.bind_historical_full_block(0, repository, handle, *writer, producer, payload),
                 "managed payload directory binding failed");
         MeanTensors means(mem, 0, block, round == 3, round < 2 ? GGML_TYPE_F16 : GGML_TYPE_F32);
+        if (round == 0) {
+            // A prepared block can span multiple executed microbatches. Even
+            // though all GPU rows exist in this fixture, only the executed
+            // prefix is eligible for capture. A second submission before DMA
+            // commit must account for queued prefixes, not write them twice.
+            kvmem_transfer_test_access::mean_inputs(mem, means.layers, 0, 16);
+            kvmem_transfer_test_access::capture_current(mem);
+            const auto queued = kvmem_transfer_test_access::pending(mem);
+            kvmem_transfer_test_access::capture_current(mem);
+            require(queued == kvmem_transfer_test_access::pending(mem),
+                    "packed retry duplicated still-pending component slices");
+            kvmem_transfer_test_access::commit(mem);
+            for (uint32_t il : cfg.attention_layers) {
+                const auto progress = payload->write_progress(producer->writer(), handle, il);
+                require(progress && progress->packed_k_tokens == 16 && progress->packed_v_tokens == 16 &&
+                        progress->mean_k_tokens == 4, "packed capture copied unexecuted future rows");
+            }
+        }
         kvmem_transfer_test_access::mean_inputs(mem, means.layers, 0, block);
+        if (round == 1) {
+            // Preparation already owns the producer. Later retirement closes
+            // new work, but cannot cancel this admitted batch's packed task.
+            producer.reset();
+            require(repository->retire(handle) == Repository::RetireResult::Committed,
+                    "could not retire the prepared capture before packed submission");
+        }
+        if (round < 2) kvmem_transfer_test_access::capture_current(mem);
         if (round < 2) {
             require(kvmem_transfer_test_access::mean_submit(mem), "asynchronous Mean-K submit failed");
         } else if (round == 2) {
-            kvmem_transfer_test_access::mean_sync(mem);
+            // Exercise the production graph-completion entry, including the
+            // packed task handoff before Mean-K consumes each microbatch.
+            // Both tasks are admitted before dropping the request producer;
+            // the first packed DMA is still pending when the second arrives.
+            auto first = ub, second = ub;
+            first.n_tokens = 16;
+            second.n_tokens = block - 16;
+            second.pos = second.logical_pos = positions.data() + 16;
+            require(mem.prepare_ubatches({first, second}, 0, slots), "split producer admission failed");
+            MeanTensors prefix(mem, 0, 16, false, GGML_TYPE_F32);
+            MeanTensors suffix(mem, 16, block - 16, false, GGML_TYPE_F32);
+            producer.reset();
+            kvmem_transfer_test_access::mean_nodes(mem, prefix.layers);
+            mem.harvest_pending(nullptr);
+            kvmem_transfer_test_access::mean_nodes(mem, suffix.layers);
+            mem.harvest_pending(nullptr);
+            mem.harvest_flush();
         } else {
             // Only 8 accepted tokens from a 32-token draft enter the sum.
             kvmem_transfer_test_access::mean_decode(mem, 8);
@@ -383,7 +433,6 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                                             cfg.attention_layers.front())->mean_k_tokens == 0,
                     "decode accumulator flushed speculative tokens prematurely");
         }
-        kvmem_transfer_test_access::capture(mem, 0);
         require(kvmem_transfer_test_access::pending(mem) > 0, "test did not enqueue asynchronous packed writes");
         const bool retire_in_flight = round == 1 || round == 4;
         std::unique_ptr<kvmem::HistoricalKvGc> background_gc;
@@ -395,7 +444,8 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         };
         if (retire_in_flight) {
             producer.reset(); // Only the queued DMA/Mean-K tasks now hold the writer.
-            require(repository->retire(handle) == Repository::RetireResult::Committed,
+            require(repository->retire(handle) == (round == 1
+                    ? Repository::RetireResult::AlreadyRetired : Repository::RetireResult::Committed),
                     "in-flight writer retirement failed");
             if (round != 1) require(runtime.unbind_retired_historical_block(0),
                                    "retired writer observation failed");
@@ -433,8 +483,8 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                 std::puts("PASS managed task lifetime: late CUDA Mean-K completed, background CPU release, no unbind/next active");
             } else mem.harvest_flush();
             if (round == 0) {
-                // Replaying an already committed capture while still Writing
-                // must not count its tokens again.
+                // Replaying an already published capture must not count its
+                // tokens again or discover new writer work.
                 kvmem_transfer_test_access::mean_inputs(mem, means.layers, 0, block);
                 kvmem_transfer_test_access::mean_sync(mem);
             }
@@ -443,6 +493,7 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
             MeanTensors suffix(mem, 8, block - 8, false, GGML_TYPE_F32);
             kvmem_transfer_test_access::mean_inputs(mem, suffix.layers, 8, block - 8);
             kvmem_transfer_test_access::mean_decode(mem, block - 8);
+            kvmem_transfer_test_access::commit(mem);
         } else if (round == 4) {
             kvmem_transfer_test_access::mean_inputs(mem, means.layers, 8, block - 8);
             kvmem_transfer_test_access::mean_decode(mem, block - 8);
@@ -454,9 +505,11 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         require(kvmem_transfer_test_access::pending(mem) == 0 && !mem.raw().has_block(0),
                 "managed completion leaked jobs or wrote the positional legacy store");
         if (!retire_in_flight) {
-            require(payload->publish_complete(*repository, directory.find(0)->writer_context->writer(), handle),
-                    "completed managed capture could not publish");
+            require(repository->inspect(handle)->life == kvmem::HistoricalKvLife::Live,
+                    "last managed component did not automatically publish");
             producer.reset();
+            require(!directory.find(0)->writer_context && repository->inspect(handle)->references == 0,
+                    "completed capture retained a producer after publication");
             {
                 auto read = directory.acquire_read(0);
                 require(read && read.storage == payload, "managed read resolved wrong allocation");
@@ -599,8 +652,8 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
     mem.occupy_in(mem.get_kv(), 1);
     MeanTensors first(mem, 0, 8, false, GGML_TYPE_F16);
     kvmem_transfer_test_access::mean_inputs(mem, first.layers, 0, 8);
+    kvmem_transfer_test_access::capture_current(mem);
     require(kvmem_transfer_test_access::mean_submit(mem), "short Mean-K DMA failed");
-    kvmem_transfer_test_access::capture_fixed_spans(mem);
     require(kvmem_transfer_test_access::pending(mem) > 0, "short packed spans were skipped");
     auto late = directory.find(1);
     auto first_producer = producers[0];
@@ -636,14 +689,13 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
     kvmem_transfer_test_access::mean_decode(mem, 27);
     require(kvmem_transfer_test_access::decode_tokens(mem) == 0,
             "non-aligned decode mean did not flush at admitted end");
-    kvmem_transfer_test_access::capture_fixed_spans(mem);
     kvmem_transfer_test_access::commit(mem);
     kvmem_transfer_test_access::clear_mean_nodes(mem);
     for (uint32_t id : {0u, 2u}) {
         auto binding = directory.find(id);
         const auto & span = runtime.store().blocks()[id];
-        require(payload->publish_complete(*repository, binding->writer_context->writer(), binding->handle),
-                "short span could not publish complete");
+        require(repository->inspect(binding->handle)->life == kvmem::HistoricalKvLife::Live,
+                "last short-span component did not automatically publish");
         auto read = directory.acquire_read(id);
         for (const auto & c : checks) if (c.id == id) {
             auto layer = payload->read_layer(read.lease, binding->handle, c.il);

@@ -2594,7 +2594,7 @@ llama_memory_kvmem::CaptureBatch llama_memory_kvmem::capture_batch(
         } else if (const auto binding = directory.find(bid)) {
             const auto & context = binding->writer_context;
             const auto meta = context ? context->writer().metadata() : std::nullopt;
-            if (context && context->storage() && context->storage()->config().mean_k_elements &&
+            if (context && context->storage() &&
                     meta && meta->life == kvmem::HistoricalKvLife::Writing &&
                     !context->repository().closed()) {
                 if (range.original_begin < binding->original_begin ||
@@ -2604,6 +2604,7 @@ llama_memory_kvmem::CaptureBatch llama_memory_kvmem::capture_batch(
                 }
                 range.route = MeanWriteRange::Route::Managed;
                 range.token_offset = static_cast<uint32_t>(range.original_begin - binding->original_begin);
+                range.gpu_slot = store.blocks()[bid].gpu_slot;
                 range.writer = context;
             }
         }
@@ -3303,6 +3304,18 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         return;
     }
     const int64_t t_entry = ggml_time_us();
+    if (!pos_queue_.empty() && std::any_of(pos_queue_.front().ranges.begin(),
+            pos_queue_.front().ranges.end(), [](const MeanWriteRange & range) {
+                return range.route == MeanWriteRange::Route::Managed;
+            })) {
+        // Packed KV is produced by the graph, unlike the pre-RoPE Mean-K
+        // tensors. Finish that graph before gathering its accepted KV rows.
+        // Keep the original batch alive until both producer routes own it.
+        if (sched) ggml_backend_sched_synchronize(sched);
+        else if (!kvmem_cuda_ok(cudaDeviceSynchronize(), "managed packed compute wait"))
+            throw std::runtime_error("historical packed source graph did not complete");
+        harvest_captured_packed(pos_queue_.front(), pos_queue_.front().positions.size());
+    }
     perf_.last_commit_us = 0;
     perf_.last_d2h_wait_us = 0;
     perf_.last_pack_us = 0;
@@ -3510,6 +3523,7 @@ void llama_memory_kvmem::commit_mean_k(
         }
         const auto & context = range.writer;
         const auto & storage = context->storage();
+        if (!storage->config().mean_k_elements) continue;
         const auto progress = storage->write_progress(context->writer(), context->handle(), il);
         if (!progress || storage->config().mean_k_elements != n_embd_k_ ||
                 progress->mean_k_tokens < range.token_offset) {
@@ -3528,6 +3542,7 @@ void llama_memory_kvmem::commit_mean_k(
                 range.token_offset + skip, range.token_count - skip, sum)) {
             throw std::logic_error("historical Mean-K capture rejected its original writer/range");
         }
+        storage->publish_complete(context->repository(), context->writer(), context->handle());
     }
 }
 
@@ -3643,10 +3658,112 @@ void llama_memory_kvmem::commit_harvest_packed(const HarvestVJob & job, const ui
             : storage->write_packed_v_slice(job.writer->writer(), job.writer->handle(),
                                            job.il, job.token_offset, job.n, packed);
         if (!written) throw std::runtime_error("historical harvest rejected captured generation or range");
+        storage->publish_complete(job.writer->repository(), job.writer->writer(), job.writer->handle());
         return;
     }
     if (job.is_k) raw_->write_layer_k_gpu(job.pos0, job.n, job.il, bytes);
     else raw_->write_layer_v_gpu(job.pos0, job.n, job.il, bytes);
+}
+
+void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) {
+    if (multi_gpu_) {
+        std::vector<uint8_t> packed(job.nbytes);
+        kvmem_tensor_get(job.vt, packed.data(), job.tensor_off, job.nbytes);
+        commit_harvest_packed(job, packed.data());
+        return;
+    }
+    auto * base = kvmem_cuda_tensor_ptr(job.vt);
+    job.gpu_src = base && job.nbytes ? base + job.tensor_off : nullptr;
+    const auto enqueue = [&] {
+        // No allocation may fail between registering the DMA source and
+        // retaining its writer. The job move itself is nonthrowing.
+        if (harvest_v_jobs_.size() == harvest_v_jobs_.capacity())
+            harvest_v_jobs_.reserve(std::max<size_t>(8, harvest_v_jobs_.capacity() * 2));
+        job.pin_off = kvmem_stageout_used();
+        if (!kvmem_stageout_enqueue(job.gpu_src, job.nbytes)) return false;
+        harvest_v_jobs_.push_back(std::move(job));
+        return true;
+    };
+    if (job.gpu_src && enqueue()) return;
+    if (job.gpu_src && (!harvest_v_jobs_.empty() || harvest_v_pending_.slot >= 0)) {
+        harvest_gpu_v_flush_slab();
+        if (enqueue()) return;
+    }
+    std::vector<uint8_t> packed(job.nbytes);
+    kvmem_tensor_get(job.vt, packed.data(), job.tensor_off, job.nbytes);
+    commit_harvest_packed(job, packed.data());
+}
+
+void llama_memory_kvmem::harvest_captured_packed(const CaptureBatch & batch, uint32_t n_keep) {
+    n_keep = std::min(n_keep, static_cast<uint32_t>(batch.positions.size()));
+    bool initialized = false;
+    for (const auto & range : batch.ranges) {
+        if (range.source_token >= n_keep) break;
+        if (range.route != MeanWriteRange::Route::Managed) continue;
+        const auto & writer = range.writer;
+        if (!kv_ || v_trans_ || !writer || !writer->storage())
+            throw std::logic_error("historical packed capture has no admitted producer");
+        const auto metadata = writer->writer().metadata();
+        if (!metadata) throw std::logic_error("historical packed capture lost its generation");
+        const auto meta = *metadata;
+        const uint32_t take = std::min(range.token_count, n_keep - range.source_token);
+        if (range.gpu_slot < 0 || uint32_t(range.gpu_slot) >= n_slots_ ||
+                range.token_offset > meta.valid_tokens || take > meta.valid_tokens - range.token_offset ||
+                meta.original_begin + range.token_offset != range.original_begin ||
+                meta.original_begin + meta.valid_tokens != range.original_end)
+            throw std::logic_error("historical packed capture has no valid admitted source/range");
+        const size_t krow = ggml_row_size(type_k_, n_embd_k_);
+        const size_t vrow = ggml_row_size(type_v_, n_embd_v_);
+        const auto & cfg = writer->storage()->config();
+        if (cfg.packed_k_bytes_per_token != krow || cfg.packed_v_bytes_per_token != vrow)
+            throw std::logic_error("historical packed capture has incompatible row formats");
+        if (!initialized && !multi_gpu_) {
+            kvmem_stagein_gpu_ready(size_t(block_tokens_) * std::max(n_embd_k_, n_embd_v_),
+                std::max(krow, vrow) * size_t(block_tokens_));
+            initialized = true;
+        }
+        const uint32_t end = range.token_offset + take;
+        const uint32_t cell0 = uint32_t(range.gpu_slot) * block_tokens_;
+        for (uint32_t il = 0; il < n_layer_; ++il) {
+            if (!kvmem_cache_has_layer(kv_, il)) continue;
+            for (bool is_k : {true, false}) {
+                // Enqueueing K may flush/commit an older slab, including V.
+                // Refresh component progress after each such transition.
+                const auto progress = writer->storage()->write_progress(writer->writer(), writer->handle(), il);
+                if (!progress) throw std::logic_error("historical packed capture is missing a layer allocation");
+                uint32_t prefix = is_k ? progress->packed_k_tokens : progress->packed_v_tokens;
+                const auto include_queued = [&](const std::vector<HarvestVJob> & jobs) {
+                    for (const auto & job : jobs) {
+                        if (job.writer != writer || job.il != il || job.is_k != is_k || job.committed) continue;
+                        if (job.token_offset > prefix)
+                            throw std::logic_error("historical packed queue contains a hole");
+                        prefix = std::max(prefix, job.token_offset + job.n);
+                    }
+                };
+                include_queued(harvest_v_pending_.jobs);
+                include_queued(harvest_v_jobs_);
+                if (prefix < range.token_offset)
+                    throw std::logic_error("historical packed capture is missing an earlier executed prefix");
+                if (prefix >= end) continue; // Retries/replays never rewrite a captured prefix.
+                HarvestVJob job;
+                const size_t row = is_k ? krow : vrow;
+                job.writer = writer;
+                job.il = il;
+                job.is_k = is_k;
+                job.token_offset = prefix;
+                job.pos0 = static_cast<uint32_t>(meta.original_begin) + prefix;
+                job.n = end - prefix;
+                job.nbytes = size_t(job.n) * row;
+                job.tensor_off = size_t(cell0 + prefix) * row;
+                job.vt = is_k ? kv_->get_k_storage(il) : kv_->get_v_storage(il);
+                if (!job.vt || job.tensor_off > ggml_nbytes(job.vt) ||
+                        job.nbytes > ggml_nbytes(job.vt) - job.tensor_off)
+                    throw std::logic_error("historical packed capture exceeds its GPU storage");
+                enqueue_harvest_packed(std::move(job));
+            }
+        }
+    }
+    if (initialized && !harvest_v_jobs_.empty()) harvest_gpu_v_flush_slab();
 }
 
 void llama_memory_kvmem::harvest_write_batch() {
@@ -3706,17 +3823,12 @@ void llama_memory_kvmem::harvest_gpu_v_flush_slab() {
         if (!kvmem_stageout_wait(harvest_v_pending_.slot, gpu_us)) {
             harvest_v_pending_.slot = -1;
         }
-        const int slot = kvmem_stageout_submit(gpu_us);
-        HarvestVBatch next;
-        next.slot = slot;
-        next.jobs = std::move(harvest_v_jobs_);
-        harvest_v_jobs_.clear();
+        // Complete the old host commit before handing off the next slab. If
+        // a component commit throws, both batches retain their writer/source
+        // ownership; no newly submitted DMA loses its jobs during unwinding.
         harvest_write_batch();
-        harvest_v_pending_ = std::move(next);
-        if (harvest_v_pending_.slot < 0) {
-            harvest_write_batch();
-        }
-        return;
+    } else if (!harvest_v_pending_.jobs.empty()) {
+        harvest_write_batch();
     }
     const int slot = kvmem_stageout_submit(gpu_us);
     harvest_v_pending_.slot = slot;
@@ -3762,17 +3874,9 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
     if (identity.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged &&
             blk.orig_pos_start != uint64_t(block_id) * block_tokens_)
         throw std::logic_error("non-aligned packed harvest requires a historical payload identity");
-    std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
-    if (identity.state != kvmem::HistoricalKvShadowDirectory::State::Unmanaged) {
-        const auto binding = directory.find(block_id);
-        if (!binding) return; // A closed tombstone is never a legacy writer.
-        writer = binding->writer_context;
-        // Legacy Raw bindings are already sealed and immutable. New payload
-        // bindings may accept only the original unfinished writer's ranges.
-        if (!writer || !writer->storage()) return;
-        const auto meta = writer->writer().metadata();
-        if (!meta || meta->life != kvmem::HistoricalKvLife::Writing) return;
-    }
+    // Managed production is admitted with the original execution batch.
+    // A later stage-out / directory scan cannot discover new producer work.
+    if (identity.state != kvmem::HistoricalKvShadowDirectory::State::Unmanaged) return;
     const llama_kv_cells & cells = kv_->get_cells(0);
     const uint32_t idx = static_cast<uint32_t>(blk.gpu_slot) * block_tokens_;
     if (idx >= cells.size() || cells.is_empty(idx)) {
@@ -3800,32 +3904,7 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
         job.vt = t;
         job.tensor_off = toff;
         job.token_offset = token_offset;
-        job.writer = writer;
-        if (multi_gpu_) {
-            std::vector<uint8_t> packed(nbytes);
-            kvmem_tensor_get(t, packed.data(), toff, nbytes);
-            commit_harvest_packed(job, packed.data());
-            return;
-        }
-        uint8_t * base = kvmem_cuda_tensor_ptr(t);
-        const uint8_t * gpu_src = (base && nbytes > 0) ? base + toff : nullptr;
-        job.gpu_src = gpu_src;
-        job.pin_off = kvmem_stageout_used();
-        if (gpu_src && kvmem_stageout_enqueue(gpu_src, nbytes)) {
-            harvest_v_jobs_.push_back(job);
-            return;
-        }
-        if (gpu_src && (!harvest_v_jobs_.empty() || harvest_v_pending_.slot >= 0)) {
-            harvest_gpu_v_flush_slab();
-            job.pin_off = kvmem_stageout_used();
-            if (kvmem_stageout_enqueue(gpu_src, nbytes)) {
-                harvest_v_jobs_.push_back(job);
-                return;
-            }
-        }
-        std::vector<uint8_t> packed(nbytes);
-        kvmem_tensor_get(t, packed.data(), toff, nbytes);
-        commit_harvest_packed(job, packed.data());
+        enqueue_harvest_packed(std::move(job));
     };
     uint32_t n_ok = 0;
     uint32_t n_skip = 0;
@@ -3838,23 +3917,16 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
         if (nget == 0) {
             continue;
         }
-        uint32_t k_prefix = 0, v_prefix = 0;
-        if (writer) {
-            const auto progress = writer->storage()->write_progress(writer->writer(), writer->handle(), il);
-            if (!progress) throw std::runtime_error("historical harvest has no matching layer allocation");
-            k_prefix = progress->packed_k_tokens;
-            v_prefix = progress->packed_v_tokens;
-        }
         ggml_tensor * kt = kv_->get_k_storage(static_cast<int32_t>(il));
-        if (kt && krow && (writer ? k_prefix < nget : !raw_->has_k_gpu(block_id, il, nget))) {
-            enqueue_or_get(kt, il, nget, k_prefix, true);
+        if (kt && krow && !raw_->has_k_gpu(block_id, il, nget)) {
+            enqueue_or_get(kt, il, nget, 0, true);
             n_ok++;
         } else {
             n_skip++;
         }
         ggml_tensor * vt = kv_->get_v_storage(static_cast<int32_t>(il));
-        if (vt && !v_trans_ && vrow && (writer ? v_prefix < nget : !raw_->has_v_gpu(block_id, il, nget))) {
-            enqueue_or_get(vt, il, nget, v_prefix, false);
+        if (vt && !v_trans_ && vrow && !raw_->has_v_gpu(block_id, il, nget)) {
+            enqueue_or_get(vt, il, nget, 0, false);
             n_ok++;
         } else {
             n_skip++;
@@ -3881,16 +3953,10 @@ void llama_memory_kvmem::harvest_full_blocks_async() {
     for (const auto & b : store.blocks()) {
         const bool managed = runtime_->historical_shadow_directory().observe(b.block_id).state !=
                 kvmem::HistoricalKvShadowDirectory::State::Unmanaged;
-        if (b.gpu_slot < 0 || (!managed && b.n_tokens != block_tokens_)) {
+        if (managed || b.gpu_slot < 0 || b.n_tokens != block_tokens_) {
             continue;
         }
         if (b.block_id < harvest_gpu_queued_.size() && harvest_gpu_queued_[b.block_id]) {
-            continue;
-        }
-        if (managed) {
-            // The managed path uses captured writer/component progress and
-            // never treats absent legacy Raw bytes as a request to rewrite.
-            harvest_gpu_v(b.block_id);
             continue;
         }
         bool need = false;
@@ -4132,6 +4198,7 @@ void llama_memory_kvmem::decode_mean_commit(uint32_t n_keep) {
         return;
     }
     n_keep = std::min(n_keep, static_cast<uint32_t>(decode_mean_pending_batch_.positions.size()));
+    harvest_captured_packed(decode_mean_pending_batch_, n_keep);
     for (const auto & range : decode_mean_pending_batch_.ranges) {
         if (range.source_token >= n_keep) break;
         const uint32_t take = std::min(range.token_count, n_keep - range.source_token);
@@ -4187,6 +4254,7 @@ void llama_memory_kvmem::decode_mean_flush() {
                     decode_mean_target_.token_offset, decode_mean_n_, sum)) {
                 throw std::logic_error("historical decode Mean-K rejected its original writer/range");
             }
+            context->storage()->publish_complete(context->repository(), context->writer(), context->handle());
         } else {
             raw_->write_layer_mean_sum(decode_mean_pos0_, decode_mean_n_, il, sum.data());
         }

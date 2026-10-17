@@ -286,6 +286,7 @@ private:
         std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
     };
     void commit_harvest_packed(const HarvestVJob & job, const uint8_t * bytes);
+    void enqueue_harvest_packed(HarvestVJob job);
     struct HarvestVBatch {
         int slot = -1;
         std::vector<HarvestVJob> jobs;
@@ -312,6 +313,9 @@ private:
                                          std::vector<uint16_t> & out);
     struct CaptureBatch;
     CaptureBatch capture_batch(const std::vector<llama_pos> & positions) const;
+    // Uses the producer and GPU source captured before execution. Only the
+    // accepted prefix of this executed batch may enter the host payload.
+    void harvest_captured_packed(const CaptureBatch & batch, uint32_t n_keep);
     void commit_mean_k(const CaptureBatch & batch, uint32_t il, const std::vector<float> & flat);
     void harvest_from_host(const CaptureBatch & batch, int il, char which, const uint8_t * host,
                            ggml_type type, int64_t d, int64_t h, int64_t n,
@@ -458,6 +462,7 @@ private:
         uint32_t block_id = 0;
         uint64_t original_end = 0; // admitted span end, not (block_id + 1) * B
         uint32_t token_offset = 0;
+        int32_t gpu_slot = -1;
         std::shared_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> writer;
     };
     struct CaptureBatch {

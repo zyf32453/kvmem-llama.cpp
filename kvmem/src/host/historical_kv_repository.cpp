@@ -12,8 +12,20 @@ namespace {
 // The low three bits are the phase. The remaining bits count references.
 // Reserving is internal: it keeps an unpublished slot invisible while its
 // generation, immutable metadata, and release callback are installed.
-enum class Phase : uint64_t { Ready, Reserving, Writing, Live, Retired, Releasing, Reserved };
+// Publication sets bit 0. A retained writer can observe only Writing, Live
+// or Retired; that bit is already set in both terminal cases. This lets its
+// final producer publish once without losing the transition to refcount CAS
+// contention, and without ever undoing concurrent retirement.
+enum class Phase : uint64_t {
+    Ready = 0, Reserving = 1, Writing = 2, Live = 3,
+    Releasing = 4, Reserved = 6, Retired = 7
+};
 constexpr uint64_t kPhaseMask = 7;
+constexpr uint64_t kPublishBit = 1;
+static_assert((uint64_t(Phase::Writing) | kPublishBit) == uint64_t(Phase::Live) &&
+              (uint64_t(Phase::Live) | kPublishBit) == uint64_t(Phase::Live) &&
+              (uint64_t(Phase::Retired) | kPublishBit) == uint64_t(Phase::Retired),
+              "publication must preserve every non-Writing writer phase");
 constexpr uint64_t kRefOne = 8;
 constexpr uint64_t kMaxRefs = std::numeric_limits<uint64_t>::max() >> 3;
 constexpr unsigned kCasAttempts = 16;
@@ -356,14 +368,11 @@ bool HistoricalKvRepository::publish_write(const Lease & writer) {
     const HistoricalKvHandle handle = writer.handle_;
     if (handle.slot >= shared_->capacity || !shared_->matches(handle.slot, handle)) return false;
     auto & control = shared_->slots[handle.slot].control;
-    uint64_t observed = control.load(std::memory_order_acquire);
-    for (unsigned attempt = 0; attempt < kCasAttempts; ++attempt) {
-        if (phase_of(observed) != Phase::Writing) return false;
-        const uint64_t desired = (observed & ~kPhaseMask) | static_cast<uint64_t>(Phase::Live);
-        if (control.compare_exchange_weak(observed, desired, std::memory_order_acq_rel,
-                                          std::memory_order_acquire)) return true;
-    }
-    return false;
+    // The writer reference excludes Releasing/Ready and generation reuse.
+    // fetch_or changes only Writing->Live; concurrent retire installs Retired
+    // with this bit already set. Reference bits are unaffected. Repeated
+    // publication remains false, as does publication after retirement.
+    return phase_of(control.fetch_or(kPublishBit, std::memory_order_acq_rel)) == Phase::Writing;
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_new(
