@@ -1,0 +1,177 @@
+diff --git a/src/llama-context.h b/src/llama-context.h
+index bcf1327..72df8a7 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -79,6 +79,16 @@ struct llama_context {
+     bool prepare_historical_simple_input();
+     void clear_historical_simple_input() noexcept;
+     bool historical_simple_input_prepared() const noexcept;
++    struct historical_backend_status {
++        const void * scheduler = nullptr;
++        const void * output_buffer = nullptr;
++        size_t output_bytes = 0;
++        std::array<const void *, 10> graph_results{};
++        std::array<const void *, 10> graph_meta{};
++        size_t graph_meta_bytes = 0;
++        bool needs_scheduler_reserve = true;
++    };
++    historical_backend_status get_historical_backend_status() const noexcept;
+ #endif
+ 
+     // return true if the memory was updated
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index e365255..657e799 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -628,6 +628,13 @@ void llama_context::sched_reserve() {
+         return;
+     }
+ 
++#if defined(LLAMA_KVMEM)
++    if (historical_simple_input_prepared()) {
++        llama_kvmem_historical_capture_fail(this);
++        throw std::runtime_error("historical request forbids scheduler replacement after admission");
++    }
++#endif
++
+     sched_need_reserve = false;
+ 
+     LLAMA_LOG_INFO("%s: reserving ...\n", __func__);
+@@ -857,16 +864,59 @@ llama_memory_t llama_context::get_memory() const {
+ 
+ #if defined(LLAMA_KVMEM)
+ bool llama_context::prepare_historical_simple_input() {
+-    return balloc && balloc->prepare_historical_simple_input(cparams.n_batch);
++    if (!balloc) return false;
++    // Reserve the actual scheduler/output storage before capture admission.
++    sched_reserve();
++    const uint32_t max_outputs = std::min(cparams.n_batch, cparams.n_outputs_max);
++    if (!max_outputs || output_reserve(max_outputs) < max_outputs || !gf_res_reserve) return false;
++    const auto max_nodes = gf_res_reserve->get_max_nodes();
++    for (auto & res : gf_res_prev) {
++        if (!res) res.reset(new llm_graph_result(max_nodes));
++    }
++    for (uint32_t i = 1; i <= n_decode_graph_slots; ++i) {
++        auto & res = gf_res_decode[i];
++        if (!res) res.reset(new llm_graph_result(max_nodes));
++    }
++    if (!balloc->prepare_historical_simple_input(cparams.n_batch)) return false;
++    for (auto & res : gf_res_prev) res->set_context_reuse(true);
++    for (uint32_t i = 1; i <= n_decode_graph_slots; ++i) gf_res_decode[i]->set_context_reuse(true);
++    const auto status = get_historical_backend_status();
++    LLAMA_LOG_INFO("KVMEM_BACKEND_RESERVE output_bytes=%zu graph_slots=10 graph_meta_bytes=%zu\n",
++            status.output_bytes, status.graph_meta_bytes);
++    return true;
+ }
+ 
+ void llama_context::clear_historical_simple_input() noexcept {
+     if (balloc) balloc->clear_historical_simple_input();
++    for (auto & res : gf_res_prev) if (res) res->set_context_reuse(false);
++    for (auto & res : gf_res_decode) if (res) res->set_context_reuse(false);
+ }
+ 
+ bool llama_context::historical_simple_input_prepared() const noexcept {
+     return balloc && balloc->historical_simple_input_prepared();
+ }
++
++llama_context::historical_backend_status llama_context::get_historical_backend_status() const noexcept {
++    static_assert(n_decode_graph_slots == 8, "update historical graph reservation when graph slots change");
++    historical_backend_status result;
++    result.scheduler = sched.get();
++    result.output_buffer = buf_output.get();
++    result.output_bytes = buf_output ? ggml_backend_buffer_get_size(buf_output.get()) : 0;
++    result.needs_scheduler_reserve = sched_need_reserve;
++    size_t slot = 0;
++    for (const auto & res : gf_res_prev) {
++        result.graph_results[slot] = res.get();
++        result.graph_meta[slot++] = res ? res->get_meta_buffer() : nullptr;
++        if (res) result.graph_meta_bytes += res->get_meta_bytes();
++    }
++    for (uint32_t i = 1; i <= n_decode_graph_slots; ++i) {
++        const auto & res = gf_res_decode[i];
++        result.graph_results[slot] = res.get();
++        result.graph_meta[slot++] = res ? res->get_meta_buffer() : nullptr;
++        if (res) result.graph_meta_bytes += res->get_meta_bytes();
++    }
++    return result;
++}
+ #endif
+ 
+ bool llama_context::memory_update(bool optimize) {
+@@ -1874,6 +1924,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
+ 
+     output_swaps.clear();
+ 
++#if defined(LLAMA_KVMEM)
++    if (historical_simple_input_prepared() && sched_need_reserve) {
++        llama_kvmem_historical_capture_fail(this);
++        LLAMA_LOG_ERROR("%s: historical request cannot replace backend scheduler after admission\n", __func__);
++        return -2;
++    }
++#endif
+     sched_reserve();
+ 
+     bool did_optimize = false;
+@@ -2238,6 +2295,13 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
+     // alloc only when more than the current capacity is required
+     // TODO: also consider shrinking the buffer
+     if (!buf_output || prev_size < new_size) {
++#if defined(LLAMA_KVMEM)
++        if (historical_simple_input_prepared()) {
++            llama_kvmem_historical_capture_fail(this);
++            LLAMA_LOG_ERROR("%s: historical request cannot grow output buffer after admission\n", __func__);
++            return 0;
++        }
++#endif
+         if (buf_output) {
+ #ifndef NDEBUG
+             // This doesn't happen often, but may be annoying in some cases (like the HellaSwag benchmark)
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index f503e1e..e100624 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -910,6 +910,14 @@ public:
+ 
+     int64_t get_max_nodes() const;
+ 
++#if defined(LLAMA_KVMEM)
++    // The historical request prepares this result before admission. Reuse
++    // its ggml_context instead of allocating a new one at each graph reset.
++    void set_context_reuse(bool enabled) noexcept { reuse_context = enabled; }
++    const void * get_meta_buffer() const noexcept { return buf_compute_meta.data(); }
++    size_t get_meta_bytes() const noexcept { return buf_compute_meta.size(); }
++#endif
++
+     void reset();
+ 
+     void set_inputs(const llama_ubatch * ubatch);
+@@ -958,6 +966,9 @@ public:
+     int64_t max_nodes;
+ 
+ private:
++#if defined(LLAMA_KVMEM)
++    bool reuse_context = false;
++#endif
+     // keep a copy of the previous graph parameters
+     // we will use this to determine whether the graph can be reused by comparing them with the new parameters
+     // note: these are updated after constructing the new graph
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 3fc1b96..3d90841 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1349,7 +1349,14 @@ void llm_graph_result::reset() {
+         /*.no_alloc   =*/ true,
+     };
+ 
+-    ctx_compute.reset(ggml_init(params));
++#if defined(LLAMA_KVMEM)
++    if (reuse_context && ctx_compute) {
++        ggml_reset(ctx_compute.get());
++    } else
++#endif
++    {
++        ctx_compute.reset(ggml_init(params));
++    }
+ 
+     gf = ggml_new_graph_custom(ctx_compute.get(), max_nodes, false);
+ }

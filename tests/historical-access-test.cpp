@@ -1610,6 +1610,17 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
     }
     require(llama_kvmem_historical_capture_begin(ctx, 12, 160, 3, 7), "real request capture admission failed");
+    const auto backend_workspace = ctx->get_historical_backend_status();
+    require(backend_workspace.scheduler && backend_workspace.output_buffer &&
+            !backend_workspace.needs_scheduler_reserve &&
+            backend_workspace.output_bytes >=
+                size_t(ctx->n_batch()) * llama_vocab_n_tokens(vocab) * sizeof(float) &&
+            backend_workspace.graph_meta_bytes &&
+            std::all_of(backend_workspace.graph_results.begin(), backend_workspace.graph_results.end(),
+                        [](const void * ptr) { return ptr != nullptr; }) &&
+            std::all_of(backend_workspace.graph_meta.begin(), backend_workspace.graph_meta.end(),
+                        [](const void * ptr) { return ptr != nullptr; }),
+            "real request did not prepare output, scheduler and all ten graph results");
     require(ctx->historical_simple_input_prepared() &&
             kvmem_transfer_test_access::input_batch_without_cpp_allocation(*vocab, tokens.data()),
             "historical input batch normalization allocated after admission");
@@ -1684,6 +1695,15 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         require(returned_context.storage == batch_context.storage &&
                 returned_context.bytes == batch_context.bytes && !returned_context.in_use,
                 "real decode did not return the same prepared context storage");
+        const auto backend_after = ctx->get_historical_backend_status();
+        require(backend_after.scheduler == backend_workspace.scheduler &&
+                backend_after.output_buffer == backend_workspace.output_buffer &&
+                backend_after.output_bytes == backend_workspace.output_bytes &&
+                backend_after.graph_results == backend_workspace.graph_results &&
+                backend_after.graph_meta == backend_workspace.graph_meta &&
+                backend_after.graph_meta_bytes == backend_workspace.graph_meta_bytes &&
+                !backend_after.needs_scheduler_reserve,
+                "real decode changed prepared output, scheduler or graph metadata storage");
         const auto & cells = mem.get_kv()->get_cells(0);
         const auto index = cells.index_status();
         require(index.reserved && index.nodes == cell_nodes &&
@@ -2261,6 +2281,37 @@ int main(int argc, char ** argv) {
             }
             std::printf("PASS historical model scenario %u/35\n", scenario + 1);
         }
+        kp.method = 0;
+        kp.budget = 96;
+        llama_kvmem_set_params(&kp);
+        cp.n_ubatch = 16;
+        cp.type_k = cp.type_v = GGML_TYPE_F16;
+        std::unique_ptr<llama_context, decltype(&llama_free)> backend_guard_ctx(
+            llama_init_from_model(model.get(), cp), llama_free);
+        require(bool(backend_guard_ctx), "backend guard context init failed");
+        auto * backend_guard_mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(backend_guard_ctx.get()));
+        require(backend_guard_mem &&
+                llama_kvmem_historical_capture_begin(backend_guard_ctx.get(), 12, 16, 0, 1),
+                "backend guard capture admission failed");
+        const auto backend_before = backend_guard_ctx->get_historical_backend_status();
+        llama_set_causal_attn(backend_guard_ctx.get(), false);
+        bool rejected_backend_growth = false;
+        try {
+            backend_guard_ctx->sched_reserve();
+        } catch (const std::runtime_error &) {
+            rejected_backend_growth = true;
+        }
+        const auto backend_after = backend_guard_ctx->get_historical_backend_status();
+        require(rejected_backend_growth &&
+                kvmem_transfer_test_access::capture_failed(*backend_guard_mem) &&
+                backend_after.scheduler == backend_before.scheduler &&
+                backend_after.output_buffer == backend_before.output_buffer &&
+                backend_after.output_bytes == backend_before.output_bytes &&
+                backend_after.graph_results == backend_before.graph_results &&
+                backend_after.graph_meta == backend_before.graph_meta &&
+                backend_after.needs_scheduler_reserve,
+                "admitted backend change allocated or left capture open");
+        std::puts("PASS historical backend guard: scheduler growth denied and capture closed");
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FAIL historical adapter access: %s\n", e.what());
         return 1;

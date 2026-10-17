@@ -477,13 +477,23 @@ ActiveSet 增加 `prepare`、`try_acquire` 和 `release`。复用的是对象和
 
 最终真实 GGUF/CUDA 测试 **35/35** 个顶层场景通过。测试检查入口失败后没有发布上下文存储，以及每次实际 `llama_decode` 后仍是同一地址、相同容量且不再被占用；受阻 CPU 清理队列下的请求回滚也通过。另在请求完成后的失败解码检查槽位没有泄漏。recency CLI delete 完成 356-token 输入和 8-token 生成，`proposed=committed=reclaimed=6`，策略与 worker 错误均为 0；普通 retrieval CLI 正常完成 420-token prompt eval 和 8 次输出，`layout_writeback move=4`。三项程序退出码均为 0，原始日志在远程隔离目录，前缀为 `historical-batch-context-`。当前只消除这一受限路径的上下文对象分配；backend 调度器/输出缓冲区、图结果、rollback 快照以及非受限 active 路径仍需请求前预算和长期有界验证。
 
+### 后端输出缓冲区和图结果请求前预留（2026-10-17）
+
+上游上下文创建时会预约计算调度器，但输出缓冲区通常只按最初的少量输出分配，第一次实际 decode 可能扩容；两组先前用于微批次所有权上界的图结果对象（8 个宽度专用 decode、2 个普通结果）也按需创建。补丁 `0012-historical-backend-reservation.patch` 扩展受限请求的上下文准备：在发布 capture owner 前确认调度器已预约，按允许的最大输出数量取得实际 Host 输出缓冲区，创建全部 10 个图结果及其元数据 arena。图结果的 reset 使用 `ggml_reset` 重用同一个 `ggml_context` 和元数据 arena，而非每次释放并重建。请求接纳后若参数变化要求重建调度器或增大输出缓冲区，解码会失败而不会临时扩容。准备被拒绝时撤销专用复用标志，已分配但由上下文持有的后端缓冲区留在这个可继续使用的上下文中。
+
+真实模型最终 **35/35** 场景通过。模型 `n_batch=64` 的入口日志报告输出缓冲区 **38,895,616 字节**、10 个图结果元数据 **19,778,080 字节**；新增断言逐次比较调度器、输出 buffer、图结果对象及元数据 buffer 的地址/容量，均未改变。另创建独立真实模型上下文，在接纳请求后改变 causal-attention 参数；直接请求重建调度器被拒绝，原缓冲区保持不变，请求被标记为失败。受阻 CPU 清理 worker 的请求准备回滚仍通过。recency CLI 的 `n_batch=128` 入口预留输出缓冲区 **77,791,232 字节**；356-token 输入与 8-token 生成后 `proposed=committed=reclaimed=6`，policy/worker failure 为 0，GPU 延期/归还均为 6。普通 retrieval CLI 未启用 historical GC，完成 420-token prompt eval、8 次输出与 `layout_writeback move=4`。三项程序退出码均为 0。远程隔离目录中的最终原始日志分别为 `backend-reservation-final-model.log`、`backend-reservation-final-delete.log`、`backend-reservation-final-retrieval.log`。
+
+Linux 补丁连续重放两次及从已装 `0011` 升级到 `0012` 均通过；PowerShell 构建脚本语法检查通过，Windows CUDA/HIP 全构建未执行。本地补丁、适配器与测试源码的 SHA256 与远程实际测试版本一致。
+
+这是后端资源中已有明确上界的部分；实际构图仍可能为 input/fused-node 对象、rollback 快照、调度器内部结构或临时执行数据分配。本轮地址稳定测试不能证明已接纳请求完全无新分配，也不覆盖 server、多请求、MTP/hybrid 等组合。P3 严格预算仍未完成，P4–P6 原交付范围不变。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；仍需接入 server、多请求生命周期及错误取消。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
-3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理和单个解码上下文对象的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、元数据、各后端、输出缓冲区和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
+3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 将受限 CLI 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到完整生产入口，提供独立新策略模板及版本前置条件；策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补独立 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 

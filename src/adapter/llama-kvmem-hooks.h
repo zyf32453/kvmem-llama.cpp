@@ -59,6 +59,9 @@ LLAMA_API bool llama_kvmem_historical_capture_begin(struct llama_context * ctx, 
 // requires 0 < ready_low < ready_high <= historical capacity.
 LLAMA_API bool llama_kvmem_historical_gc_start(int mode, uint32_t ready_low, uint32_t ready_high);
 LLAMA_API bool llama_kvmem_historical_capture_finish(void);
+// Close an admitted historical request when an upstream backend allocation
+// bound is exceeded. The caller must pass its owning context.
+LLAMA_API void llama_kvmem_historical_capture_fail(struct llama_context * ctx);
 
 // Isolated hook, retrieval, conversation and transfer state for one target
 // context plus its MTP follower. Activate before creating/using/freeing those

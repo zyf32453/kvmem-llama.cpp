@@ -7,4 +7,5 @@ patches/0008-historical-cell-index-reservation.patch text eol=lf whitespace=-bla
 patches/0009-historical-slot-info-return.patch text eol=lf whitespace=-blank-at-eol
 patches/0010-historical-microbatch-pool.patch text eol=lf whitespace=-blank-at-eol
 patches/0011-historical-input-workspace.patch text eol=lf whitespace=-blank-at-eol
+patches/0012-historical-backend-reservation.patch text eol=lf whitespace=-blank-at-eol
 scripts/apply-patches.sh text eol=lf

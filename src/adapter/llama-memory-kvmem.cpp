@@ -1331,6 +1331,10 @@ bool llama_memory_kvmem::start_historical_gc(int mode, uint32_t ready_low,
     }
 }
 
+void llama_memory_kvmem::fail_historical_capture() noexcept {
+    if (historical_capture_) capture_fail();
+}
+
 void llama_memory_kvmem::end_prefill_capture() {
     if (historical_capture_ && !historical_capture_->end_input()) {
         historical_capture_->fail();
@@ -6052,6 +6056,11 @@ bool llama_kvmem_historical_gc_start(int mode, uint32_t ready_low, uint32_t read
 bool llama_kvmem_historical_capture_finish(void) {
     auto * mem = kvmem_capture_active();
     return mem && mem->finish_historical_capture();
+}
+
+void llama_kvmem_historical_capture_fail(llama_context * ctx) {
+    auto * mem = kvmem_capture_active();
+    if (mem && ctx && ctx->get_memory() == mem) mem->fail_historical_capture();
 }
 
 void llama_kvmem_decode_mean_commit(uint32_t n_keep) {
