@@ -323,6 +323,32 @@ shadow 不退休块、不释放 payload；相同配置结束为 `committed=0, re
 
 **范围仍是组件级预约。** RAM session 当前在外层 GPU 准备前建立；如果后续工作区准备失败，未用 RAM 仍通过已有有界 CPU cleanup 归还。这尚不是全部资源在一个事务中的立即回滚。实际 GPU 工作集、layout scratch、目录/producer 元数据、backend、Mean-K/Q、rollback 等仍有未纳入统一预约的分配。原生测试中禁止 C++ 分配只覆盖所测搬运/提交区间，不是整个模型请求零动态分配的证明。当前仍处于 P3，下一步优先处理 layout scratch 与目录/producer 等实际分配，并逐项接入统一的请求准备和失败回滚。
 
+### 主模型布局临时区预约与搬运完成边界（2026-10-17）
+
+继续推进请求资源准备，处理主模型 `layout_gpu_slots_by_orig_pos`。布局整理会把仍在 GPU 的历史块按原始位置排成连续槽位，它属于前台工作集管理；后台 GC 的回收对象仍是 CPU historical payload。本轮没有让 GC 修改 GPU 工作集。
+
+原布局每次临时 `cudaMalloc`，每层还建立六个搬运向量。现在历史请求入口准备 `n_slots × block_tokens × (packed_k_row_bytes + packed_v_row_bytes)` 大小的 GPU 布局临时区，以及有界的项目、槽位检查、索引和 gather/scatter 描述符数组。各层完成后复用同一个临时区，因此大小不乘层数。准备量包含全部物理 GPU 槽位，支持最坏情况下全部驻留块需要移动；尺寸计算检查溢出，执行时验证槽位唯一、token 数及真实 tensor 边界。工作区归 execution owner 持有，历史请求不能在执行中扩大；legacy 调用可在开始复制前准备空间，分配不足时才允许原有 Host 回退。
+
+同时发现并修正了完成边界：原主模型布局的 batched copy 在独立 nonblocking stream 上提交，但调用方等待的是 `cudaStreamPerThread`。这并不证明搬运完成；每次 `cudaFree` 的隐式影响不能作为长期复用缓冲区的协议。新 `kvmem_layout_copy` 在实际提交 stream 上逐批检查完成，再允许更新 Host 描述符、开始 scatter 或进入下一层；超过 8192 项的描述符分批处理，不扩大描述符存储。布局开始移动前结算已有 packed/Mean-K capture，避免覆盖仍被读取的 GPU 源位置。
+
+已提交的 descriptor/kernel/wait 错误会抛出并关闭布局及请求，不能当作“尚未执行”转入 Host 重做或继续使用半更新缓存。主模型的槽位元数据在所有层复制成功之后才重排；错误后不提交新映射。若无法确认设备完成，临时区和共享 staging 分配保持所有权，free/复用均被拒绝；确认取消只解除设备依赖，不重新开放已失败的上下文。最后析构仍保留“持续无法确认完成则终止进程”的边界，未实现任意硬件错误后的服务恢复。
+
+新增和扩展验证：
+
+- 预约故障点由 11 个增加到 **12 个**，加入 layout 分配；在 layout 已分配后制造真实 Host `bad_alloc`，检查所有工作区资源释放后可重试。
+- 新独立 layout 测试在禁止 C++ 动态分配时完成 **30 轮循环换位**，分别覆盖已预约的 gather kernel 路径与 legacy direct-copy 路径，逐字节检查移动结果和未选中尾部。另将 **8195 条描述符**拆成多批，验证没有丢失或覆盖未完成记录。
+- 同一测试覆盖 descriptor 提交、实际 kernel 提交后的结果错误、完成等待错误，各分能确认/不能确认排空两种情形，共 **6 个故障场景**。检查失败后不能重放，未确认时 free 不改变工作区占用，取消后仍不能复用失败缓存，最终显式 free 后分配归零。
+- 模型上下文场景由 31 个增加到 **35 个**。新成功场景在实际生成 48 个输入 token 后交换两个 GPU 驻留块及其位置记录，再调用生产布局函数；所有注意力层的 K/V 与原 CPU payload 逐字节一致，入口准备的十组 Host 数组地址和 GPU 占用不变，然后继续完成 160-token 输入、3-token 输出和原有 432 个 layer span 检查。该场景主动安排布局以覆盖搬运路径，不等于生产 retrieval GC 已自动接入。
+- 另三个模型场景分别在 gather kernel 后、scatter 完成等待时和无法确认排空时注入错误；检查请求关闭、不能继续追加、旧槽位元数据未被新映射替换、未确认时 scratch 保留，取消和实际上下文销毁后 CPU owner 最终释放。
+
+最终 Windows 宿主 **12/12**、Linux 宿主 **24/24**、独立 CUDA CTest **4/4**、模型上下文 **35/35** 通过。新增场景使用的 F16、7 个 GPU 槽位配置，layout 显存为 458752 bytes，布局 Host 数组为 882 bytes；整个已准备 staging 的 device 总量为 34275328 bytes，pinned 仍为 67108864 bytes。八个源码/构建文件的本地与远程 SHA256 一致。记录为 `historical-layout-{windows,host}-test.log`、`historical-layout-native-test.log`、`historical-layout-native-detail.log`、`historical-layout-gpu-test.log`、`historical-layout-source-sha256.txt` 及构建日志；远程继续只使用 `/tmp/kvmem-gc-99bef27.3CD9MU` 隔离目录。
+
+普通 CLI retrieval 使用同一模型与 356-token 提示词、Q8_0、预算 128，正常完成 8-token 生成和退出。实际 trace 为 `layout_writeback move=4 raw=0 d2d=1`，确认生产检索流程真正经过本轮布局代码；统计还记录 64-token query replay，因此总 prompt eval 为 420 token。这次运行未开启 historical capture/GC，验证的是普通检索兼容性，未证明生产 retrieval GC 已接通。原始记录为 `historical-layout-cli-retrieval.log/.tokens`。
+
+同版 recency CLI delete 使用预算 512、356-token 输入、8-token 输出、容量/水位 32/14/16，正常生成和退出；`proposed=committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=2`，policy/worker failure 为 0。该配置额外预约 layout 835584 bytes、Host 布局数组 3024 bytes。CPU 回收数与延期归还 GPU 源槽数含义不同，不要求相等；结束时 `payload_bytes=26738688` 仍可能含待后台归还的私有预约。记录为 `historical-layout-cli-delete.log/.tokens`。两次 CLI 均为功能回归，没有前后性能对照，不据此宣称加速。以上原始日志及源码摘要同时保存在本地 `build-local/capture-session-validation/`。
+
+当前已预约的是主模型单 GPU、非转置 K/V 的布局 scratch 和搬运记录。`occupy_in` 的 cell/ubatch 元数据、冷块 restore、完整目录/producer、backend、GPU 工作集统一计费及 rollback 仍未全部纳入请求事务；MTP 自身的布局、多 GPU/转置 V 的 Host 回退和其它 stage-in 错误也须继续验收。不能把所测复制区间零 C++ 分配推导为整个布局函数或整个请求零动态分配。下一步优先接入目录、producer 和 cell 元数据的实际预约，并统一入口失败回滚；完整 P0–P6 范围继续保留。CUDA sanitizer 环境限制未改变，本轮没有新的 sanitizer 通过结论。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

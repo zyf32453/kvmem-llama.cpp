@@ -20,8 +20,40 @@
 #include <thread>
 #include <vector>
 #include <future>
+#ifdef KVMEM_TEST_CUDA
+#include <cuda_runtime_api.h>
+#endif
 
 struct kvmem_transfer_test_access {
+    static bool layout(llama_memory_kvmem & mem) { return mem.layout_gpu_slots_by_orig_pos(); }
+    static std::array<const void *, 10> layout_buffers(const llama_memory_kvmem & mem) {
+        const auto & w = mem.layout_workspace_;
+        return {w.items.data(), w.mtp_res.data(), w.seen.data(), w.res_ix.data(), w.gbytes.data(),
+                w.sbytes.data(), w.gsrc.data(), w.ssrc.data(), w.gdst.data(), w.sdst.data()};
+    }
+    static void swap_layout_slots(llama_memory_kvmem & mem, uint32_t a, uint32_t b) {
+        auto & store = mem.runtime().store();
+        const auto first = store.blocks()[a], second = store.blocks()[b];
+        for (auto il : mem.raw().config().historical_gc_attention_layers) {
+            for (auto * tensor : {mem.get_kv()->get_k_storage(il), mem.get_kv()->get_v_storage(il)}) {
+                const size_t bytes = size_t(mem.block_tokens()) * tensor->nb[1];
+                std::vector<uint8_t> x(bytes), y(bytes);
+                const size_t off_a = size_t(first.gpu_slot) * bytes, off_b = size_t(second.gpu_slot) * bytes;
+                ggml_backend_tensor_get(tensor, x.data(), off_a, bytes);
+                ggml_backend_tensor_get(tensor, y.data(), off_b, bytes);
+                ggml_backend_tensor_set(tensor, y.data(), off_a, bytes);
+                ggml_backend_tensor_set(tensor, x.data(), off_b, bytes);
+            }
+        }
+        mem.get_kv()->seq_rm_logical(0, first.orig_pos_start, first.orig_pos_end());
+        mem.get_kv()->seq_rm_logical(0, second.orig_pos_start, second.orig_pos_end());
+        store.set_block_gpu_slot(a, second.gpu_slot);
+        store.set_block_gpu_slot(b, first.gpu_slot);
+        mem.occupy_block_cells(a); mem.occupy_block_cells(b);
+#ifdef KVMEM_TEST_CUDA
+        if (cudaDeviceSynchronize() != cudaSuccess) throw std::runtime_error("layout fixture source completion");
+#endif
+    }
     struct PackedWorkspace {
         const void * a;
         const void * b;
@@ -1310,7 +1342,7 @@ struct ModelStageoutFault {
 static void check_request_capture(llama_context * ctx, llama_model * model,
                                   llama_memory_kvmem & mem,
                                   RetirementPoint retirement = RetirementPoint::None,
-                                  bool saturated_queue = false) {
+                                  bool saturated_queue = false, unsigned layout_case = 0) {
     std::string text;
     for (unsigned i = 0; i < 30; ++i) text += "The river passes a small village. The bridge is made of stone. ";
     const auto * vocab = llama_model_get_vocab(model);
@@ -1383,6 +1415,69 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     uint32_t position = 0;
     execute(tokens.data(), 48);
     position += 48;
+    if (layout_case) {
+        struct LayoutFault {
+            KvmemLayoutPoint point;
+            unsigned target, calls = 0;
+            bool undrained = false, fired = false;
+            static bool inject(void * context, KvmemLayoutPoint point) noexcept {
+                auto & f = *static_cast<LayoutFault *>(context);
+                if (point == KvmemLayoutPoint::Drain) return f.undrained;
+                if (point == f.point && ++f.calls == f.target) { f.fired = true; return true; }
+                return false;
+            }
+            ~LayoutFault() { kvmem_layout_test_fault(nullptr, nullptr); }
+        } fault{layout_case == 2 ? KvmemLayoutPoint::KernelResult : KvmemLayoutPoint::Wait,
+                layout_case == 2 ? 1u : 2u};
+        fault.undrained = layout_case == 4;
+        const auto buffers = kvmem_transfer_test_access::layout_buffers(mem);
+        const auto prepared = kvmem_capture_workspace_status();
+        kvmem_transfer_test_access::swap_layout_slots(mem, 0, 1);
+        const auto slot0 = mem.store().blocks()[0].gpu_slot, slot1 = mem.store().blocks()[1].gpu_slot;
+        if (layout_case > 1) kvmem_layout_test_fault(LayoutFault::inject, &fault);
+        bool threw = false;
+        try { require(kvmem_transfer_test_access::layout(mem), "scrambled layout was not moved"); }
+        catch (const std::exception &) { threw = true; }
+        require(kvmem_transfer_test_access::layout_buffers(mem) == buffers &&
+                kvmem_capture_workspace_status().device_bytes == prepared.device_bytes,
+                "real layout reallocated admitted scratch or descriptors");
+        if (layout_case > 1) {
+            require(threw && fault.fired && kvmem_transfer_test_access::capture_domain_failed(mem) &&
+                    kvmem_transfer_test_access::capture_failed(mem) &&
+                    !kvmem_transfer_test_access::append_after_failure(mem) &&
+                    mem.store().blocks()[0].gpu_slot == slot0 && mem.store().blocks()[1].gpu_slot == slot1,
+                    "failed layout published new slot metadata or left request open");
+            if (fault.undrained) {
+                bool held = false;
+                try { kvmem_stagein_gpu_free(); } catch (const std::exception &) { held = true; }
+                require(held && kvmem_capture_workspace_status().device_bytes == prepared.device_bytes,
+                        "unconfirmed real layout released its scratch");
+            }
+            kvmem_layout_test_fault(nullptr, nullptr);
+            kvmem_layout_cancel();
+            std::printf("PASS real model layout failure: case=%u, closed request, unchanged slot metadata, checked cancel\n", layout_case);
+            return;
+        }
+        require(!threw && mem.store().blocks()[0].gpu_slot == 0 && mem.store().blocks()[1].gpu_slot == 1,
+                "real layout did not restore original ordering");
+        for (uint32_t id : {0u, 1u}) {
+            auto access = mem.runtime().historical_shadow_directory().acquire_read(id);
+            require(bool(access), "layout fixture lost CPU history");
+            const auto binding = mem.runtime().historical_shadow_directory().find(id);
+            for (auto il : mem.raw().config().historical_gc_attention_layers) {
+                const auto layer = access.storage->read_layer(access.lease, binding->handle, il);
+                require(bool(layer), "layout lost captured payload");
+                for (bool is_k : {true, false}) {
+                    const auto & expected = is_k ? layer->packed_k : layer->packed_v;
+                    auto * tensor = is_k ? mem.get_kv()->get_k_storage(il) : mem.get_kv()->get_v_storage(il);
+                    std::vector<uint8_t> actual(expected.size());
+                    ggml_backend_tensor_get(tensor, actual.data(), size_t(id) * mem.block_tokens() * tensor->nb[1], actual.size());
+                    require(actual == expected, "layout corrupted real model K/V bytes");
+                }
+            }
+        }
+        std::puts("PASS real model layout: reordered two resident blocks across all attention layers with prepared scratch");
+    }
     const bool stageout_fault = retirement == RetirementPoint::StageoutRecord ||
         retirement == RetirementPoint::StageoutWait || retirement == RetirementPoint::StageoutUnconfirmed;
     ModelStageoutFault fault;
@@ -1774,8 +1869,8 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario = 0; scenario < 31; ++scenario) {
-            if ((scenario >= 3 && scenario <= 12) || scenario == 30) {
+        for (unsigned scenario = 0; scenario < 35; ++scenario) {
+            if ((scenario >= 3 && scenario <= 12) || scenario >= 30) {
                 kp.method = 0;
                 kp.budget = 96;
                 llama_kvmem_set_params(&kp);
@@ -1795,7 +1890,8 @@ int main(int argc, char ** argv) {
             if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
-            if (scenario == 30) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, true);
+            if (scenario >= 31) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, false, scenario - 30);
+            else if (scenario == 30) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, true);
             else if (scenario == 13) check_capture_start_failure(*mem);
             else if (scenario >= 14) check_capture_failure(*mem, scenario);
             else if (scenario >= 3) check_request_capture(ctx.get(), model.get(), *mem,
@@ -1813,7 +1909,7 @@ int main(int argc, char ** argv) {
                 check_access(*mem);
             }
             if (scenario == 9) check_context_close_with_paused_worker(ctx, *mem);
-            if (scenario == 12) {
+            if (scenario == 12 || scenario >= 32) {
                 std::weak_ptr<kvmem::HistoricalKvRawStore> storage = kvmem_transfer_test_access::capture_storage(*mem);
                 ctx.reset();
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);

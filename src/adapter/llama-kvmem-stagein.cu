@@ -60,6 +60,11 @@ struct Item {
 };
 
 struct Stage {
+    uint8_t *   dev_layout = nullptr;
+    size_t      n_layout = 0;
+    bool        layout_pending = false, layout_failed = false;
+    KvmemLayoutFault layout_fault = nullptr;
+    void *      layout_fault_context = nullptr;
     size_t      capture_job_limit = 0;
     KvmemCaptureReserveFault reserve_fault = nullptr;
     void *      reserve_fault_context = nullptr;
@@ -406,6 +411,8 @@ void kvmem_gpu_state_free(kvmem_gpu_state * state) {
 }
 
 bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed) {
+    if (stage().layout_failed)
+        throw std::runtime_error("KVMem layout domain is closed after a failed copy");
     if (stage().out_failed)
         throw std::runtime_error("KVMem staging domain has an unresolved stageout failure");
     if (n_f32 == 0) {
@@ -488,11 +495,11 @@ bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed) {
 KvmemCaptureWorkspace kvmem_capture_workspace_status() {
     const auto & s = stage();
     return {s.capture_job_limit != 0, s.capture_job_limit,
-        s.n_f32 * sizeof(float) + s.n_q + s.n_ops * sizeof(CopyOp),
+        s.n_f32 * sizeof(float) + s.n_q + s.n_ops * sizeof(CopyOp) + s.n_layout,
         (size_t(bool(s.pin[0])) + size_t(bool(s.pin[1]))) * SLAB,
         size_t(bool(s.out_ev[0])) + size_t(bool(s.out_ev[1])) + size_t(bool(s.h2d_ev)),
         s.items.capacity() * sizeof(Item) + s.outs.capacity() * sizeof(Stage::OutItem) +
-            s.host_ops.capacity() * sizeof(CopyOp)};
+            s.host_ops.capacity() * sizeof(CopyOp), s.n_layout};
 }
 
 void kvmem_capture_reserve_test_fault(KvmemCaptureReserveFault fault, void * context) {
@@ -500,13 +507,15 @@ void kvmem_capture_reserve_test_fault(KvmemCaptureReserveFault fault, void * con
     stage().reserve_fault_context = context;
 }
 
-bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice, size_t max_jobs) {
+bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice, size_t max_jobs,
+                                      size_t layout_bytes) {
     auto & s = stage();
     // Never discard a warmed domain's queued work or existing allocations.
     if (!n_f32 || n_f32 > SIZE_MAX / sizeof(float) || !max_packed_slice ||
         !max_jobs || max_jobs > KVMEM_CAPTURE_MAX_JOBS || s.capture_job_limit ||
         s.dev_f32 || s.dev_q || s.pin[0] || s.pin[1] || s.out_ev[0] || s.out_ev[1] ||
-        s.h2d_ev || s.dev_ops || s.dev_theta || s.out_hazard || s.out_failed ||
+        s.h2d_ev || s.dev_ops || s.dev_theta || s.dev_layout || s.layout_failed ||
+        s.layout_pending || s.out_hazard || s.out_failed ||
         !s.items.empty() || !s.outs.empty()) return false;
     const auto allow = [&](KvmemCaptureReservePoint point) {
         return !s.reserve_fault || !s.reserve_fault(s.reserve_fault_context, point);
@@ -539,6 +548,11 @@ bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice, size
             if (!allow(P::DeviceOps) || !cuda_ok(cudaMalloc(reinterpret_cast<void **>(&s.dev_ops),
                     GATHER_MAX * sizeof(CopyOp)), "capture descriptors reserve")) return false;
             s.n_ops = GATHER_MAX;
+            if (layout_bytes) {
+                if (!allow(P::Layout) || !cuda_ok(cudaMalloc(reinterpret_cast<void **>(&s.dev_layout),
+                        layout_bytes), "capture layout reserve")) return false;
+                s.n_layout = layout_bytes;
+            }
             if (!allow(P::HostItems)) return false;
             s.items.reserve(max_jobs);
             if (!allow(P::HostOuts)) return false;
@@ -564,6 +578,7 @@ bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice, size
 void kvmem_stagein_gpu_free() {
     // In particular, do not free pinned memory after a partial failed submit.
     stageout_drain();
+    kvmem_layout_cancel();
     kvmem_meank_cancel();
     // Other staging consumers may still have submitted kernels on this stream.
     // On any release error retain the pointer, so teardown cannot report a
@@ -575,6 +590,11 @@ void kvmem_stagein_gpu_free() {
         if (!cuda_ok(result, "staging release"))
             throw std::runtime_error("KVMem staging allocation release failed");
     };
+    if (stage().dev_layout) {
+        released(cudaFree(stage().dev_layout));
+        stage().dev_layout = nullptr;
+    }
+    stage().n_layout = 0;
     if (stage().dev_f32) {
         released(cudaFree(stage().dev_f32));
         stage().dev_f32 = nullptr;
@@ -619,6 +639,96 @@ void kvmem_stagein_gpu_free() {
         stage().h2d_ev = nullptr;
     }
     stage().capture_job_limit = 0;
+    stage().layout_failed = false;
+}
+
+void kvmem_layout_test_fault(KvmemLayoutFault fault, void * context) {
+    stage().layout_fault = fault;
+    stage().layout_fault_context = context;
+}
+
+static bool layout_fault(KvmemLayoutPoint point) {
+    return stage().layout_fault && stage().layout_fault(stage().layout_fault_context, point);
+}
+
+void kvmem_layout_cancel() {
+    if (!stage().layout_pending) return;
+    if (layout_fault(KvmemLayoutPoint::Drain) ||
+        !cuda_ok(cudaStreamSynchronize(stream()), "layout cancellation drain"))
+        throw std::runtime_error("KVMem layout completion is unconfirmed; retain scratch and source tensors");
+    stage().layout_pending = false;
+    // Cancellation does not make a partially modified cache usable again.
+}
+
+uint8_t * kvmem_layout_workspace(size_t bytes) {
+    auto & s = stage();
+    if (s.layout_failed || s.layout_pending)
+        throw std::runtime_error("KVMem layout workspace is closed or still in use");
+    if (!bytes) return nullptr;
+    if (bytes <= s.n_layout) return s.dev_layout;
+    if (s.capture_job_limit) return nullptr;
+    if (s.dev_layout && !cuda_ok(cudaFree(s.dev_layout), "old layout scratch"))
+        throw std::runtime_error("KVMem old layout scratch release failed");
+    s.dev_layout = nullptr;
+    s.n_layout = 0;
+    const auto error = cudaMalloc(reinterpret_cast<void **>(&s.dev_layout), bytes);
+    if (!cuda_ok(error, "layout scratch")) {
+        if (error == cudaErrorMemoryAllocation) { (void) cudaGetLastError(); return nullptr; }
+        throw std::runtime_error("KVMem layout scratch device allocation failed");
+    }
+    s.n_layout = bytes;
+    return s.dev_layout;
+}
+
+void kvmem_layout_copy(const void * const * src, void * const * dst,
+                       const size_t * bytes, size_t count) {
+    auto & s = stage();
+    if (s.layout_failed || s.layout_pending || s.out_hazard || s.out_failed ||
+        !s.items.empty() || !s.outs.empty())
+        throw std::runtime_error("KVMem layout requires a completed staging pipeline");
+    if (!count) return;
+    if (!src || !dst || !bytes) throw std::invalid_argument("missing layout copies");
+    for (size_t i = 0; i < count; ++i)
+        if (!src[i] || !dst[i] || !bytes[i] || bytes[i] > UINT32_MAX)
+            throw std::invalid_argument("invalid layout copy range");
+    const bool batched = s.dev_ops && s.n_ops >= GATHER_MAX;
+    // Legacy callers may have only the GPU scratch; all Host allocation is
+    // completed before any copy. Admitted work already owns this capacity.
+    if (batched) s.host_ops.resize(std::min(count, size_t(GATHER_MAX)));
+    try {
+        for (size_t begin = 0; begin < count; begin += GATHER_MAX) {
+            const size_t n = std::min(count - begin, size_t(GATHER_MAX));
+            s.layout_pending = true;
+            if (batched) {
+                for (size_t j = 0; j < n; ++j)
+                    s.host_ops[j] = {static_cast<const uint8_t *>(src[begin+j]),
+                        static_cast<uint8_t *>(dst[begin+j]), uint32_t(bytes[begin+j]), 0};
+                if (layout_fault(KvmemLayoutPoint::OpsCopy) ||
+                    !cuda_ok(kvmem_copy_async(s.dev_ops, s.host_ops.data(), n * sizeof(CopyOp),
+                        cudaMemcpyHostToDevice, stream()), "layout descriptors"))
+                    throw std::runtime_error("KVMem layout descriptor submission failed");
+                copy_bytes<<<int(n), 256, 0, stream()>>>(s.dev_ops, int(n));
+                const auto result = cudaGetLastError();
+                if (layout_fault(KvmemLayoutPoint::KernelResult) || !cuda_ok(result, "layout kernel"))
+                    throw std::runtime_error("KVMem layout kernel failed after submission");
+                uint64_t copied = 0;
+                for (size_t j = 0; j < n; ++j) copied += bytes[begin+j];
+                kvmem_record_transfer(cudaMemcpyDeviceToDevice, copied);
+            } else {
+                for (size_t j = 0; j < n; ++j)
+                    if (!cuda_ok(kvmem_copy_async(dst[begin+j], src[begin+j], bytes[begin+j],
+                            cudaMemcpyDeviceToDevice, stream()), "layout direct copy"))
+                        throw std::runtime_error("KVMem layout direct copy submission failed");
+            }
+            if (layout_fault(KvmemLayoutPoint::Wait) ||
+                !cuda_ok(cudaStreamSynchronize(stream()), "layout copy completion"))
+                throw std::runtime_error("KVMem layout copy completion failed");
+            s.layout_pending = false;
+        }
+    } catch (...) {
+        s.layout_failed = true;
+        throw;
+    }
 }
 
 bool kvmem_stagein_fwht_ok(int nrot) {
@@ -1032,6 +1142,8 @@ bool kvmem_stagein_enqueue_v(const void * packed, size_t nbytes, uint8_t * dst,
 }
 
 bool kvmem_stageout_enqueue(const void * gpu_src, size_t nbytes) {
+    if (stage().layout_failed || stage().layout_pending)
+        throw std::runtime_error("KVMem staging is closed after a pending or failed layout");
     if (stage().out_failed)
         throw std::runtime_error("KVMem stageout admission is closed until failed work drains");
     if (!gpu_src || nbytes == 0 || !stage().items.empty()) {
@@ -1204,6 +1316,8 @@ void kvmem_stageout_test_fault(KvmemStageoutFault fault, void * context) {
 
 bool kvmem_d2d_batched(const void * const * src, void * const * dst,
                        const size_t * nbytes, int n) {
+    if (stage().layout_failed || stage().layout_pending)
+        throw std::runtime_error("KVMem copy descriptors are held by a pending or failed layout");
     if (n <= 0) {
         return true;
     }

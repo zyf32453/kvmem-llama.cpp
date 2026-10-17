@@ -251,6 +251,30 @@ private:
     // Place GPU-resident blocks into slots 0..N-1 in orig_pos order.
     // Resident KV is copied slot-to-slot; cold blocks memcpy packed GPU K/V.
     bool layout_gpu_slots_by_orig_pos();
+    struct LayoutItem {
+        uint32_t id, orig;
+        int32_t slot;
+        uint32_t n;
+        bool resident;
+    };
+    struct LayoutWorkspace {
+        std::vector<LayoutItem> items;
+        std::vector<uint8_t> mtp_res, seen;
+        std::vector<size_t> res_ix, gbytes, sbytes;
+        std::vector<const void *> gsrc, ssrc;
+        std::vector<void *> gdst, sdst;
+        void reserve(size_t slots) {
+            items.reserve(slots); mtp_res.reserve(slots); seen.reserve(slots);
+            res_ix.reserve(slots);
+            gsrc.reserve(2 * slots); gdst.reserve(2 * slots); gbytes.reserve(2 * slots);
+            ssrc.reserve(2 * slots); sdst.reserve(2 * slots); sbytes.reserve(2 * slots);
+        }
+        size_t capacity_bytes() const noexcept {
+            return items.capacity() * sizeof(LayoutItem) + mtp_res.capacity() + seen.capacity() +
+                (res_ix.capacity() + gbytes.capacity() + sbytes.capacity()) * sizeof(size_t) +
+                (gsrc.capacity() + ssrc.capacity() + gdst.capacity() + sdst.capacity()) * sizeof(void *);
+        }
+    } layout_workspace_;
     bool gpu_kv_already_resident(uint32_t block_id) const;
     bool gpu_kv_complete(uint32_t block_id, const llama_kv_cache * cache) const;
     std::vector<uint32_t> retrieval_mandatory() const;

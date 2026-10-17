@@ -30,7 +30,7 @@ static bool empty() {
 static bool equal(KvmemCaptureWorkspace a, KvmemCaptureWorkspace b) {
     return a.reserved == b.reserved && a.job_limit == b.job_limit &&
         a.device_bytes == b.device_bytes && a.pinned_bytes == b.pinned_bytes &&
-        a.events == b.events && a.host_bytes == b.host_bytes;
+        a.events == b.events && a.host_bytes == b.host_bytes && a.layout_bytes == b.layout_bytes;
 }
 using Point = KvmemCaptureReservePoint;
 struct Fault {
@@ -56,13 +56,13 @@ static void failures() {
     Domain d;
     for (auto point : {Point::F32, Point::Packed, Point::Pin0, Point::Pin1,
                       Point::Event0, Point::Event1, Point::H2DEvent, Point::DeviceOps,
-                      Point::HostItems, Point::HostOuts, Point::HostOps}) {
+                      Point::HostItems, Point::HostOuts, Point::HostOps, Point::Layout}) {
         Fault fault{point};
         kvmem_capture_reserve_test_fault(Fault::inject, &fault);
-        require(!kvmem_capture_workspace_reserve(1024, 4096, 2) && fault.fired && empty(),
+        require(!kvmem_capture_workspace_reserve(1024, 4096, 2, 4096) && fault.fired && empty(),
                 "failed preparation retained workspace resources or published admission");
         kvmem_capture_reserve_test_fault(nullptr, nullptr);
-        require(kvmem_capture_workspace_reserve(1024, 4096, 2), "retry after failed preparation was rejected");
+        require(kvmem_capture_workspace_reserve(1024, 4096, 2, 4096), "retry after failed preparation was rejected");
         kvmem_stagein_gpu_free();
         require(empty(), "retry workspace was not released");
     }
@@ -74,11 +74,11 @@ static void failures() {
         return false;
     };
     kvmem_capture_reserve_test_fault(observe, &last);
-    try { Deny guard; kvmem_capture_workspace_reserve(1024, 4096, 2); }
+    try { Deny guard; kvmem_capture_workspace_reserve(1024, 4096, 2, 4096); }
     catch (const std::bad_alloc &) { threw = true; }
     kvmem_capture_reserve_test_fault(nullptr, nullptr);
     require(threw && last == Point::HostItems && empty(), "host allocation exception did not roll back CUDA workspace");
-    std::puts("PASS capture workspace: 11 preparation failures plus bad_alloc, exact rollback and retry");
+    std::puts("PASS capture workspace: 12 preparation failures plus bad_alloc, exact rollback and retry");
 }
 static void reuse() {
     Domain d;

@@ -396,13 +396,6 @@ static uint8_t * kvmem_cuda_tensor_ptr(ggml_tensor * t) {
     return static_cast<uint8_t *>(t->data);
 }
 
-static bool kvmem_d2d(uint8_t * dst, const uint8_t * src, size_t n, cudaStream_t st) {
-    if (!dst || !src || n == 0) {
-        return true;
-    }
-    return kvmem_cuda_ok(kvmem_copy_async(dst, src, n, cudaMemcpyDeviceToDevice, st), "layout D2D");
-}
-
 static void kvmem_stagein_flush_sync(int64_t * copy_us, int64_t * rope_us,
                                      int64_t * hadamard_us, int64_t * set_us) {
     kvmem_stagein_flush(copy_us, rope_us, hadamard_us, set_us);
@@ -1143,7 +1136,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             return false;
         }
         // Prepare both sides of the pipeline before publishing this owner.
-        // Directory, layout and backend allocations still need admission.
+        // Directory, cell metadata and backend allocations still need admission.
         std::vector<RowPosition> positions;
         positions.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
         std::vector<uint32_t> readers(n_slots_, 0);
@@ -1156,7 +1149,16 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         if (!block_tokens_ || row > SIZE_MAX / block_tokens_ || width > SIZE_MAX / block_tokens_)
             throw std::runtime_error("historical capture workspace size overflow");
         std::vector<uint8_t> fallback(row * block_tokens_);
-        if (!kvmem_capture_workspace_reserve(width * block_tokens_, fallback.size())) {
+        if (!n_slots_ || cfg.packed_k_bytes_per_token > SIZE_MAX - cfg.packed_v_bytes_per_token ||
+            cfg.packed_k_bytes_per_token + cfg.packed_v_bytes_per_token > SIZE_MAX / block_tokens_)
+            throw std::runtime_error("historical layout stride overflow");
+        const size_t layout_stride = (cfg.packed_k_bytes_per_token + cfg.packed_v_bytes_per_token) * block_tokens_;
+        if (layout_stride > SIZE_MAX / n_slots_ || size_t(n_slots_) > SIZE_MAX / 2)
+            throw std::runtime_error("historical layout workspace overflow");
+        LayoutWorkspace layout;
+        layout.reserve(n_slots_);
+        if (!kvmem_capture_workspace_reserve(width * block_tokens_, fallback.size(),
+                KVMEM_CAPTURE_MAX_JOBS, layout_stride * n_slots_)) {
             LLAMA_LOG_ERROR("historical capture: packed workspace unavailable before admission\n");
             return false;
         }
@@ -1167,15 +1169,16 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         harvest_v_jobs_.swap(jobs);
         harvest_v_pending_.jobs.swap(pending);
         harvest_v_fallback_.swap(fallback);
+        layout_workspace_ = std::move(layout);
         harvest_v_job_limit_ = KVMEM_CAPTURE_MAX_JOBS;
         historical_cleanup_ticket_ = std::move(*cleanup_ticket);
         historical_cleanup_ = std::move(cleanup);
         historical_capture_ = std::move(session);
         const auto workspace = kvmem_capture_workspace_status();
-        LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu\n",
+        LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu layout_bytes=%zu layout_slots=%u layout_host_bytes=%zu\n",
             harvest_v_job_limit_, workspace.device_bytes, workspace.pinned_bytes,
             workspace.host_bytes + (harvest_v_jobs_.capacity() + harvest_v_pending_.jobs.capacity()) * sizeof(HarvestVJob),
-            harvest_v_fallback_.size());
+            harvest_v_fallback_.size(), workspace.layout_bytes, n_slots_, layout_workspace_.capacity_bytes());
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu\n",
             capacity, historical_capture_->reserved_blocks(),
             (unsigned long long) historical_capture_->payload_bytes(),
@@ -2246,20 +2249,22 @@ bool llama_memory_kvmem::remove_logical(llama_context * ctx, llama_pos begin, ll
     return kv_->seq_rm_logical(0, begin, end);
 }
 
-bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
+bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() try {
+    if (capture_failed_) throw std::runtime_error("layout on a failed KVMem context");
     auto & store = runtime_->store();
-    struct Item {
-        uint32_t id;
-        uint32_t orig;
-        int32_t slot;
-        uint32_t n;
-        bool resident;
-    };
-    std::vector<Item> items;
+    LayoutWorkspace temporary;
+    auto & work = historical_capture_ ? layout_workspace_ : temporary;
+    if (!historical_capture_) work.reserve(n_slots_);
+    auto & items = work.items;
+    items.clear();
+    work.seen.assign(n_slots_, 0);
     for (const auto & b : store.blocks()) {
         if (b.gpu_slot < 0 || b.n_tokens == 0) {
             continue;
         }
+        if (uint32_t(b.gpu_slot) >= n_slots_ || b.n_tokens > block_tokens_ || work.seen[b.gpu_slot])
+            throw std::logic_error("layout has an invalid or duplicate physical slot");
+        work.seen[b.gpu_slot] = 1;
         items.push_back({b.block_id, b.orig_pos_start, b.gpu_slot, b.n_tokens,
                          gpu_kv_already_resident(b.block_id)});
     }
@@ -2267,7 +2272,7 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
         return false;
     }
     std::sort(items.begin(), items.end(),
-              [](const Item & a, const Item & b) { return a.orig < b.orig; });
+              [](const LayoutItem & a, const LayoutItem & b) { return a.orig < b.orig; });
     bool sorted = true;
     for (size_t i = 0; i < items.size(); ++i) {
         if (items[i].slot != static_cast<int32_t>(i)) {
@@ -2279,8 +2284,14 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
         return false;
     }
 
+    // Layout mutates the sources of packed capture. Settle their real readers
+    // before moving any slot, and before reusing shared copy descriptors.
+    harvest_flush();
+    harvest_gpu_v_commit();
+
     ++attention_epoch_;
-    std::vector<uint8_t> mtp_res(items.size(), 0);
+    auto & mtp_res = work.mtp_res;
+    mtp_res.assign(items.size(), 0);
     bool mtp_d2d_ok = false;
     if (mtp_) {
         for (size_t i = 0; i < items.size(); ++i) {
@@ -2297,7 +2308,8 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
     const uint64_t vspan = static_cast<uint64_t>(block_tokens_) * vrow;
     const uint64_t scratch_stride = kspan + vspan;
 
-    std::vector<size_t> res_ix(items.size(), static_cast<size_t>(-1));
+    auto & res_ix = work.res_ix;
+    res_ix.assign(items.size(), static_cast<size_t>(-1));
     size_t n_res = 0;
     for (size_t i = 0; i < items.size(); ++i) {
         if (items[i].resident) {
@@ -2308,28 +2320,23 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
     // The single scratch allocation and batched D2D kernel can only touch
     // tensors on its own GPU. Use the backend's per-tensor host path for a
     // layer split until device-local layout scratch is introduced.
-    bool d2d_ok = n_res > 0 && !multi_gpu_;
+    bool d2d_ok = n_res > 0 && !multi_gpu_ && !v_trans_;
     uint8_t * scratch = nullptr;
     if (d2d_ok) {
-        const cudaError_t alloc_error = cudaMalloc(reinterpret_cast<void **>(&scratch),
-                                                   static_cast<size_t>(n_res) * scratch_stride);
-        if (alloc_error != cudaSuccess) {
-            if (alloc_error == cudaErrorMemoryAllocation) {
-                // Host fallback handles this allocation failure before any layout copies start.
-                (void) cudaGetLastError();
-            }
-            scratch = nullptr;
+        if (!scratch_stride || scratch_stride > SIZE_MAX / n_res)
+            throw std::runtime_error("layout scratch size overflow");
+        scratch = kvmem_layout_workspace(n_res * scratch_stride);
+        if (!scratch) {
+            if (historical_capture_) throw std::logic_error("layout exceeded admitted workspace");
             d2d_ok = false;
-            LLAMA_LOG_WARN("%s: layout scratch cudaMalloc failed, host fallback\n", __func__);
+            LLAMA_LOG_WARN("%s: layout scratch unavailable, host fallback before submission\n", __func__);
         }
         kvmem_stagein_gpu_ready((size_t) block_tokens_ * std::max(n_embd_k_, n_embd_v_),
                                 std::max(krow, vrow) * (size_t) block_tokens_);
     }
 
     if (d2d_ok) {
-        cudaStream_t st = cudaStreamPerThread;
-        bool copy_ok = true;
-        for (uint32_t il = 0; il < n_layer_ && copy_ok; ++il) {
+        for (uint32_t il = 0; il < n_layer_; ++il) {
             if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
                 continue;
             }
@@ -2337,33 +2344,28 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
             ggml_tensor * vt = kv_->get_v_storage(static_cast<int32_t>(il));
             uint8_t * kbase = kt ? kvmem_cuda_tensor_ptr(kt) : nullptr;
             uint8_t * vbase = (vt && !v_trans_) ? kvmem_cuda_tensor_ptr(vt) : nullptr;
-            if (kt && !kbase) {
-                copy_ok = false;
-                break;
+            if (!kbase) {
+                throw std::runtime_error("layout lost its K tensor source");
             }
-            if (vt && !v_trans_ && !vbase) {
-                copy_ok = false;
-                break;
+            if (!vbase) {
+                throw std::runtime_error("layout lost its V tensor source");
             }
-            std::vector<const void *> gsrc;
-            std::vector<void *> gdst;
-            std::vector<size_t> gbytes;
-            std::vector<const void *> ssrc;
-            std::vector<void *> sdst;
-            std::vector<size_t> sbytes;
-            gsrc.reserve(n_res * 2);
-            gdst.reserve(n_res * 2);
-            gbytes.reserve(n_res * 2);
-            ssrc.reserve(n_res * 2);
-            sdst.reserve(n_res * 2);
-            sbytes.reserve(n_res * 2);
+            auto & gsrc = work.gsrc; auto & gdst = work.gdst; auto & gbytes = work.gbytes;
+            auto & ssrc = work.ssrc; auto & sdst = work.sdst; auto & sbytes = work.sbytes;
+            gsrc.clear(); gdst.clear(); gbytes.clear();
+            ssrc.clear(); sdst.clear(); sbytes.clear();
             for (size_t i = 0; i < items.size(); ++i) {
                 if (res_ix[i] == static_cast<size_t>(-1)) {
                     continue;
                 }
                 const uint32_t nt = items[i].n;
-                const uint32_t src0 = static_cast<uint32_t>(items[i].slot) * block_tokens_;
-                const uint32_t dst0 = static_cast<uint32_t>(i) * block_tokens_;
+                const size_t src0 = size_t(items[i].slot) * block_tokens_;
+                const size_t dst0 = i * block_tokens_;
+                for (auto * tensor : {kt, vt}) {
+                    const size_t rows = ggml_nbytes(tensor) / tensor->nb[1];
+                    if (src0 > rows || nt > rows - src0 || dst0 > rows || nt > rows - dst0)
+                        throw std::logic_error("layout copy exceeds actual GPU tensor storage");
+                }
                 uint8_t * slot_sc = scratch + res_ix[i] * scratch_stride;
                 if (kbase && krow && nt) {
                     const size_t nb = static_cast<size_t>(nt) * krow;
@@ -2385,43 +2387,15 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
                 }
             }
             const int64_t t_g = ggml_time_us();
-            const int ng = static_cast<int>(gsrc.size());
-            if (!kvmem_d2d_batched(gsrc.data(), gdst.data(), gbytes.data(), ng)) {
-                for (int j = 0; j < ng && copy_ok; ++j) {
-                    copy_ok = kvmem_d2d(static_cast<uint8_t *>(gdst[j]),
-                                        static_cast<const uint8_t *>(gsrc[j]),
-                                        gbytes[j], st);
-                }
-            }
-            if (!copy_ok || cudaStreamSynchronize(st) != cudaSuccess) {
-                copy_ok = false;
-                break;
-            }
+            kvmem_layout_copy(gsrc.data(), gdst.data(), gbytes.data(), gsrc.size());
             if (retr_.enabled) {
                 retr_.layout_d2h_us += ggml_time_us() - t_g;
             }
             const int64_t t_s = ggml_time_us();
-            const int ns = static_cast<int>(ssrc.size());
-            if (!kvmem_d2d_batched(ssrc.data(), sdst.data(), sbytes.data(), ns)) {
-                for (int j = 0; j < ns && copy_ok; ++j) {
-                    copy_ok = kvmem_d2d(static_cast<uint8_t *>(sdst[j]),
-                                        static_cast<const uint8_t *>(ssrc[j]),
-                                        sbytes[j], st);
-                }
-            }
-            if (!copy_ok || cudaStreamSynchronize(st) != cudaSuccess) {
-                copy_ok = false;
-                break;
-            }
+            kvmem_layout_copy(ssrc.data(), sdst.data(), sbytes.data(), ssrc.size());
             if (retr_.enabled) {
                 retr_.layout_h2d_us += ggml_time_us() - t_s;
             }
-        }
-        cudaFree(scratch);
-        scratch = nullptr;
-        d2d_ok = copy_ok;
-        if (!copy_ok) {
-            LLAMA_LOG_ERROR("%s: layout D2D failed; reloading residents from raw-K\n", __func__);
         }
         if (d2d_ok && mtp_) {
             std::vector<llama_memory_kvmem_mtp::LayoutMove> mm;
@@ -2577,6 +2551,9 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
                 n_move, n_raw, (int) d2d_ok);
     }
     return true;
+} catch (...) {
+    capture_fail();
+    throw;
 }
 
 bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {

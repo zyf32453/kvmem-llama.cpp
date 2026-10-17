@@ -22,17 +22,32 @@ void kvmem_stagein_gpu_free();
 // for flush/retry; gpu_ready cannot grow this workspace after admission.
 constexpr size_t KVMEM_CAPTURE_MAX_JOBS = 8192;
 bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice,
-                                      size_t max_jobs = KVMEM_CAPTURE_MAX_JOBS);
+                                      size_t max_jobs = KVMEM_CAPTURE_MAX_JOBS,
+                                      size_t layout_bytes = 0);
 struct KvmemCaptureWorkspace {
     bool reserved;
-    size_t job_limit, device_bytes, pinned_bytes, events, host_bytes;
+    size_t job_limit, device_bytes, pinned_bytes, events, host_bytes, layout_bytes;
 };
 KvmemCaptureWorkspace kvmem_capture_workspace_status();
 enum class KvmemCaptureReservePoint { F32, Packed, Pin0, Pin1, Event0, Event1,
-                                      H2DEvent, DeviceOps, HostItems, HostOuts, HostOps };
+                                      H2DEvent, DeviceOps, HostItems, HostOuts, HostOps, Layout };
 using KvmemCaptureReserveFault = bool (*)(void *, KvmemCaptureReservePoint) noexcept;
 // Deterministic preparation failure seam. Empty in production; owner thread only.
 void kvmem_capture_reserve_test_fault(KvmemCaptureReserveFault fault, void * context);
+
+// The execution owner retains layout scratch until checked device teardown.
+// Admitted capture cannot grow it; legacy callers may prepare/grow it before
+// any layout copy. nullptr means allocation/capacity failure before submission.
+uint8_t * kvmem_layout_workspace(size_t bytes);
+// All copies finish on the actual submission stream before return. Batches
+// larger than the descriptor slab are split without allocating more records.
+// A submitted error throws and closes layout admission until explicit free.
+void kvmem_layout_copy(const void * const * src, void * const * dst,
+                       const size_t * bytes, size_t count);
+void kvmem_layout_cancel();
+enum class KvmemLayoutPoint { OpsCopy, KernelResult, Wait, Drain };
+using KvmemLayoutFault = bool (*)(void *, KvmemLayoutPoint) noexcept;
+void kvmem_layout_test_fault(KvmemLayoutFault fault, void * context);
 
 bool kvmem_stagein_fwht_ok(int nrot);
 bool kvmem_stagein_quant_ok(ggml_type ty);
