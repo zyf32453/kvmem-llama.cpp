@@ -17,6 +17,23 @@ void kvmem_gpu_state_free(kvmem_gpu_state * state);
 bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed = 0);
 void kvmem_stagein_gpu_free();
 
+// Request-owned packed-capture workspace, prepared on a fresh staging domain
+// before publishing the request. Queue saturation returns false to the caller
+// for flush/retry; gpu_ready cannot grow this workspace after admission.
+constexpr size_t KVMEM_CAPTURE_MAX_JOBS = 8192;
+bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice,
+                                      size_t max_jobs = KVMEM_CAPTURE_MAX_JOBS);
+struct KvmemCaptureWorkspace {
+    bool reserved;
+    size_t job_limit, device_bytes, pinned_bytes, events, host_bytes;
+};
+KvmemCaptureWorkspace kvmem_capture_workspace_status();
+enum class KvmemCaptureReservePoint { F32, Packed, Pin0, Pin1, Event0, Event1,
+                                      H2DEvent, DeviceOps, HostItems, HostOuts, HostOps };
+using KvmemCaptureReserveFault = bool (*)(void *, KvmemCaptureReservePoint) noexcept;
+// Deterministic preparation failure seam. Empty in production; owner thread only.
+void kvmem_capture_reserve_test_fault(KvmemCaptureReserveFault fault, void * context);
+
 bool kvmem_stagein_fwht_ok(int nrot);
 bool kvmem_stagein_quant_ok(ggml_type ty);
 

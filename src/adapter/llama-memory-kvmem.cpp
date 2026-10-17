@@ -1095,7 +1095,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         uint64_t max_output_tokens, uint64_t max_appends) {
     if (historical_capture_ || method_ != 0 || multi_gpu_ || mtp_ || recr_ || v_trans_ ||
         replay_ || !kv_ || raw_cfg_.nvme_bytes || rt_cfg_.cpu_bytes || rt_cfg_.nvme_bytes ||
-        raw_cfg_.historical_gc_attention_layers.empty()) {
+        raw_cfg_.historical_gc_attention_layers.empty() ||
+        !harvest_v_jobs_.empty() || !harvest_v_pending_.jobs.empty()) {
         LLAMA_LOG_ERROR("historical capture: requires a fresh single-GPU recency RAM context without MTP/hybrid/spill tiers\n");
         return false;
     }
@@ -1141,14 +1142,40 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM or CPU cleanup capacity\n");
             return false;
         }
-        // Row positions have a known finite bound in this baseline. Directory,
-        // staging scratch and backend work allocations still need admission.
-        row_positions_.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
-        historical_gpu_readers_.assign(n_slots_, 0);
-        historical_gpu_retired_.assign(n_slots_, 0);
+        // Prepare both sides of the pipeline before publishing this owner.
+        // Directory, layout and backend allocations still need admission.
+        std::vector<RowPosition> positions;
+        positions.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
+        std::vector<uint32_t> readers(n_slots_, 0);
+        std::vector<uint8_t> retired(n_slots_, 0);
+        std::vector<HarvestVJob> jobs, pending;
+        jobs.reserve(KVMEM_CAPTURE_MAX_JOBS);
+        pending.reserve(KVMEM_CAPTURE_MAX_JOBS);
+        const size_t row = std::max(cfg.packed_k_bytes_per_token, cfg.packed_v_bytes_per_token);
+        const size_t width = std::max(n_embd_k_, n_embd_v_);
+        if (!block_tokens_ || row > SIZE_MAX / block_tokens_ || width > SIZE_MAX / block_tokens_)
+            throw std::runtime_error("historical capture workspace size overflow");
+        std::vector<uint8_t> fallback(row * block_tokens_);
+        if (!kvmem_capture_workspace_reserve(width * block_tokens_, fallback.size())) {
+            LLAMA_LOG_ERROR("historical capture: packed workspace unavailable before admission\n");
+            return false;
+        }
+        // Only nonthrowing ownership transfers follow GPU preparation.
+        row_positions_.swap(positions);
+        historical_gpu_readers_.swap(readers);
+        historical_gpu_retired_.swap(retired);
+        harvest_v_jobs_.swap(jobs);
+        harvest_v_pending_.jobs.swap(pending);
+        harvest_v_fallback_.swap(fallback);
+        harvest_v_job_limit_ = KVMEM_CAPTURE_MAX_JOBS;
         historical_cleanup_ticket_ = std::move(*cleanup_ticket);
         historical_cleanup_ = std::move(cleanup);
         historical_capture_ = std::move(session);
+        const auto workspace = kvmem_capture_workspace_status();
+        LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu\n",
+            harvest_v_job_limit_, workspace.device_bytes, workspace.pinned_bytes,
+            workspace.host_bytes + (harvest_v_jobs_.capacity() + harvest_v_pending_.jobs.capacity()) * sizeof(HarvestVJob),
+            harvest_v_fallback_.size());
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu\n",
             capacity, historical_capture_->reserved_blocks(),
             (unsigned long long) historical_capture_->payload_bytes(),
@@ -4228,18 +4255,27 @@ void llama_memory_kvmem::commit_harvest_packed(const HarvestVJob & job, const ui
     if (job.writer) {
         const auto & storage = job.writer->storage();
         if (!storage) throw std::logic_error("historical harvest has no captured storage");
-        const std::vector<uint8_t> packed(bytes, bytes + job.nbytes);
         const bool written = job.is_k
             ? storage->write_packed_k_slice(job.writer->writer(), job.writer->handle(),
-                                           job.il, job.token_offset, job.n, packed)
+                                           job.il, job.token_offset, job.n, bytes, job.nbytes)
             : storage->write_packed_v_slice(job.writer->writer(), job.writer->handle(),
-                                           job.il, job.token_offset, job.n, packed);
+                                           job.il, job.token_offset, job.n, bytes, job.nbytes);
         if (!written) throw std::runtime_error("historical harvest rejected captured generation or range");
         storage->publish_complete(job.writer->repository(), job.writer->writer(), job.writer->handle());
         return;
     }
     if (job.is_k) raw_->write_layer_k_gpu(job.pos0, job.n, job.il, bytes);
     else raw_->write_layer_v_gpu(job.pos0, job.n, job.il, bytes);
+}
+
+uint8_t * llama_memory_kvmem::harvest_packed_fallback(size_t bytes, std::vector<uint8_t> & temporary) {
+    if (harvest_v_job_limit_) {
+        if (bytes > harvest_v_fallback_.size())
+            throw std::logic_error("historical packed fallback exceeds admitted workspace");
+        return harvest_v_fallback_.data();
+    }
+    temporary.resize(bytes);
+    return temporary.data();
 }
 
 void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) try {
@@ -4257,10 +4293,14 @@ void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) try {
     auto * base = kvmem_cuda_tensor_ptr(job.vt);
     job.gpu_src = base && job.nbytes ? base + job.tensor_off : nullptr;
     const auto enqueue = [&] {
+        if (harvest_v_job_limit_ && harvest_v_jobs_.size() >= harvest_v_job_limit_) return false;
         // No allocation may fail between registering the DMA source and
         // retaining its writer. The job move itself is nonthrowing.
-        if (harvest_v_jobs_.size() == harvest_v_jobs_.capacity())
+        if (harvest_v_jobs_.size() == harvest_v_jobs_.capacity()) {
+            if (harvest_v_job_limit_)
+                throw std::logic_error("historical packed queue lost its admitted capacity");
             harvest_v_jobs_.reserve(std::max<size_t>(8, harvest_v_jobs_.capacity() * 2));
+        }
         job.pin_off = kvmem_stageout_used();
         if (!kvmem_stageout_enqueue(job.gpu_src, job.nbytes)) return false;
         if (job.historical_gpu_slot >= 0) ++historical_gpu_readers_[job.historical_gpu_slot];
@@ -4272,9 +4312,10 @@ void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) try {
         harvest_gpu_v_flush_slab();
         if (enqueue()) return;
     }
-    std::vector<uint8_t> packed(job.nbytes);
-    kvmem_tensor_get(job.vt, packed.data(), job.tensor_off, job.nbytes);
-    commit_harvest_packed(job, packed.data());
+    std::vector<uint8_t> temporary;
+    auto * packed = harvest_packed_fallback(job.nbytes, temporary);
+    kvmem_tensor_get(job.vt, packed, job.tensor_off, job.nbytes);
+    commit_harvest_packed(job, packed);
 } catch (...) {
     if (historical_capture_) historical_capture_->fail();
     throw;
@@ -4304,8 +4345,10 @@ void llama_memory_kvmem::harvest_captured_packed(const CaptureBatch & batch, uin
         if (cfg.packed_k_bytes_per_token != krow || cfg.packed_v_bytes_per_token != vrow)
             throw std::logic_error("historical packed capture has incompatible row formats");
         if (!initialized && !multi_gpu_) {
-            kvmem_stagein_gpu_ready(size_t(block_tokens_) * std::max(n_embd_k_, n_embd_v_),
+            const bool ready = kvmem_stagein_gpu_ready(size_t(block_tokens_) * std::max(n_embd_k_, n_embd_v_),
                 std::max(krow, vrow) * size_t(block_tokens_));
+            if (historical_capture_ && !ready)
+                throw std::runtime_error("historical packed capture exceeded reserved staging capacity");
             initialized = true;
         }
         const uint32_t end = range.token_offset + take;
@@ -4363,19 +4406,20 @@ void llama_memory_kvmem::harvest_write_batch() {
         if (j.nbytes == 0) {
             return;
         }
-        std::vector<uint8_t> packed(j.nbytes);
+        std::vector<uint8_t> temporary;
+        auto * packed = harvest_packed_fallback(j.nbytes, temporary);
         auto commit = [&](const uint8_t * src) {
             commit_harvest_packed(j, src);
         };
         if (j.gpu_src &&
-            kvmem_copy(packed.data(), j.gpu_src, j.nbytes,
+            kvmem_copy(packed, j.gpu_src, j.nbytes,
                        cudaMemcpyDeviceToHost) == cudaSuccess) {
-            commit(packed.data());
+            commit(packed);
             return;
         }
         if (j.vt) {
-            kvmem_tensor_get(j.vt, packed.data(), j.tensor_off, j.nbytes);
-            commit(packed.data());
+            kvmem_tensor_get(j.vt, packed, j.tensor_off, j.nbytes);
+            commit(packed);
         } else if (j.writer) {
             throw std::runtime_error("historical harvest fallback lost its captured source");
         }
@@ -4420,8 +4464,7 @@ void llama_memory_kvmem::harvest_gpu_v_flush_slab() try {
     }
     const int slot = kvmem_stageout_submit(gpu_us);
     harvest_v_pending_.slot = slot;
-    harvest_v_pending_.jobs = std::move(harvest_v_jobs_);
-    harvest_v_jobs_.clear();
+    harvest_v_pending_.jobs.swap(harvest_v_jobs_);
     if (harvest_v_pending_.slot < 0) {
         harvest_write_batch();
     }

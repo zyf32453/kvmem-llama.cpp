@@ -8,6 +8,24 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <cstdlib>
+#include <new>
+
+static thread_local bool deny_packed_allocations = false;
+void * operator new(size_t n) {
+    if (deny_packed_allocations) throw std::bad_alloc();
+    if (auto * p = std::malloc(n ? n : 1)) return p;
+    throw std::bad_alloc();
+}
+void * operator new[](size_t n) { return ::operator new(n); }
+void operator delete(void * p) noexcept { std::free(p); }
+void operator delete[](void * p) noexcept { std::free(p); }
+void operator delete(void * p, size_t) noexcept { std::free(p); }
+void operator delete[](void * p, size_t) noexcept { std::free(p); }
+struct DenyPackedAllocations {
+    DenyPackedAllocations() { deny_packed_allocations = true; }
+    ~DenyPackedAllocations() { deny_packed_allocations = false; }
+};
 
 using namespace kvmem;
 
@@ -396,10 +414,18 @@ static void test_independent_harvest_components() {
 
     // The adapter can deliver mean, V and K in separate jobs. Their relative
     // order is irrelevant, but each component must cover its own prefix.
-    check(store.write_mean_k_slice(*writer, handle, 0, 0, 2, {1.0f, 2.0f}) &&
-          store.write_packed_v_slice(*writer, handle, 0, 0, 3, {7, 8, 9}) &&
-          store.write_packed_k_slice(*writer, handle, 0, 0, 1, {1, 2}),
-          "independent component writes failed");
+    check(store.write_mean_k_slice(*writer, handle, 0, 0, 2, {1.0f, 2.0f}), "mean component write failed");
+    uint8_t k[] = {1, 2}, v[] = {7, 8, 9};
+    {
+        DenyPackedAllocations guard;
+        check(!store.write_packed_k_slice(*writer, handle, 0, 0, 1, nullptr, 2) &&
+              !store.write_packed_v_slice(*writer, handle, 0, 0, 3, v, 2) &&
+              store.write_packed_v_slice(*writer, handle, 0, 0, 3, v, sizeof(v)) &&
+              store.write_packed_k_slice(*writer, handle, 0, 0, 1, k, sizeof(k)),
+              "borrowed packed buffer validation or allocation-free copy failed");
+    }
+    // The source is borrowed only through the call, never retained by storage.
+    k[0] = v[0] = 99;
     check(!store.write_packed_k_slice(*writer, handle, 0, 2, 1, {5, 6}) &&
           !store.write_packed_v_slice(*writer, handle, 0, 0, 1, {7}) &&
           !store.write_mean_k_slice(*writer, handle, 0, 0, 1, {3.0f, 4.0f}) &&

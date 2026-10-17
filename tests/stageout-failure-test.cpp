@@ -54,6 +54,10 @@ struct Fixture {
         for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = uint8_t(i * 13 + seed);
         require(cudaMemcpy(gpu, bytes.data(), bytes.size(), cudaMemcpyHostToDevice) == cudaSuccess,
                 "source upload failed");
+        // Pageable H2D may return before the default-stream device copy ends.
+        // Staging uses a nonblocking stream, so establish the producer boundary
+        // explicitly instead of relying on allocator/timing side effects.
+        require(cudaStreamSynchronize(nullptr) == cudaSuccess, "source upload completion failed");
     }
     void enqueue(size_t offset = 0) {
         require(kvmem_stageout_enqueue(gpu + offset, 512) &&

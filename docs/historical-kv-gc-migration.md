@@ -298,6 +298,31 @@ shadow 不退休块、不释放 payload；相同配置结束为 `committed=0, re
 
 这一修改仍未完成全请求 GPU/pinned/metadata/scratch 预约，也未覆盖其它 stage-in、layout、多 GPU、NVMe 和 MTP 全链路的所有设备错误。新 staging 的大小有明确上界，但仍须纳入后续请求统一预约；当前结果不能证明长期总内存有界或前台没有任何动态分配。CUDA sanitizer 的环境限制继续保留，不用宿主 sanitizer 结果代替适配器证据。
 
+### 请求入口准备 packed K/V 搬运资源（2026-10-17）
+
+本轮推进导师方案中的“先取得实际资源，再接纳请求”。原来 recency historical capture 主要提前准备 RAM payload，packed K/V 的 GPU scratch、双 pinned slab、事件、搬运描述符和适配器任务记录仍在运行时分配；任务交接通过移动赋值还会丢掉另一批队列的容量。CPU 提交前会再构造一个临时字节向量，同步回退也逐 job 分配临时缓冲区。
+
+现在 `begin_historical_capture` 在发布请求 owner 前准备这些搬运资源：一个至少 32 MiB 的 GPU packed slab、一个块大小的 F32 scratch、两个各 32 MiB 的 pinned CPU slab、3 个事件、8192 项设备描述符及对应 Host 描述符、两批各最多 8192 项的适配器任务，以及容纳一个最大 K/V packed slice 的同步回退缓冲区。执行 stream 在准备阶段建立，仍归 execution context 所有。工作区只接纳全新的 staging 域，不能覆盖已有队列、缓冲区或未完成的任务。新增 `KVMEM_CAPTURE_WORKSPACE` 日志报告实际准备量；模型 F16 场景为 device 33816576 bytes、pinned 67108864 bytes、Host 队列 2424832 bytes、fallback 32768 bytes。这不是模型总显存或整请求内存预算。
+
+准备阶段任一 CUDA 分配、事件或 Host 队列准备失败，均不发布 historical owner；本轮工作区已取得的资源在返回前释放，C++ 分配异常同样走清理。释放检查设备完成和 CUDA 返回值；不能确认完成或释放失败时保留尚未释放的指针，不把失败伪装为完成回滚。`gpu_ready` 对已经准备好的工作区只检查尺寸，不再扩大；队列达到数量或 slab 字节上限时，由前台完成/提交当前搬运批次后继续使用原空间。这是当前任务的数据依赖，不等待 GC 提供空位。
+
+任务交接改为交换两个已分配的队列；上一批清空后保留容量供下一次使用。`HistoricalKvRawStore` 增加指针与长度形式的 packed slice 接口，在调用期间把数据直接复制到同代已预约 payload，不保留外部指针；既有 vector API 仍可用并复用相同校验。提交继续检查 writer、仓库、代际、范围及连续前缀，旧 writer 退休后只能完成原写入，不能重新发布。同步回退使用入口准备的缓冲区；它只能在既有协议确认设备工作结束后执行，不改变失败任务和 GPU 源槽的保护规则。
+
+新增证据：
+
+- 独立 CUDA 工作区测试逐个注入 **11 个准备失败点**，检查 GPU/pinned/event/Host 队列容量清零并允许重试；另外真正禁止 C++ 分配，使 HostItems 准备抛出 `bad_alloc`，检查此前 CUDA 分配全部回滚。
+- 同一测试把队列限制为 2 项，在禁止 C++ 动态分配时完成 **24 批**真实 CUDA 搬运，检查饱和拒绝不改变偏移、双 pinned slab 交替复用、输出逐字节一致、超出准备尺寸被拒绝，以及工作区占用不变。另验证已有 legacy 工作区不会被新的预约破坏。
+- 宿主 raw-store 测试在禁止 C++ 分配时直接提交栈上的 K/V 数据，覆盖空指针和错误长度拒绝；修改原缓冲区后，payload 保持正确，确认没有保留借用指针。
+- 模型场景由 30 个增加到 **31 个**：新场景在第二个 pinned 分配前注入失败，确认没有历史 owner/行记录及工作区残留，然后重试。实际执行时把适配器队列限制到 8 项，多次饱和交接后完成 160-token 输入和 3-token 输出，**432 个 layer span** 的 CPU/GPU 字节比较通过；每批还检查两个队列的地址/总容量及 fallback 地址/大小未变。原有 F16/Q8_0、退休、设备错误、同步回退及取消场景全部保留。
+
+最终 Windows 相关宿主 **12/12**、Linux 全部宿主 **24/24**、独立 CUDA CTest **3/3**、模型上下文 **31/31** 通过。首次独立 CUDA 回归中，既有 stageout 故障夹具报告过一次数据不一致；检查发现它用默认 stream 上传 pageable 数据后，没有建立到独立 nonblocking 搬运 stream 的完成边界。夹具新增显式的上传完成检查，随后三项测试全部通过，未放宽输出比较。首次失败日志保留为 `historical-workspace-native-initial-failure.log`，最终日志为 `historical-workspace-native-test.log` 和 `historical-workspace-native-detail.log`。
+
+其余记录为 `historical-workspace-{windows,host}-test.log`、`historical-workspace-gpu-test.log`、构建日志及 `historical-workspace-source-sha256.txt`，保存于本地 `build-local/capture-session-validation/` 与远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`。11 个源码/构建文件的本地与远程 SHA256 一致。CUDA sanitizer 环境限制继续保留；本轮没有新的 sanitizer 通过结论。
+
+普通 recency CLI delete 同样完成生成与退出：既定 GGUF、356-token 输入、8-token 输出、Q8_0、容量/水位 32/14/16，`proposed=committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 为 0。结束时 `payload_bytes=26738688` 仍可能包括等待清理的私有预约；不把该瞬时数当作 Live payload 的最终占用。原始记录为 `historical-workspace-cli-delete.log/.tokens`。本轮没有独立前后性能对照，不能据此宣称加速。
+
+**范围仍是组件级预约。** RAM session 当前在外层 GPU 准备前建立；如果后续工作区准备失败，未用 RAM 仍通过已有有界 CPU cleanup 归还。这尚不是全部资源在一个事务中的立即回滚。实际 GPU 工作集、layout scratch、目录/producer 元数据、backend、Mean-K/Q、rollback 等仍有未纳入统一预约的分配。原生测试中禁止 C++ 分配只覆盖所测搬运/提交区间，不是整个模型请求零动态分配的证明。当前仍处于 P3，下一步优先处理 layout scratch 与目录/producer 等实际分配，并逐项接入统一的请求准备和失败回滚。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

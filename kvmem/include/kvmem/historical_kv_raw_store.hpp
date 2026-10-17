@@ -135,6 +135,16 @@ public:
                               HistoricalKvHandle handle, uint32_t layer,
                               uint32_t token_offset, uint32_t token_count,
                               const std::vector<uint8_t> & packed_v);
+    // Synchronous copy into the already reserved payload. The source need
+    // only remain valid through this call; no temporary payload is allocated.
+    bool write_packed_k_slice(const HistoricalKvRepository::Lease & writer,
+                              HistoricalKvHandle handle, uint32_t layer,
+                              uint32_t token_offset, uint32_t token_count,
+                              const uint8_t * packed_k, size_t bytes);
+    bool write_packed_v_slice(const HistoricalKvRepository::Lease & writer,
+                              HistoricalKvHandle handle, uint32_t layer,
+                              uint32_t token_offset, uint32_t token_count,
+                              const uint8_t * packed_v, size_t bytes);
     bool write_mean_k_slice(const HistoricalKvRepository::Lease & writer,
                             HistoricalKvHandle handle, uint32_t layer,
                             uint32_t token_offset, uint32_t token_count,

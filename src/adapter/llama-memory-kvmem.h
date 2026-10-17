@@ -305,6 +305,7 @@ private:
     };
     void commit_harvest_packed(const HarvestVJob & job, const uint8_t * bytes);
     void enqueue_harvest_packed(HarvestVJob job);
+    uint8_t * harvest_packed_fallback(size_t bytes, std::vector<uint8_t> & temporary);
     void complete_historical_gpu_source(int32_t slot);
     struct HarvestVBatch {
         int slot = -1;
@@ -312,6 +313,8 @@ private:
     };
     std::vector<HarvestVJob> harvest_v_jobs_;
     HarvestVBatch harvest_v_pending_;
+    size_t harvest_v_job_limit_ = 0;
+    std::vector<uint8_t> harvest_v_fallback_;
     // 1 while a block's packed D2H is queued or in flight (until commit).
     std::vector<uint8_t> harvest_gpu_queued_;
     void copy_gpu_block_to_host(uint32_t block_id, int32_t gpu_slot,

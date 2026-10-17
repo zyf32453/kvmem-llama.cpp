@@ -302,10 +302,18 @@ bool HistoricalKvRawStore::write_packed_k_slice(
     const HistoricalKvRepository::Lease & writer,
     HistoricalKvHandle handle, uint32_t layer, uint32_t token_offset,
     uint32_t token_count, const std::vector<uint8_t> & packed_k) {
+    return write_packed_k_slice(writer, handle, layer, token_offset, token_count,
+                                packed_k.data(), packed_k.size());
+}
+
+bool HistoricalKvRawStore::write_packed_k_slice(
+    const HistoricalKvRepository::Lease & writer,
+    HistoricalKvHandle handle, uint32_t layer, uint32_t token_offset,
+    uint32_t token_count, const uint8_t * packed_k, size_t bytes) {
     if (!writer || !writer.is_writer() || !writer.repository_id() ||
         !same(writer.handle(), handle) || !handle.incarnation ||
         !handle.generation || handle.slot >= slots_.size() ||
-        !required_layer(layer) || !token_count) return false;
+        !required_layer(layer) || !token_count || !packed_k) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const auto meta = writer.metadata();
@@ -317,11 +325,11 @@ bool HistoricalKvRawStore::write_packed_k_slice(
         token_count > block->valid_tokens - token_offset) return false;
     Layer & target = block->layers[layer];
     if (target.written || token_offset != target.k_written_tokens ||
-        packed_k.size() != static_cast<size_t>(token_count) *
+        bytes != static_cast<size_t>(token_count) *
                            config_.packed_k_bytes_per_token) return false;
     const size_t offset = static_cast<size_t>(token_offset) *
                           config_.packed_k_bytes_per_token;
-    std::copy(packed_k.begin(), packed_k.end(), target.packed_k.begin() + offset);
+    std::copy_n(packed_k, bytes, target.packed_k.begin() + offset);
     target.k_written_tokens += token_count;
     mark_layer_complete(*block, target);
     return true;
@@ -331,10 +339,18 @@ bool HistoricalKvRawStore::write_packed_v_slice(
     const HistoricalKvRepository::Lease & writer,
     HistoricalKvHandle handle, uint32_t layer, uint32_t token_offset,
     uint32_t token_count, const std::vector<uint8_t> & packed_v) {
+    return write_packed_v_slice(writer, handle, layer, token_offset, token_count,
+                                packed_v.data(), packed_v.size());
+}
+
+bool HistoricalKvRawStore::write_packed_v_slice(
+    const HistoricalKvRepository::Lease & writer,
+    HistoricalKvHandle handle, uint32_t layer, uint32_t token_offset,
+    uint32_t token_count, const uint8_t * packed_v, size_t bytes) {
     if (!writer || !writer.is_writer() || !writer.repository_id() ||
         !same(writer.handle(), handle) || !handle.incarnation ||
         !handle.generation || handle.slot >= slots_.size() ||
-        !required_layer(layer) || !token_count) return false;
+        !required_layer(layer) || !token_count || !packed_v) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const auto meta = writer.metadata();
@@ -346,11 +362,11 @@ bool HistoricalKvRawStore::write_packed_v_slice(
         token_count > block->valid_tokens - token_offset) return false;
     Layer & target = block->layers[layer];
     if (target.written || token_offset != target.v_written_tokens ||
-        packed_v.size() != static_cast<size_t>(token_count) *
+        bytes != static_cast<size_t>(token_count) *
                            config_.packed_v_bytes_per_token) return false;
     const size_t offset = static_cast<size_t>(token_offset) *
                           config_.packed_v_bytes_per_token;
-    std::copy(packed_v.begin(), packed_v.end(), target.packed_v.begin() + offset);
+    std::copy_n(packed_v, bytes, target.packed_v.begin() + offset);
     target.v_written_tokens += token_count;
     mark_layer_complete(*block, target);
     return true;

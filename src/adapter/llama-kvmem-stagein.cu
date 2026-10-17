@@ -6,6 +6,7 @@
 
 
 #include <cmath>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -31,6 +32,7 @@ static_assert(sizeof(block_q4_0) == 18, "q4_0 block");
 
 constexpr size_t SLAB = (size_t) 32 * 1024 * 1024;
 constexpr int GATHER_MAX = 8192;
+static_assert(GATHER_MAX == KVMEM_CAPTURE_MAX_JOBS, "capture descriptor capacity");
 
 struct CopyOp {
     const uint8_t * src;
@@ -58,6 +60,9 @@ struct Item {
 };
 
 struct Stage {
+    size_t      capture_job_limit = 0;
+    KvmemCaptureReserveFault reserve_fault = nullptr;
+    void *      reserve_fault_context = nullptr;
     float *     dev_f32   = nullptr;
     size_t      n_f32     = 0;
     uint8_t *   dev_q     = nullptr;
@@ -406,6 +411,8 @@ bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed) {
     if (n_f32 == 0) {
         return false;
     }
+    if (stage().capture_job_limit)
+        return n_f32 <= stage().n_f32 && n_packed <= stage().n_q;
     if (!stage().h2d_ev) {
         if (!cuda_ok(cudaEventCreateWithFlags(&stage().h2d_ev, cudaEventDisableTiming), "event")) {
             return false;
@@ -478,27 +485,113 @@ bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed) {
     return stage().dev_f32 != nullptr;
 }
 
+KvmemCaptureWorkspace kvmem_capture_workspace_status() {
+    const auto & s = stage();
+    return {s.capture_job_limit != 0, s.capture_job_limit,
+        s.n_f32 * sizeof(float) + s.n_q + s.n_ops * sizeof(CopyOp),
+        (size_t(bool(s.pin[0])) + size_t(bool(s.pin[1]))) * SLAB,
+        size_t(bool(s.out_ev[0])) + size_t(bool(s.out_ev[1])) + size_t(bool(s.h2d_ev)),
+        s.items.capacity() * sizeof(Item) + s.outs.capacity() * sizeof(Stage::OutItem) +
+            s.host_ops.capacity() * sizeof(CopyOp)};
+}
+
+void kvmem_capture_reserve_test_fault(KvmemCaptureReserveFault fault, void * context) {
+    stage().reserve_fault = fault;
+    stage().reserve_fault_context = context;
+}
+
+bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice, size_t max_jobs) {
+    auto & s = stage();
+    // Never discard a warmed domain's queued work or existing allocations.
+    if (!n_f32 || n_f32 > SIZE_MAX / sizeof(float) || !max_packed_slice ||
+        !max_jobs || max_jobs > KVMEM_CAPTURE_MAX_JOBS || s.capture_job_limit ||
+        s.dev_f32 || s.dev_q || s.pin[0] || s.pin[1] || s.out_ev[0] || s.out_ev[1] ||
+        s.h2d_ev || s.dev_ops || s.dev_theta || s.out_hazard || s.out_failed ||
+        !s.items.empty() || !s.outs.empty()) return false;
+    const auto allow = [&](KvmemCaptureReservePoint point) {
+        return !s.reserve_fault || !s.reserve_fault(s.reserve_fault_context, point);
+    };
+    bool ok = false;
+    try {
+        // The stream belongs to the execution context, outside the workspace.
+        // Creating it here avoids lazy creation when the first batch submits.
+        (void) stream();
+        const auto prepare = [&] {
+            using P = KvmemCaptureReservePoint;
+            if (!allow(P::F32) || !cuda_ok(cudaMalloc(reinterpret_cast<void **>(&s.dev_f32),
+                    n_f32 * sizeof(float)), "capture f32 reserve")) return false;
+            s.n_f32 = n_f32;
+            const size_t packed = std::max(SLAB, max_packed_slice);
+            if (!allow(P::Packed) || !cuda_ok(cudaMalloc(reinterpret_cast<void **>(&s.dev_q),
+                    packed), "capture packed reserve")) return false;
+            s.n_q = packed;
+            for (int i = 0; i < 2; ++i) {
+                if (!allow(i ? P::Pin1 : P::Pin0) ||
+                    !cuda_ok(cudaMallocHost(reinterpret_cast<void **>(&s.pin[i]), SLAB), "capture pin reserve"))
+                    return false;
+                if (!allow(i ? P::Event1 : P::Event0) ||
+                    !cuda_ok(cudaEventCreateWithFlags(&s.out_ev[i], cudaEventDisableTiming), "capture event reserve"))
+                    return false;
+            }
+            s.pin_n = SLAB;
+            if (!allow(P::H2DEvent) || !cuda_ok(cudaEventCreateWithFlags(&s.h2d_ev,
+                    cudaEventDisableTiming), "capture h2d event reserve")) return false;
+            if (!allow(P::DeviceOps) || !cuda_ok(cudaMalloc(reinterpret_cast<void **>(&s.dev_ops),
+                    GATHER_MAX * sizeof(CopyOp)), "capture descriptors reserve")) return false;
+            s.n_ops = GATHER_MAX;
+            if (!allow(P::HostItems)) return false;
+            s.items.reserve(max_jobs);
+            if (!allow(P::HostOuts)) return false;
+            s.outs.reserve(max_jobs);
+            if (!allow(P::HostOps)) return false;
+            s.host_ops.reserve(GATHER_MAX);
+            return true;
+        };
+        ok = prepare();
+    } catch (...) {
+        // Includes host allocation failure. Preparation submits no device work.
+        kvmem_stagein_gpu_free();
+        throw;
+    }
+    if (!ok) {
+        kvmem_stagein_gpu_free();
+        return false;
+    }
+    s.capture_job_limit = max_jobs;
+    return true;
+}
+
 void kvmem_stagein_gpu_free() {
     // In particular, do not free pinned memory after a partial failed submit.
     stageout_drain();
     kvmem_meank_cancel();
+    // Other staging consumers may still have submitted kernels on this stream.
+    // On any release error retain the pointer, so teardown cannot report a
+    // completed rollback while losing ownership of an allocation.
+    const auto staging_stream = kvmem_current_execution().gpu->stream;
+    if (staging_stream && !cuda_ok(cudaStreamSynchronize(staging_stream), "staging release drain"))
+        throw std::runtime_error("KVMem staging release has unconfirmed device work");
+    const auto released = [](cudaError_t result) {
+        if (!cuda_ok(result, "staging release"))
+            throw std::runtime_error("KVMem staging allocation release failed");
+    };
     if (stage().dev_f32) {
-        cudaFree(stage().dev_f32);
+        released(cudaFree(stage().dev_f32));
         stage().dev_f32 = nullptr;
     }
     stage().n_f32 = 0;
     if (stage().dev_q) {
-        cudaFree(stage().dev_q);
+        released(cudaFree(stage().dev_q));
         stage().dev_q = nullptr;
     }
     stage().n_q = 0;
     for (int i = 0; i < 2; ++i) {
         if (stage().pin[i]) {
-            cudaFreeHost(stage().pin[i]);
+            released(cudaFreeHost(stage().pin[i]));
             stage().pin[i] = nullptr;
         }
         if (stage().out_ev[i]) {
-            cudaEventDestroy(stage().out_ev[i]);
+            released(cudaEventDestroy(stage().out_ev[i]));
             stage().out_ev[i] = nullptr;
         }
     }
@@ -506,25 +599,26 @@ void kvmem_stagein_gpu_free() {
     stage().used = 0;
     stage().out_cur = 0;
     stage().out_ready[0] = stage().out_ready[1] = false;
-    stage().items.clear();
-    stage().outs.clear();
+    std::vector<Item>().swap(stage().items);
+    std::vector<Stage::OutItem>().swap(stage().outs);
     if (stage().dev_ops) {
-        cudaFree(stage().dev_ops);
+        released(cudaFree(stage().dev_ops));
         stage().dev_ops = nullptr;
     }
     stage().n_ops = 0;
-    stage().host_ops.clear();
+    std::vector<CopyOp>().swap(stage().host_ops);
     kvmem_meank_free();
     stage().theta.clear();
     if (stage().dev_theta) {
-        cudaFree(stage().dev_theta);
+        released(cudaFree(stage().dev_theta));
         stage().dev_theta = nullptr;
     }
     stage().n_theta = 0;
     if (stage().h2d_ev) {
-        cudaEventDestroy(stage().h2d_ev);
+        released(cudaEventDestroy(stage().h2d_ev));
         stage().h2d_ev = nullptr;
     }
+    stage().capture_job_limit = 0;
 }
 
 bool kvmem_stagein_fwht_ok(int nrot) {
@@ -861,7 +955,8 @@ static bool slab_reserve(size_t nbytes, int64_t * set_us) {
     if (!slab_ready(nbytes)) {
         return false;
     }
-    if (stage().used + nbytes > stage().pin_n) {
+    if (stage().used + nbytes > stage().pin_n ||
+        (stage().capture_job_limit && stage().items.size() >= stage().capture_job_limit)) {
         if (!kvmem_stagein_flush(stage().copy_us, stage().rope_us, stage().hadamard_us,
                                  set_us ? set_us : stage().set_us)) {
             return false;
@@ -946,7 +1041,8 @@ bool kvmem_stageout_enqueue(const void * gpu_src, size_t nbytes) {
         stage().n_q < SLAB || nbytes > SLAB) {
         return false;
     }
-    if (stage().used + nbytes > stage().pin_n) {
+    if (stage().used + nbytes > stage().pin_n ||
+        (stage().capture_job_limit && stage().outs.size() >= stage().capture_job_limit)) {
         return false;
     }
     Stage::OutItem o;

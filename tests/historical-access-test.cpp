@@ -22,6 +22,22 @@
 #include <future>
 
 struct kvmem_transfer_test_access {
+    struct PackedWorkspace {
+        const void * a;
+        const void * b;
+        const void * fallback;
+        size_t capacity, fallback_bytes;
+    };
+    static PackedWorkspace packed_workspace(const llama_memory_kvmem & mem) {
+        return {mem.harvest_v_jobs_.data(), mem.harvest_v_pending_.jobs.data(), mem.harvest_v_fallback_.data(),
+            mem.harvest_v_jobs_.capacity() + mem.harvest_v_pending_.jobs.capacity(), mem.harvest_v_fallback_.size()};
+    }
+    static void small_packed_queue(llama_memory_kvmem & mem) { mem.harvest_v_job_limit_ = 8; }
+    static bool packed_workspace_unchanged(const llama_memory_kvmem & mem, PackedWorkspace p) {
+        const auto q = packed_workspace(mem);
+        return q.capacity == p.capacity && q.fallback_bytes == p.fallback_bytes && q.fallback == p.fallback &&
+            ((q.a == p.a && q.b == p.b) || (q.a == p.b && q.b == p.a));
+    }
     using CaptureFaultPoint = llama_memory_kvmem::CaptureFaultPoint;
     using CaptureFault = llama_memory_kvmem::CaptureFault;
     static void capture_hook(llama_memory_kvmem & mem, CaptureFault hook, void * context) {
@@ -1293,7 +1309,8 @@ struct ModelStageoutFault {
 };
 static void check_request_capture(llama_context * ctx, llama_model * model,
                                   llama_memory_kvmem & mem,
-                                  RetirementPoint retirement = RetirementPoint::None) {
+                                  RetirementPoint retirement = RetirementPoint::None,
+                                  bool saturated_queue = false) {
     std::string text;
     for (unsigned i = 0; i < 30; ++i) text += "The river passes a small village. The bridge is made of stone. ";
     const auto * vocab = llama_model_get_vocab(model);
@@ -1304,7 +1321,23 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
             "real capture prompt tokenization failed");
     require(!llama_kvmem_historical_capture_begin(1, 160, 3, 7) && mem.store_n_tokens() == 0,
             "insufficient capture reservation changed runtime");
+    if (saturated_queue) {
+        const auto inject = [](void *, KvmemCaptureReservePoint point) noexcept {
+            return point == KvmemCaptureReservePoint::Pin1;
+        };
+        kvmem_capture_reserve_test_fault(inject, nullptr);
+        const bool admitted = llama_kvmem_historical_capture_begin(12, 160, 3, 7);
+        kvmem_capture_reserve_test_fault(nullptr, nullptr);
+        const auto failed = kvmem_capture_workspace_status();
+        require(!admitted && mem.store_n_tokens() == 0 && !failed.reserved && !failed.device_bytes &&
+                !failed.pinned_bytes && !failed.events && !failed.host_bytes,
+                "real request preparation failure published an owner or retained workspace");
+    }
     require(llama_kvmem_historical_capture_begin(12, 160, 3, 7), "real request capture admission failed");
+    const auto packed_workspace = kvmem_transfer_test_access::packed_workspace(mem);
+    require(packed_workspace.capacity >= 2 * KVMEM_CAPTURE_MAX_JOBS && packed_workspace.fallback_bytes,
+            "real request did not prepare both queues and fallback");
+    if (saturated_queue) kvmem_transfer_test_access::small_packed_queue(mem);
     require(!llama_kvmem_historical_capture_begin(12, 160, 3, 7), "duplicate capture owner accepted");
     struct Saved { uint32_t id, il; uint64_t k, v; };
     std::vector<Saved> saved;
@@ -1321,6 +1354,8 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         llama_synchronize(ctx);
         mem.harvest_flush();
         kvmem_transfer_test_access::commit(mem);
+        require(kvmem_transfer_test_access::packed_workspace_unchanged(mem, packed_workspace),
+                "real capture reallocated a prepared queue or fallback buffer");
         for (uint32_t id = first; id < mem.store().block_count(); ++id) {
             if (id == retired_during_request) continue;
             const auto & block = mem.store().blocks()[id];
@@ -1739,8 +1774,8 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario = 0; scenario < 30; ++scenario) {
-            if (scenario >= 3 && scenario <= 12) {
+        for (unsigned scenario = 0; scenario < 31; ++scenario) {
+            if ((scenario >= 3 && scenario <= 12) || scenario == 30) {
                 kp.method = 0;
                 kp.budget = 96;
                 llama_kvmem_set_params(&kp);
@@ -1760,7 +1795,8 @@ int main(int argc, char ** argv) {
             if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
-            if (scenario == 13) check_capture_start_failure(*mem);
+            if (scenario == 30) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, true);
+            else if (scenario == 13) check_capture_start_failure(*mem);
             else if (scenario >= 14) check_capture_failure(*mem, scenario);
             else if (scenario >= 3) check_request_capture(ctx.get(), model.get(), *mem,
                 scenario == 5 ? RetirementPoint::BetweenCalls :
