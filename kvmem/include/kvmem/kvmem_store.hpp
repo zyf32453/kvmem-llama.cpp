@@ -111,6 +111,10 @@ struct KvMemDroppedBlock {
 
 // Result of diffing a new selection against the current working set.
 struct KvMemPlan {
+    // Identifies the exact table contents and prepared plan that produced
+    // these physical IDs. A recycled slot must never satisfy an old plan.
+    uint64_t table_revision = 0;
+    uint64_t plan_id = 0;
     // Blocks newly entering the logical working set. The executor may avoid a
     // physical transfer when their GPU pages are still resident.
     std::vector<uint32_t> stage_in;
@@ -342,6 +346,7 @@ public:
     uint32_t block_count() const { return static_cast<uint32_t>(blocks_.size()); }
     uint32_t total_tokens() const { return total_tokens_; }
     const std::vector<KvMemBlock> &blocks() const { return blocks_; }
+    uint64_t table_revision() const noexcept { return table_revision_; }
     // Physical table indices in original-position order. Today the legacy
     // append path makes this 0..N-1; reclaimed-slot reuse will not.
     const std::vector<uint32_t> & chronological_ids() const { return position_order_; }
@@ -530,6 +535,7 @@ private:
     std::vector<KvMemBlock> blocks_;
     std::vector<uint32_t> position_order_;
     uint32_t total_tokens_ = 0;  // total appended context length
+    uint64_t table_revision_ = 0; // changes whenever block identities/spans change
     std::shared_ptr<KvMemGc> gc_;
     std::shared_ptr<const KvMemGc::View> gc_view_;
     std::shared_ptr<KvMemGc::Lease> gc_working_lease_;

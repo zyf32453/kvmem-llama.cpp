@@ -123,7 +123,9 @@ std::vector<uint32_t> KvMemRuntime::preview_reselect(const std::vector<uint32_t>
 }
 
 KvMemPlan KvMemRuntime::prepare_selection(const std::vector<uint32_t> & selected, bool force_raw_refresh) {
+    if (pending_) throw std::logic_error("cannot replace an unapplied selection plan");
     last_plan_ = store_.set_selection(selected, force_raw_refresh);
+    last_plan_.plan_id = ++plan_serial_;
     pending_ = true;
     start_prefetch();
     return last_plan_;
@@ -138,8 +140,10 @@ bool KvMemRuntime::commit_resident_selection(const std::vector<uint32_t> & selec
 
 KvMemPlan KvMemRuntime::prepare_prefill_pressure(
         const std::vector<uint32_t> &mandatory) {
+    if (pending_) throw std::logic_error("cannot replace an unapplied selection plan");
     last_plan_ = store_.set_selection(
         store_.pick_prefill_pressure_blocks(mandatory));
+    last_plan_.plan_id = ++plan_serial_;
     pending_ = true;
     start_prefetch();
     return last_plan_;
@@ -230,6 +234,8 @@ void KvMemRuntime::spill_outgoing() {
     if (!pending_) {
         return;
     }
+    if (!plan_is_current(last_plan_))
+        throw std::logic_error("historical block table changed after selection planning");
     wait_prefetch();
     pending_gpu_frees_.clear();
     for (uint32_t id : last_plan_.stage_out) {
@@ -241,6 +247,8 @@ void KvMemRuntime::admit_incoming() {
     if (!pending_) {
         return;
     }
+    if (!plan_is_current(last_plan_))
+        throw std::logic_error("historical block table changed after selection planning");
     for (int32_t slot : pending_gpu_frees_) {
         backend_->free_gpu_slot(slot);
     }

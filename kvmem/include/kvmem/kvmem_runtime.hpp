@@ -72,6 +72,7 @@ public:
         std::vector<HistoricalKvRepository::Lease> & writers,
         std::vector<HistoricalKvShadowDirectory::Producer> & producers,
         HistoricalKvShadowDirectory::AppendReservation * reservation = nullptr) {
+        if (reservation && pending_) return false;
         if (reservation) return historical_shadow_directory_.append_reserved_blocks(
             store_, *reservation, std::move(repository), std::move(storage), writers, producers);
         return historical_shadow_directory_.append_blocks(
@@ -88,17 +89,24 @@ public:
     }
     bool prepare_recycled_historical_slot(
             HistoricalKvShadowDirectory::AppendReservation & reservation, uint32_t block_id) {
+        if (pending_ || !pending_gpu_frees_.empty() || !prefetch_futs_.empty()) return false;
         return historical_shadow_directory_.prepare_recycled_slot(store_, reservation, block_id);
     }
     bool confirm_reclaimed_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.confirm_reclaimed(block_id);
     }
     bool detach_reclaimed_historical_block(uint32_t block_id) noexcept {
+        if (pending_ || !pending_gpu_frees_.empty() || !prefetch_futs_.empty()) return false;
         return historical_shadow_directory_.detach_reclaimed_span(store_, block_id);
     }
     // True while a prepared plan has not been applied yet (prepare_selection /
     // prepare_prefill_pressure set it, admit_incoming clears it).
     bool pending() const { return pending_; }
+    bool plan_is_current(const KvMemPlan & plan) const noexcept {
+        return pending_ && plan.plan_id != 0 && plan.plan_id == last_plan_.plan_id &&
+               plan.table_revision == last_plan_.table_revision &&
+               plan.table_revision == store_.table_revision();
+    }
     // A parked runtime has no GPU slots or unapplied transfers.
     void rebind_backend(KvMemBackend * backend);
     size_t allocated_bytes() const {
@@ -176,6 +184,7 @@ private:
     std::unique_ptr<PinnedKvTier> cpu_tier_;
     std::unique_ptr<NvmeKvTier> nvme_tier_;
     KvMemPlan last_plan_;
+    uint64_t plan_serial_ = 0;
     bool pending_ = false;
     bool trace_ = false;
     uint64_t slot_bytes_ = 0;

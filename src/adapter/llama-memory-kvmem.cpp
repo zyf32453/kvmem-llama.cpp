@@ -2215,6 +2215,8 @@ void llama_memory_kvmem::trace_plan(const char * tag, const kvmem::KvMemPlan & p
 }
 
 void llama_memory_kvmem::apply_plan_to_kv(const kvmem::KvMemPlan & plan) {
+    if (!runtime_->plan_is_current(plan))
+        throw std::logic_error("historical selection plan is stale");
     if (!plan.stage_in.empty() || !plan.stage_out.empty()) ++attention_epoch_;
     auto & store = runtime_->store();
     for (uint32_t id : plan.stage_out) {

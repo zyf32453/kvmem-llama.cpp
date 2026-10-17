@@ -537,6 +537,14 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 
 另有混合批次回归：先保留一个旧块，再同时追加一个新表下标和一个已回收表下标；第二个 writer 位置错误时整个批次不提交，修正后在禁止 `new` 的区间原子提交。最终远程宿主 CTest **27/27**、相关 ASan/UBSan **3/3**、TSan **3/3** 均通过。真实 GGUF/CUDA 模型的既有 **35/35** 场景和 backend guard 通过；recency/RAM delete 请求完成 356-token 输入、8-token 输出，本次后台 `proposed=committed=reclaimed=8`、位置脱离 8 次、策略与 worker 错误为 0。该 CLI 路径目前未自动启用表项复用，模型结果是基线回归，不是生产复用验收。原始日志在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`，文件名前缀 `recycled-table-`。
 
+### 旧选择计划与新代表项的隔离（2026-10-17）
+
+重选计划原先只保存物理表下标。若计划准备后同一下标变成新代，旧计划的 stage-out、stage-in 或 RoPE 布局可能作用到新数据。本轮给块表增设身份/跨度修订号：追加、截断、确认释放后的位置脱离及墓碑复用均推进修订号。运行时给每个待执行计划单独编号；在 adapter 开始 GPU 搬运前，以及 runtime stage-out/stage-in 前，必须同时核对编号、表修订号及 pending 状态。尚未执行的计划不能被第二个计划静默替换，回收跨度脱离和表项新代准备也会在 pending/IO 未清时拒绝。旧计划失效后只能丢弃并重新规划，不能把同一个物理 ID 当成原 generation 继续执行。
+
+宿主测试覆盖计划准备后表发生追加而拒绝执行、pending 期间不许脱离/准备复用、以及复用后选择器仍按原始位置排序；完整宿主 CTest **27/27**、相关 ASan/UBSan **4/4**、TSan **4/4** 通过。这个保护覆盖 runtime 的计划执行入口，不等于已经把 server checkpoint、跨请求缓存的裸表下标全部升级为精确代际引用；那些入口在启用生产复用前仍需逐项改造。
+
+最终 CUDA 构建及真实 GGUF 测试 **35/35** 个场景和 backend guard 通过。相同模型的 recency/RAM delete 推理完成 356-token 输入、8-token 输出，后台 `proposed=committed=reclaimed=8`、位置索引脱离 8 次、策略及 worker 错误为 0；这个结果验证现有受限生产路径没有被计划检查误拒，仍不是跨请求表项复用验收。原始日志位于远程隔离目录，前缀 `plan-generation-final-`。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

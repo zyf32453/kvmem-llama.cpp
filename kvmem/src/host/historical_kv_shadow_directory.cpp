@@ -218,6 +218,7 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
         store.position_order_.push_back(id);
     }
     store.total_tokens_ = uint32_t(position);
+    if (!writers.empty()) ++store.table_revision_;
     r.used = next_fresh;
     if (!writers.empty()) r.last_logical_id = previous_logical_id;
     return true;
@@ -359,6 +360,7 @@ bool HistoricalKvShadowDirectory::append_blocks(
     store.blocks_.insert(store.blocks_.end(), blocks.begin(), blocks.end());
     for (const auto & block : blocks) store.position_order_.push_back(block.block_id);
     store.total_tokens_ = static_cast<uint32_t>(position);
+    ++store.table_revision_;
     repository_id_ = repository->repository_id();
     producers = std::move(contexts);
     return true;
@@ -465,6 +467,7 @@ bool HistoricalKvShadowDirectory::detach_reclaimed_span(
     store.position_order_.erase(indexed);
     block.n_tokens = 0;
     block.tier = KvTier::CPU;
+    ++store.table_revision_;
     return true;
 }
 

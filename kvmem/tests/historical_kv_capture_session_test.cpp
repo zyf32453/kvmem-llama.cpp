@@ -375,7 +375,12 @@ static void reserved_metadata_batch_is_atomic() {
 }
 
 static void reserved_metadata_reuses_reclaimed_table_slots() {
-    KvMemRuntime runtime(runtime_config());
+    auto config = runtime_config();
+    config.store.select_budget = 8;
+    config.store.prefill_budget = 8;
+    config.store.sink_blocks = 1;
+    config.store.recent_blocks = 1;
+    KvMemRuntime runtime(config);
     auto repo = std::make_shared<HistoricalKvRepository>(2);
     auto storage = std::make_shared<HistoricalKvRawStore>(storage_config(), 2);
     auto reservation = runtime.prepare_historical_metadata(repo, storage, 2);
@@ -431,6 +436,9 @@ static void reserved_metadata_reuses_reclaimed_table_slots() {
         }
         auto current_task = std::move(producers[0]);
         complete(current_task, 2);
+        if (i >= 2)
+            check(runtime.store().pick_topk_blocks() == std::vector<uint32_t>({previous_id, id}),
+                  "recycled table slot changed chronological selector order");
         producers.clear(); writers.clear();
         if (previous_task) {
             check(repo->retire(previous_handle) == HistoricalKvRepository::RetireResult::Committed,
@@ -439,9 +447,23 @@ static void reserved_metadata_reuses_reclaimed_table_slots() {
             check(repo->try_reclaim(previous_handle) == HistoricalKvRepository::ReclaimResult::Complete &&
                   !repo->acquire_read(previous_handle),
                   "cyclic prior generation did not release exactly once");
+            if (i == 1) {
+                const auto plan = runtime.prepare_selection({});
+                check(runtime.plan_is_current(plan) &&
+                      !runtime.detach_reclaimed_historical_block(previous_id),
+                      "reclaimed span detached during an unapplied selection plan");
+                runtime.discard_pending();
+            }
             check(runtime.detach_reclaimed_historical_block(previous_id) &&
-                  runtime.store().block_id_containing(begin - 2) == -1 &&
-                  runtime.prepare_recycled_historical_slot(*reservation, previous_id),
+                  runtime.store().block_id_containing(begin - 2) == -1,
+                  "cyclic reclaimed span was not detached");
+            if (i == 1) {
+                runtime.prepare_selection({});
+                check(!runtime.prepare_recycled_historical_slot(*reservation, previous_id),
+                      "recycled slot was prepared during an unapplied selection plan");
+                runtime.discard_pending();
+            }
+            check(runtime.prepare_recycled_historical_slot(*reservation, previous_id),
                   "cyclic reclaimed table slot was not prepared for a new generation");
             reclaimed_handle = previous_handle;
             reclaimed_begin = begin - 2;

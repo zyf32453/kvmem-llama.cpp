@@ -342,10 +342,33 @@ static void test_discard_pending_plan() {
     CHECK(be.frees.empty());
 }
 
+static void test_selection_plan_rejects_changed_table() {
+    KvMemRuntime rt(make_cfg());
+    rt.register_append(32);
+    const auto first = rt.prepare_selection({0});
+    CHECK(rt.plan_is_current(first));
+    bool replaced = false;
+    try { rt.prepare_selection({}); }
+    catch (const std::logic_error &) { replaced = true; }
+    CHECK(replaced && rt.plan_is_current(first));
+    rt.register_append(32);
+    CHECK(!rt.plan_is_current(first));
+    bool rejected = false;
+    try { rt.spill_outgoing(); }
+    catch (const std::logic_error &) { rejected = true; }
+    CHECK(rejected && rt.pending());
+    rt.discard_pending();
+    const auto second = rt.prepare_selection({0, 1});
+    CHECK(rt.plan_is_current(second));
+    CHECK(!rt.plan_is_current(first));
+    rt.discard_pending();
+}
+
 int main() {
     test_selection_preview_and_resident_commit();
     test_full_drain_then_restage();
     test_discard_pending_plan();
+    test_selection_plan_rejects_changed_table();
     test_stage_out_before_stage_in();
     test_high_overlap_skips_stage_in();
     test_pressure_keeps_sink_and_tail();

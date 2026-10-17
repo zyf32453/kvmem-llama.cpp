@@ -315,6 +315,7 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
         total_tokens_ += b.n_tokens;
         remaining -= b.n_tokens;
     }
+    ++table_revision_;
 }
 
 std::vector<KvMemDroppedBlock> KvMemStore::truncate_to(uint32_t token_pos) {
@@ -348,6 +349,7 @@ std::vector<KvMemDroppedBlock> KvMemStore::truncate_to(uint32_t token_pos) {
         }
     }
     total_tokens_ = token_pos;
+    ++table_revision_;
     if (historical_shadow_directory_)
         historical_shadow_directory_->prune_dropped(*this);
     return dropped;
@@ -973,6 +975,7 @@ KvMemPlan KvMemStore::set_selection(std::vector<uint32_t> selected_ids,
     gc_validate_mandatory(selected_ids);
 
     KvMemPlan plan;
+    plan.table_revision = table_revision_;
     // Hold both windows while building the plan; transfer ownership only after
     // planning succeeds so an exception cannot unpin the current window.
     auto next_gc_lease = gc_ ? gc_->pin(selected_ids) : nullptr;
