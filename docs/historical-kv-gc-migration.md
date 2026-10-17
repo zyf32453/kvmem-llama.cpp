@@ -258,7 +258,25 @@ shadow 不退休块、不释放 payload；相同配置结束为 `committed=0, re
 
 普通 CLI delete 的最终回归同样正常完成生成与退出：既定模型、356-token 输入、8-token 输出、容量/水位 32/14/16，观测 `committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 为 0。日志和输出为 `historical-stageout-cli-delete.log/.tokens`；完成时 payload 仍可能包含后台尚未归还的私有预约。
 
-本轮只处理 packed K/V reverse slab。Mean-K/Q capture worker、其它设备提交/完成路径及更完整的取消协议仍需核对与验收；随后还须补齐整请求资源预约、全部 active 入口、server、多请求和长期有界等原始交付项。
+上述阶段只处理 packed K/V reverse slab；Mean-K/Q capture worker 的后续进展见下一节。其它设备提交/完成路径及更完整的取消协议仍需核对与验收，随后还须补齐整请求资源预约、全部 active 入口、server、多请求和长期有界等原始交付项。
+
+### Mean-K/Q 后台采集的错误传递与取消（2026-10-17）
+
+单 GPU Mean-K/Q 采集线程原先没有顶层异常捕获：事件等待、Host 转换或写入抛出异常时，会离开线程入口并终止进程；前台等待条件也没有“后台已失败”分支。现在 worker 在受同一互斥量保护的错误槽中保存异常并唤醒等待者；前台在采集等待、flush、追加和 active 入口观察错误，关闭该采集域并传递异常。已经失败的上下文不能继续追加或通过 reset 重新开放，正常释放上下文仍可完成经过确认的设备清理。空任务队列也要观察 worker 初始化成功或失败，不能把尚未完成的线程启动误报为成功 flush。
+
+任务队列改为固定两个位置，对应已有两个实际搬运槽。每批 item 列表在任何 DMA 提交前预留空间，提交队列不再分配内存；槽位完成标志改为原子发布，统计值由 worker 在锁内提交、前台汇总，消除原先后台写统计与前台重置/打印统计的竞争。这只限制当前采集流水线队列，并不是整请求 payload、元数据和临时空间均已预约或有界的证明。
+
+发生后台错误时，不伪造 inflight 完成，不丢弃出错批次或后续队列的 producer/writer，也不重试已经写入的 Q/Mean-K。上下文退出先停止并 join 采集线程，再检查真实 CUDA stream 排空；已标记失败的请求还须确认设备上的源计算结束，防止 compute → capture 依赖未能建立时只等待空的采集 stream。确认完成后才取消未提交的 CPU 工作、释放任务引用。已经在 CPU 写入中的一次任务可先完成；尚未开始的排队任务可以取消。持续不能确认设备完成时保留引用并拒绝释放；最终析构沿用显式终止进程的安全边界，尚未实现任意设备错误后的服务恢复。这里等待的是采集线程及实际设备工作，不是 GC worker。
+
+部分 D2D、D2H 或完成事件提交失败时，只有检查 stream 排空成功，才允许使用保留在原位置队列中的输入做同步回退；排空失败则关闭采集域并保留任务。生产同步回退还会先完成前一批采集，避免前后台同时修改 Q，或后一段 Mean-K 越过尚未写入的前缀。已退休块即使还有旧任务完成，也不能重新发布成 Live。
+
+新增确定性故障场景使用实际 CUDA 搬运和模型的层/头维度，Mean-K/Q 输入为可逐项校验的人工张量，不冒充自动生产接入。覆盖 worker 设备选择失败、事件等待失败、写完 Q 与第一层 K 后的 Host 写入失败、第二次 D2D 失败、D2H 失败、完成事件失败及无法确认排空。双批次测试将第一批停在明确屏障，确认第二批已经排队后再触发错误；检查错误唤醒、后继任务不被执行、同代 writer 保留、Retired 回收延期、Q/K 精确前缀，以及取消后 CPU payload 可释放。另一个场景通过生产 `harvest_pending` 触发第二批同步回退，验证它等待第一批采集并最终只累计 16 个 Q/Mean-K token。
+
+最终 CUDA 模型验证 **21/21 个顶层场景** 通过：保留原有 13 个场景，新增 7 个故障场景和 1 个生产同步回退顺序场景。Windows 相关宿主回归 **12/12**、Linux 全部宿主回归 **24/24**、既有 packed stageout 故障测试 **1/1（8 个内部场景）** 通过。顺序测试初次因夹具没有提交第一批 packed KV 而被正确拒绝；补齐真实依赖后通过，失败日志单独保留，未修改产品的前缀检查。日志为 `historical-worker-final-gpu-test.log`、`historical-worker-{windows,host,stageout}-test.log`，本地保存在 `build-local/capture-session-validation/`，远程继续使用 `/tmp/kvmem-gc-99bef27.3CD9MU` 隔离副本。
+
+同版 CLI delete 完成 356-token 输入、8-token 生成和上下文退出：容量/低高水位仍为 32/14/16，`proposed=committed=reclaimed=6`，`live_observed=14`，`task_references=0`，`gpu_deferred=gpu_returned=6`，policy/worker failure 均为 0。瞬时 `payload_bytes=26738688` 仍包含尚未后台归还的私有预约，不能直接解释成 Live 历史的最终占用。原始记录为 `historical-worker-cli-delete.log/.tokens`；三个代码文件的本地与远程 SHA256 一致，记录在 `historical-worker-source-sha256.txt`。这仍是短请求功能回归，不是长期内存或性能验收。
+
+这一步仍不开放生产 retrieval 的历史 GC，也未覆盖 multi-GPU 采集、decode accumulator 的全部错误分支、MTP 或 NVMe 的设备失败恢复。CUDA sanitizer 的环境限制仍在，不能将本轮原生测试或此前宿主 sanitizer 结果当作 CUDA 适配器通过 sanitizer 的证据。
 
 ## 剩余生产接入与完整验收
 

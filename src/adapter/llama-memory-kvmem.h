@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -347,10 +348,20 @@ private:
     void harvest_perf_emit_graph_line();
     void retr_perf_print();
     void harvest_worker_start();
-    void harvest_worker_stop();
+    void harvest_worker_stop(bool cancel_queued = false);
     void harvest_loop();
     void harvest_wait_slot(int slot);
     bool harvest_worker_on() const;
+    void harvest_check_error();
+    void harvest_merge_stats();
+    void harvest_shutdown();
+    void capture_fail() noexcept;
+    enum class CaptureFaultPoint { DeviceSelect, EventWait, HostCommit, SnapshotCopy, HostCopy, CompletionEvent, Drain };
+    using CaptureFault = bool (*)(void *, CaptureFaultPoint, int, size_t) noexcept;
+    bool capture_fault(CaptureFaultPoint point, int slot = -1, size_t index = 0) const noexcept;
+    CaptureFault capture_fault_ = nullptr;
+    void * capture_fault_context_ = nullptr;
+    bool capture_failed_ = false; // foreground-owned; worker publishes error instead
 
     struct HarvestPerf {
         bool enabled = false;
@@ -545,9 +556,18 @@ private:
     struct HarvestWorker {
         std::mutex mu;
         std::condition_variable cv;
-        std::vector<int> q;
+        std::array<int, 2> q{};
+        size_t first = 0, queued = 0;
+        std::exception_ptr error;
+        struct CommitStats {
+            int64_t wait = 0, pack = 0, nvme = 0, commit = 0;
+            uint64_t bytes = 0, syscalls = 0;
+        } total, last;
+        bool have_stats = false;
         std::thread th;
         bool stop = false;
+        bool cancel_queued = false;
+        bool ready = false;
     };
     std::unique_ptr<HarvestWorker> harvest_w_;
     HarvestPerf perf_;

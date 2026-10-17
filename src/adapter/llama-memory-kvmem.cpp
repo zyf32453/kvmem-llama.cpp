@@ -343,7 +343,10 @@ struct llama_memory_kvmem::CaptureD2hPipe {
         uint8_t * pin = nullptr;
         size_t cap = 0;
         cudaEvent_t done = nullptr;
-        bool inflight = false;
+        std::atomic<bool> inflight{false};
+        // Owned by the foreground until publication, then by the worker.
+        // The foreground may touch it again only after completion or join.
+        bool device_pending = false;
         std::vector<Item> items;
         CaptureBatch capture;
     };
@@ -1037,7 +1040,7 @@ llama_memory_kvmem::~llama_memory_kvmem() {
         decode_mean_flush();
         decode_mean_discard();
         decode_mean_print_sum();
-        harvest_flush();
+        harvest_shutdown();
         if (historical_capture_) harvest_gpu_v_commit();
         harvest_worker_stop();
         harvest_perf_print_sum();
@@ -2542,6 +2545,8 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
 }
 
 bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
+    if (capture_failed_) return false;
+    harvest_check_error();
     if (historical_capture_ && (historical_capture_->failed() || historical_capture_->finished() || replay_))
         return false;
     if (n_new_tokens == 0) {
@@ -2716,6 +2721,8 @@ bool llama_memory_kvmem::prepare_ubatches(
 
 bool llama_memory_kvmem::begin_active_ubatch(
         uint32_t n_tokens, const llama_pos * logical_positions) {
+    if (capture_failed_) return false;
+    harvest_check_error();
     if (!historical_capture_) return true;
     const auto reject = [&](const char * reason, uint32_t id = UINT32_MAX) {
         LLAMA_LOG_ERROR("historical active admission: %s block=%u pos=%d tokens=%u\n",
@@ -3071,6 +3078,7 @@ uint64_t llama_memory_kvmem::capture_stamp() const {
 }
 
 bool llama_memory_kvmem::d2h_init() {
+    harvest_check_error();
     if (d2h_ && d2h_->ok) {
         return true;
     }
@@ -3097,9 +3105,7 @@ bool llama_memory_kvmem::d2h_init() {
             }
         }
     }
-    if (cudaGetDevice(&d2h_->device) != cudaSuccess) {
-        d2h_->device = 0;
-    }
+    if (!kvmem_cuda_ok(cudaGetDevice(&d2h_->device), "capture current device")) return false;
     d2h_->ok = true;
     harvest_worker_start();
     return true;
@@ -3109,9 +3115,10 @@ void llama_memory_kvmem::d2h_free() {
     if (!d2h_) {
         return;
     }
-    if (d2h_->stream) {
-        cudaStreamSynchronize(d2h_->stream);
-    }
+    if (harvest_worker_on()) throw std::logic_error("capture worker must stop before buffer destruction");
+    if (d2h_->stream && (capture_fault(CaptureFaultPoint::Drain) ||
+            !kvmem_cuda_ok(cudaStreamSynchronize(d2h_->stream), "capture free drain")))
+        throw std::runtime_error("capture buffer destruction requires confirmed device completion");
     for (int i = 0; i < 2; ++i) {
         auto & s = d2h_->slots[i];
         if (s.gpu) {
@@ -3292,7 +3299,84 @@ bool llama_memory_kvmem::harvest_worker_on() const {
     return harvest_w_ && harvest_w_->th.joinable();
 }
 
+bool llama_memory_kvmem::capture_fault(CaptureFaultPoint point, int slot, size_t index) const noexcept {
+    return capture_fault_ && capture_fault_(capture_fault_context_, point, slot, index);
+}
+
+void llama_memory_kvmem::capture_fail() noexcept {
+    capture_failed_ = true;
+    if (historical_capture_) historical_capture_->fail();
+}
+
+void llama_memory_kvmem::harvest_check_error() {
+    std::exception_ptr error;
+    if (harvest_w_) {
+        std::lock_guard<std::mutex> guard(harvest_w_->mu);
+        error = harvest_w_->error;
+    }
+    if (error) {
+        capture_fail();
+        std::rethrow_exception(error);
+    }
+    if (capture_failed_) throw std::runtime_error("KVMem capture domain is closed after failure");
+}
+
+void llama_memory_kvmem::harvest_merge_stats() {
+    if (!harvest_w_) return;
+    HarvestWorker::CommitStats total, last;
+    {
+        std::lock_guard<std::mutex> guard(harvest_w_->mu);
+        if (!harvest_w_->have_stats) return;
+        total = harvest_w_->total;
+        last = harvest_w_->last;
+        harvest_w_->total = {};
+        harvest_w_->have_stats = false;
+    }
+    perf_.last_d2h_wait_us = last.wait;
+    perf_.last_pack_us = last.pack;
+    perf_.last_nvme_us = last.nvme;
+    perf_.last_commit_us = last.commit;
+    perf_.last_nvme_bytes = last.bytes;
+    perf_.last_nvme_syscalls = last.syscalls;
+    perf_.d2h_wait_us += total.wait;
+    perf_.pack_us += total.pack;
+    perf_.nvme_us += total.nvme;
+    perf_.commit_us += total.commit;
+    perf_.nvme_bytes += total.bytes;
+    perf_.nvme_syscalls += total.syscalls;
+}
+
+void llama_memory_kvmem::harvest_shutdown() {
+    // Context disposal cancels uncommitted CPU work. The worker must have
+    // returned before touching its slots; device work must also truly finish.
+    harvest_worker_stop(true);
+    // A failure while establishing the compute -> capture dependency can
+    // leave source computation outside the capture stream. A failed request
+    // must also confirm that device work before destroying source ownership.
+    if (capture_failed_ && (capture_fault(CaptureFaultPoint::Drain) ||
+            !kvmem_cuda_ok(cudaDeviceSynchronize(), "failed capture source completion")))
+        throw std::runtime_error("capture shutdown cannot confirm source computation completion");
+    if (d2h_ && d2h_->stream && (capture_fault(CaptureFaultPoint::Drain) ||
+            !kvmem_cuda_ok(cudaStreamSynchronize(d2h_->stream), "capture shutdown drain")))
+        throw std::runtime_error("capture shutdown cannot confirm device completion");
+    if (d2h_) for (auto & slot : d2h_->slots) {
+        slot.device_pending = false;
+        slot.items.clear();
+        slot.capture = {};
+        slot.inflight.store(false, std::memory_order_release);
+    }
+    if (harvest_w_) {
+        std::lock_guard<std::mutex> guard(harvest_w_->mu);
+        harvest_w_->first = harvest_w_->queued = 0;
+        // Preserve error/closed admission; shutdown never resurrects work.
+    }
+    harvest_merge_stats();
+    if (raw_) raw_->wait_writes();
+    if (mtp_) mtp_->harvest_flush();
+}
+
 void llama_memory_kvmem::harvest_worker_start() {
+    harvest_check_error();
     if (kvmem_harvest_sync_old() || harvest_worker_on()) {
         return;
     }
@@ -3300,16 +3384,19 @@ void llama_memory_kvmem::harvest_worker_start() {
         harvest_w_ = std::make_unique<HarvestWorker>();
     }
     harvest_w_->stop = false;
+    harvest_w_->cancel_queued = false;
+    harvest_w_->ready = false;
     harvest_w_->th = std::thread([this] { harvest_loop(); });
 }
 
-void llama_memory_kvmem::harvest_worker_stop() {
+void llama_memory_kvmem::harvest_worker_stop(bool cancel_queued) {
     if (!harvest_w_) {
         return;
     }
     {
         std::lock_guard<std::mutex> lk(harvest_w_->mu);
         harvest_w_->stop = true;
+        harvest_w_->cancel_queued = cancel_queued;
     }
     harvest_w_->cv.notify_all();
     if (harvest_w_->th.joinable()) {
@@ -3317,35 +3404,58 @@ void llama_memory_kvmem::harvest_worker_stop() {
     }
 }
 
-void llama_memory_kvmem::harvest_wait_slot(int slot) {
+void llama_memory_kvmem::harvest_wait_slot(int slot) try {
     if (!harvest_w_ || !d2h_ || slot < 0 || slot > 1) {
         return;
     }
     std::unique_lock<std::mutex> lk(harvest_w_->mu);
     harvest_w_->cv.wait(lk, [&] {
-        return !d2h_->slots[slot].inflight;
+        return harvest_w_->error || !d2h_->slots[slot].inflight.load(std::memory_order_acquire);
     });
+    const auto error = harvest_w_->error;
+    lk.unlock();
+    if (error) std::rethrow_exception(error);
+    harvest_merge_stats();
+} catch (...) {
+    capture_fail();
+    throw;
 }
 
-void llama_memory_kvmem::harvest_loop() {
+void llama_memory_kvmem::harvest_loop() try {
     if (d2h_) {
-        kvmem_cuda_ok(cudaSetDevice(d2h_->device), "harvest worker set device");
+        if (capture_fault(CaptureFaultPoint::DeviceSelect) ||
+                !kvmem_cuda_ok(cudaSetDevice(d2h_->device), "harvest worker set device"))
+            throw std::runtime_error("capture worker could not select its device");
     }
+    {
+        std::lock_guard<std::mutex> guard(harvest_w_->mu);
+        harvest_w_->ready = true;
+    }
+    harvest_w_->cv.notify_all();
     while (true) {
         int slot = -1;
         {
             std::unique_lock<std::mutex> lk(harvest_w_->mu);
             harvest_w_->cv.wait(lk, [&] {
-                return harvest_w_->stop || !harvest_w_->q.empty();
+                return harvest_w_->stop || harvest_w_->queued;
             });
-            if (harvest_w_->q.empty() && harvest_w_->stop) {
+            if (harvest_w_->stop && (harvest_w_->cancel_queued || !harvest_w_->queued)) {
                 break;
             }
-            slot = harvest_w_->q.front();
-            harvest_w_->q.erase(harvest_w_->q.begin());
+            slot = harvest_w_->q[harvest_w_->first];
+            harvest_w_->first = (harvest_w_->first + 1) % harvest_w_->q.size();
+            --harvest_w_->queued;
         }
         d2h_commit(slot);
     }
+} catch (...) {
+    // Do not clear inflight, payload or task ownership on error. The GPU
+    // owner closes admission and explicitly settles/cancels during teardown.
+    {
+        std::lock_guard<std::mutex> guard(harvest_w_->mu);
+        harvest_w_->error = std::current_exception();
+    }
+    harvest_w_->cv.notify_all();
 }
 
 void llama_memory_kvmem::d2h_commit(int slot) {
@@ -3360,17 +3470,21 @@ void llama_memory_kvmem::d2h_commit(int slot) {
     int64_t wait_us = 0;
     if (s.done) {
         const int64_t tw = ggml_time_us();
-        if (!kvmem_cuda_ok(cudaEventSynchronize(s.done), "capture commit wait")) {
+        if (capture_fault(CaptureFaultPoint::EventWait, slot) ||
+                !kvmem_cuda_ok(cudaEventSynchronize(s.done), "capture commit wait")) {
             throw std::runtime_error("historical capture D2H did not complete");
         }
         wait_us = ggml_time_us() - tw;
     }
+    s.device_pending = false;
     const uint64_t nv0 = raw_ ? raw_->nvme_wait_ns() : 0;
     const uint64_t sc0 = raw_ ? raw_->nvme_syscalls() : 0;
     const uint64_t b0 = raw_ ? raw_->nvme_bytes_written() : 0;
     const int64_t tp = ggml_time_us();
     for (auto & it : s.items) {
         if (it.which == 'q' && !it.committed) {
+            if (capture_fault(CaptureFaultPoint::HostCommit, slot, size_t(&it - s.items.data())))
+                throw std::runtime_error("injected capture host commit failure");
             harvest_from_host(s.capture, it.il, it.which, s.pin + it.offset, it.type,
                               it.d, it.h, it.n, it.nb0, it.nb1, it.nb2);
             it.committed = true;
@@ -3378,6 +3492,8 @@ void llama_memory_kvmem::d2h_commit(int slot) {
     }
     for (auto & it : s.items) {
         if (it.which != 'q' && !it.committed) {
+            if (capture_fault(CaptureFaultPoint::HostCommit, slot, size_t(&it - s.items.data())))
+                throw std::runtime_error("injected capture host commit failure");
             harvest_from_host(s.capture, it.il, it.which, s.pin + it.offset, it.type,
                               it.d, it.h, it.n, it.nb0, it.nb1, it.nb2);
             it.committed = true;
@@ -3385,42 +3501,66 @@ void llama_memory_kvmem::d2h_commit(int slot) {
     }
     const int64_t pack_wall_us = ggml_time_us() - tp;
     const uint64_t nvme_us = raw_ ? (raw_->nvme_wait_ns() - nv0) / 1000 : 0;
-    perf_.last_d2h_wait_us = wait_us;
-    perf_.last_nvme_us = static_cast<int64_t>(nvme_us);
-    perf_.last_pack_us = pack_wall_us > static_cast<int64_t>(nvme_us)
+    HarvestWorker::CommitStats stats;
+    stats.wait = wait_us;
+    stats.nvme = static_cast<int64_t>(nvme_us);
+    stats.pack = pack_wall_us > static_cast<int64_t>(nvme_us)
             ? pack_wall_us - static_cast<int64_t>(nvme_us) : 0;
-    perf_.last_nvme_bytes = raw_ ? (raw_->nvme_bytes_written() - b0) : 0;
-    perf_.last_nvme_syscalls = raw_ ? (raw_->nvme_syscalls() - sc0) : 0;
-    perf_.last_commit_us = ggml_time_us() - t0;
-    perf_.d2h_wait_us += perf_.last_d2h_wait_us;
-    perf_.pack_us += perf_.last_pack_us;
-    perf_.nvme_us += perf_.last_nvme_us;
-    perf_.nvme_bytes += perf_.last_nvme_bytes;
-    perf_.nvme_syscalls += perf_.last_nvme_syscalls;
-    perf_.commit_us += perf_.last_commit_us;
+    stats.bytes = raw_ ? (raw_->nvme_bytes_written() - b0) : 0;
+    stats.syscalls = raw_ ? (raw_->nvme_syscalls() - sc0) : 0;
+    stats.commit = ggml_time_us() - t0;
     s.items.clear();
     s.capture = {};
     if (harvest_w_) {
         std::lock_guard<std::mutex> lk(harvest_w_->mu);
-        s.inflight = false;
+        // Only the foreground merges into perf_: it also resets/prints those
+        // fields while the worker commits a previous microbatch.
+        auto & total = harvest_w_->total;
+        total.wait += stats.wait;
+        total.pack += stats.pack;
+        total.nvme += stats.nvme;
+        total.commit += stats.commit;
+        total.bytes += stats.bytes;
+        total.syscalls += stats.syscalls;
+        harvest_w_->last = stats;
+        harvest_w_->have_stats = true;
+        s.inflight.store(false, std::memory_order_release);
         harvest_w_->cv.notify_all();
     } else {
-        s.inflight = false;
+        // Legacy synchronous mode never creates a worker.
+        perf_.last_d2h_wait_us = stats.wait;
+        perf_.last_pack_us = stats.pack;
+        perf_.last_nvme_us = stats.nvme;
+        perf_.last_commit_us = stats.commit;
+        perf_.last_nvme_bytes = stats.bytes;
+        perf_.last_nvme_syscalls = stats.syscalls;
+        perf_.d2h_wait_us += stats.wait;
+        perf_.pack_us += stats.pack;
+        perf_.nvme_us += stats.nvme;
+        perf_.commit_us += stats.commit;
+        perf_.nvme_bytes += stats.bytes;
+        perf_.nvme_syscalls += stats.syscalls;
+        s.inflight.store(false, std::memory_order_release);
     }
 }
 
-void llama_memory_kvmem::harvest_flush() {
+void llama_memory_kvmem::harvest_flush() try {
+    harvest_check_error();
     if (harvest_worker_on() && d2h_) {
         std::unique_lock<std::mutex> lk(harvest_w_->mu);
         harvest_w_->cv.wait(lk, [&] {
-            return harvest_w_->q.empty() &&
+            return harvest_w_->error || (harvest_w_->ready && harvest_w_->queued == 0 &&
                     !d2h_->slots[0].inflight &&
-                    !d2h_->slots[1].inflight;
+                    !d2h_->slots[1].inflight);
         });
+        const auto error = harvest_w_->error;
+        lk.unlock();
+        if (error) std::rethrow_exception(error);
     } else if (d2h_) {
         d2h_commit(1 - d2h_->next);
         d2h_commit(d2h_->next);
     }
+    harvest_merge_stats();
     if (raw_) {
         raw_->wait_writes();
     }
@@ -3428,6 +3568,9 @@ void llama_memory_kvmem::harvest_flush() {
         mtp_->harvest_flush();
     }
     harvest_perf_print_sum();
+} catch (...) {
+    capture_fail();
+    throw;
 }
 
 void llama_memory_kvmem::harvest_perf_emit_graph_line() {
@@ -3471,7 +3614,7 @@ void llama_memory_kvmem::harvest_perf_print_sum() {
             (unsigned long long) mtp_nvme_syscalls);
 }
 
-bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
+bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) try {
     if (!d2h_init() || pending_capture_.empty() || pos_queue_.empty()) {
         return false;
     }
@@ -3495,6 +3638,10 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             d2h_commit(d2h_->next);
         }
     }
+    if (s.device_pending) throw std::logic_error("capture slot reused before confirmed device completion");
+    // Finish all potentially allocating slot setup before issuing any DMA.
+    s.items.clear();
+    s.items.reserve(pending_capture_.size());
     perf_.last_sync_us = 0;
     perf_.last_d2d_us = 0;
     perf_.last_snap_wait_us = 0;
@@ -3535,20 +3682,22 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     }
     const bool old_sync = kvmem_harvest_sync_old() || !be || !d2h_->compute_done ||
             !kvmem_ggml_cuda_event(d2h_->compute_done);
+    s.capture = pos_queue_.front();
     {
         const int64_t t_sync = ggml_time_us();
         if (old_sync) {
             if (be) {
                 ggml_backend_synchronize(be);
             } else {
-                cudaDeviceSynchronize();
+                if (!kvmem_cuda_ok(cudaDeviceSynchronize(), "capture compute completion"))
+                    throw std::runtime_error("capture source computation did not complete");
             }
         } else {
             ggml_backend_event_record(d2h_->compute_done, be);
             cudaEvent_t cde = kvmem_ggml_cuda_event(d2h_->compute_done);
             if (cde) {
                 if (!kvmem_cuda_ok(cudaStreamWaitEvent(d2h_->stream, cde, 0), "compute wait")) {
-                    return false;
+                    throw std::runtime_error("capture could not order source computation");
                 }
             } else {
                 ggml_backend_synchronize(be);
@@ -3557,16 +3706,16 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
         perf_.last_sync_us = ggml_time_us() - t_sync;
         perf_.sync_us += perf_.last_sync_us;
     }
-    s.items.clear();
     // The position queue is the synchronous fallback's input. Keep its front
     // intact until every CUDA operation and worker-queue insertion succeeds.
-    s.capture = pos_queue_.front();
     const auto abort_submit = [&]() -> bool {
         // A failed copy/event can leave earlier copies queued against s.gpu or
         // s.pin. Drain the stream before a retry can reuse/free either buffer.
-        if (!kvmem_cuda_ok(cudaStreamSynchronize(d2h_->stream), "failed D2H drain")) {
+        if (capture_fault(CaptureFaultPoint::Drain) ||
+                !kvmem_cuda_ok(cudaStreamSynchronize(d2h_->stream), "failed D2H drain")) {
             throw std::runtime_error("KVMem D2H stream could not be drained after submission failure");
         }
+        s.device_pending = false;
         s.items.clear();
         s.capture = {};
         return false;
@@ -3596,7 +3745,9 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             memcpy(s.pin + off, src, it.nbytes);
             n_host++;
         } else {
-            if (!kvmem_cuda_ok(kvmem_copy_async(s.gpu + off, src, it.nbytes,
+            s.device_pending = true;
+            if (capture_fault(CaptureFaultPoint::SnapshotCopy, d2h_->next, s.items.size()) ||
+                    !kvmem_cuda_ok(kvmem_copy_async(s.gpu + off, src, it.nbytes,
                                                cudaMemcpyDeviceToDevice, d2h_->stream),
                                "D2D")) {
                 return abort_submit();
@@ -3635,7 +3786,8 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
         perf_.last_snap_wait_us = ggml_time_us() - t_snap;
         perf_.snap_wait_us += perf_.last_snap_wait_us;
         if (n_host == 0) {
-            if (!kvmem_cuda_ok(kvmem_copy_async(s.pin, s.gpu, off, cudaMemcpyDeviceToHost, d2h_->stream),
+            if (capture_fault(CaptureFaultPoint::HostCopy, d2h_->next) ||
+                    !kvmem_cuda_ok(kvmem_copy_async(s.pin, s.gpu, off, cudaMemcpyDeviceToHost, d2h_->stream),
                                "D2H")) {
                 return abort_submit();
             }
@@ -3644,7 +3796,8 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
                 if (!it.from_gpu) {
                     continue;
                 }
-                if (!kvmem_cuda_ok(kvmem_copy_async(s.pin + it.offset, s.gpu + it.offset, it.nbytes,
+                if (capture_fault(CaptureFaultPoint::HostCopy, d2h_->next, size_t(&it - s.items.data())) ||
+                        !kvmem_cuda_ok(kvmem_copy_async(s.pin + it.offset, s.gpu + it.offset, it.nbytes,
                                                    cudaMemcpyDeviceToHost, d2h_->stream),
                                    "D2H item")) {
                     return abort_submit();
@@ -3652,7 +3805,9 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             }
         }
     }
-    if (!kvmem_cuda_ok(cudaEventRecord(s.done, d2h_->stream), "record")) {
+    s.device_pending = true;
+    if (capture_fault(CaptureFaultPoint::CompletionEvent, d2h_->next) ||
+            !kvmem_cuda_ok(cudaEventRecord(s.done, d2h_->stream), "record")) {
         return abort_submit();
     }
     const int submitted = d2h_->next;
@@ -3662,18 +3817,23 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     const size_t submitted_positions = s.capture.positions.size();
     const bool worker_active = harvest_worker_on();
     if (worker_active) {
-        bool queued = false;
+        std::exception_ptr error;
+        bool full = false;
         {
             std::lock_guard<std::mutex> lk(harvest_w_->mu);
-            try {
-                harvest_w_->q.push_back(submitted);
-                s.inflight = true;
-                queued = true;
-            } catch (const std::bad_alloc &) {
-                // The original position is still available for sync fallback.
+            error = harvest_w_->error;
+            full = harvest_w_->queued == harvest_w_->q.size();
+            if (!error && !full) {
+                harvest_w_->q[(harvest_w_->first + harvest_w_->queued) % harvest_w_->q.size()] = submitted;
+                ++harvest_w_->queued;
+                s.inflight.store(true, std::memory_order_release);
             }
         }
-        if (!queued) return abort_submit();
+        if (error || full) {
+            abort_submit();
+            if (error) std::rethrow_exception(error);
+            throw std::logic_error("capture queue exceeded its two physical slots");
+        }
     } else {
         s.inflight = true;
     }
@@ -3690,9 +3850,13 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     }
     d2h_->next = 1 - d2h_->next;
     return true;
+} catch (...) {
+    capture_fail();
+    throw;
 }
 
-void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
+void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) try {
+    harvest_check_error();
     if (want_decode_mean()) {
         decode_mean_ingest(sched);
         return;
@@ -3783,6 +3947,10 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
     const uint32_t n_pos = pos_queue_.empty() ? 0u : (uint32_t) pos_queue_.front().positions.size();
     bool submitted = d2h_submit(be);
     if (!submitted) {
+        // The previous microbatch can still be committing Q/Mean-K on the
+        // worker. Preserve prefix order and never write the same accumulator
+        // concurrently from synchronous fallback.
+        harvest_flush();
         // The failed async path leaves its input at the queue front. Finish
         // the graph before the synchronous tensor reads below.
         if (sched) {
@@ -3820,6 +3988,9 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
                 (unsigned long long) perf_.last_nvme_bytes,
                 (unsigned long long) perf_.last_nvme_syscalls);
     }
+} catch (...) {
+    capture_fail();
+    throw;
 }
 
 void llama_memory_kvmem::reset_query_acc() {

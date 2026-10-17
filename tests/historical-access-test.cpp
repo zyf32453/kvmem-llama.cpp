@@ -22,6 +22,43 @@
 #include <future>
 
 struct kvmem_transfer_test_access {
+    using CaptureFaultPoint = llama_memory_kvmem::CaptureFaultPoint;
+    using CaptureFault = llama_memory_kvmem::CaptureFault;
+    static void capture_hook(llama_memory_kvmem & mem, CaptureFault hook, void * context) {
+        mem.harvest_worker_stop();
+        mem.capture_fault_ = hook;
+        mem.capture_fault_context_ = context;
+    }
+    static void capture_init(llama_memory_kvmem & mem) {
+        if (!mem.d2h_init()) throw std::runtime_error("capture initialization failed");
+        mem.harvest_worker_stop();
+    }
+    static void capture_start(llama_memory_kvmem & mem) { mem.harvest_worker_start(); }
+    static bool capture_submit(llama_memory_kvmem & mem) { return mem.d2h_submit(nullptr); }
+    static void capture_shutdown(llama_memory_kvmem & mem) { mem.harvest_shutdown(); }
+    static void capture_wait_first(llama_memory_kvmem & mem) { mem.harvest_wait_slot(0); }
+    static bool capture_domain_failed(const llama_memory_kvmem & mem) { return mem.capture_failed_; }
+    static size_t capture_queued(llama_memory_kvmem & mem) {
+        std::lock_guard<std::mutex> lock(mem.harvest_w_->mu);
+        return mem.harvest_w_->queued;
+    }
+    static size_t capture_positions(const llama_memory_kvmem & mem) { return mem.pos_queue_.size(); }
+    static void cancel_capture_inputs(llama_memory_kvmem & mem) {
+        mem.pos_queue_.clear();
+        mem.pending_capture_.clear();
+    }
+    static uint32_t query_dim(const llama_memory_kvmem & mem) { return mem.n_head_ * mem.n_embd_head_; }
+    static void query_nodes(llama_memory_kvmem & mem, const std::vector<ggml_tensor *> & tensors) {
+        const auto & layers = mem.raw().config().historical_gc_attention_layers;
+        mem.query_begin_ = 0;
+        mem.query_end_ = 32;
+        for (size_t i = 0; i < layers.size(); ++i) mem.register_capture(tensors[i], layers[i], 'q');
+    }
+    static bool query_matches(llama_memory_kvmem & mem, uint32_t count, const std::vector<float> & sum) {
+        for (uint32_t il : mem.raw().config().historical_gc_attention_layers)
+            if (mem.q_count_[il] != count || mem.q_sum_[il] != sum) return false;
+        return true;
+    }
     static bool capture_failed(const llama_memory_kvmem & mem) { return mem.historical_capture_->failed(); }
     static bool append_after_failure(llama_memory_kvmem & mem) { return mem.prepare_working_set(1); }
     static uint64_t source_readers(const llama_memory_kvmem & mem) {
@@ -186,24 +223,26 @@ struct MeanTensors {
         nullptr, ggml_backend_buffer_free};
     std::vector<ggml_tensor *> layers;
 
-    MeanTensors(llama_memory_kvmem & mem, uint32_t begin, uint32_t count, bool host, ggml_type type) {
+    MeanTensors(llama_memory_kvmem & mem, uint32_t begin, uint32_t count, bool host, ggml_type type,
+                uint32_t width = 0) {
         const auto & cfg = mem.raw().config();
+        if (!width) width = cfg.n_embd_k;
         context.reset(ggml_init({cfg.historical_gc_attention_layers.size() * ggml_tensor_overhead() + 1024,
                                  nullptr, true}));
         require(bool(context), "Mean-K tensor context allocation failed");
         for (uint32_t il : cfg.historical_gc_attention_layers) {
             (void) il;
-            layers.push_back(ggml_new_tensor_3d(context.get(), type, cfg.n_embd_k, 1, count));
+            layers.push_back(ggml_new_tensor_3d(context.get(), type, width, 1, count));
         }
         auto buft = host ? ggml_backend_cpu_buffer_type() : ggml_backend_buffer_get_type(
             mem.get_kv()->get_k_storage(cfg.historical_gc_attention_layers.front())->buffer);
         buffer.reset(ggml_backend_alloc_ctx_tensors_from_buft(context.get(), buft));
         require(bool(buffer), "Mean-K tensor buffer allocation failed");
         for (size_t i = 0; i < layers.size(); ++i) {
-            std::vector<float> values(static_cast<size_t>(count) * cfg.n_embd_k);
+            std::vector<float> values(static_cast<size_t>(count) * width);
             for (uint32_t t = 0; t < count; ++t)
-                for (uint32_t d = 0; d < cfg.n_embd_k; ++d)
-                    values[t * cfg.n_embd_k + d] = float(begin + t + 1) + float(d % 8) / 8;
+                for (uint32_t d = 0; d < width; ++d)
+                    values[t * width + d] = float(begin + t + 1) + float(d % 8) / 8;
             if (type == GGML_TYPE_F16) {
                 std::vector<ggml_fp16_t> half(values.size());
                 ggml_fp32_to_fp16_row(values.data(), half.data(), values.size());
@@ -220,6 +259,243 @@ static std::vector<float> mean_sum(uint32_t begin, uint32_t count, size_t dim) {
     for (size_t d = 0; d < dim; ++d)
         result[d] = float(count) * (float(begin) + float(count + 1) / 2 + float(d % 8) / 8);
     return result;
+}
+
+using CaptureFaultPoint = kvmem_transfer_test_access::CaptureFaultPoint;
+
+struct CaptureFailure {
+    CaptureFaultPoint point;
+    size_t index = 0;
+    bool gate = false;
+    bool fail_drain = false;
+    bool ordered_fallback = false;
+    std::atomic<bool> entered{false}, open{false};
+    std::atomic<bool> fallback_entered{false};
+    static bool hook(void * context, CaptureFaultPoint point, int slot, size_t index) noexcept {
+        auto & self = *static_cast<CaptureFailure *>(context);
+        if (point == CaptureFaultPoint::Drain) return self.fail_drain;
+        if (self.ordered_fallback && point == CaptureFaultPoint::CompletionEvent && slot == 1) {
+            self.fallback_entered = true;
+            return true;
+        }
+        if (point != self.point || index != self.index || self.entered.exchange(true)) return false;
+        while (self.gate && !self.open.load()) std::this_thread::yield();
+        return !self.ordered_fallback;
+    }
+    void wait_entered() const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!entered.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        require(entered.load(), "capture worker did not reach deterministic failure gate");
+    }
+};
+
+// Install/remove hooks only while the worker is joined. On test exceptions,
+// release the gate and settle real device work before tensor buffers unwind.
+struct CaptureFailureGuard {
+    llama_memory_kvmem & mem;
+    CaptureFailure & fault;
+    CaptureFailureGuard(llama_memory_kvmem & mem, CaptureFailure & fault) : mem(mem), fault(fault) {
+        kvmem_transfer_test_access::capture_init(mem);
+        kvmem_transfer_test_access::capture_hook(mem, &CaptureFailure::hook, &fault);
+    }
+    ~CaptureFailureGuard() {
+        fault.open = true;
+        kvmem_transfer_test_access::capture_hook(mem, nullptr, nullptr);
+        kvmem_transfer_test_access::capture_shutdown(mem);
+        kvmem_transfer_test_access::cancel_capture_inputs(mem);
+    }
+};
+
+static void expect_capture_error(llama_memory_kvmem & mem, bool wait_slot = false) {
+    // Only this task accesses foreground-owned state until get(). The deadline
+    // is a watchdog, not the mechanism used to place concurrent operations.
+    auto result = std::async(std::launch::async, [&] {
+        try {
+            if (wait_slot) kvmem_transfer_test_access::capture_wait_first(mem);
+            else mem.harvest_flush();
+        } catch (const std::exception &) { return true; }
+        return false;
+    });
+    if (result.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        std::fprintf(stderr, "FAIL capture error did not wake foreground within watchdog\n");
+        std::abort(); // Do not let std::future's destructor mask a deadlock.
+    }
+    require(result.get(), "capture failure was reported as successful completion");
+    require(kvmem_transfer_test_access::capture_domain_failed(mem), "failed capture admission remained open");
+    require(!kvmem_transfer_test_access::append_after_failure(mem), "failed capture accepted another append");
+    llama_pos pos = 0;
+    require(!mem.begin_active_ubatch(1, &pos), "failed capture admitted another active");
+}
+
+static void check_capture_start_failure(llama_memory_kvmem & mem) {
+    CaptureFailure fault{CaptureFaultPoint::DeviceSelect};
+    CaptureFailureGuard guard(mem, fault);
+    kvmem_transfer_test_access::capture_start(mem);
+    expect_capture_error(mem);
+    require(fault.entered, "empty-queue flush skipped worker initialization failure");
+    std::puts("PASS capture worker startup: empty-queue flush propagates device selection failure");
+}
+
+static void check_capture_failure(llama_memory_kvmem & mem, unsigned scenario) {
+    using Repository = kvmem::HistoricalKvRepository;
+    using Payload = kvmem::HistoricalKvRawStore;
+    const bool worker_error = scenario == 14 || scenario == 15;
+    const bool host_error = scenario == 15;
+    const bool unconfirmed = scenario == 18;
+    const bool ordered_fallback = scenario == 20;
+    const auto & legacy_cfg = mem.raw().config();
+    const uint32_t block = mem.block_tokens();
+    std::vector<llama_pos> positions(block);
+    for (uint32_t i = 0; i < block; ++i) positions[i] = i;
+    llama_ubatch ub{};
+    ub.n_tokens = block;
+    ub.n_pos = 1;
+    ub.pos = ub.logical_pos = positions.data();
+    llama_kv_cache::slot_info_vec_t slots;
+    require(mem.prepare_ubatches({ub}, block, slots), "capture failure fixture slot preparation failed");
+    mem.occupy_in(mem.get_kv(), 0);
+    kvmem::HistoricalKvRawStoreConfig cfg;
+    cfg.n_layer = legacy_cfg.n_layer;
+    cfg.max_tokens_per_slot = block;
+    cfg.packed_k_bytes_per_token = legacy_cfg.k_gpu_row_bytes;
+    cfg.packed_v_bytes_per_token = legacy_cfg.v_gpu_row_bytes;
+    cfg.mean_k_elements = legacy_cfg.n_embd_k;
+    cfg.attention_layers = legacy_cfg.historical_gc_attention_layers;
+    require(cfg.attention_layers.size() >= 2, "capture fault fixture requires two attention layers");
+    auto payload = std::make_shared<Payload>(cfg, 1);
+    auto repository = std::make_shared<Repository>(1);
+    std::weak_ptr<Repository> weak_repository = repository;
+    auto writer = repository->begin_write(0, 0, block, 1, 0,
+        [payload, weak_repository](const kvmem::HistoricalKvHandle & h) {
+            const auto repo = weak_repository.lock();
+            return repo && payload->release(*repo, h).code == Payload::ReleaseCode::Released;
+        });
+    require(writer.has_value(), "capture failure fixture writer failed");
+    const auto handle = writer->handle();
+    require(payload->reserve(*writer, handle, 0, block), "capture failure fixture reserve failed");
+    kvmem::HistoricalKvShadowDirectory::Producer producer;
+    require(mem.runtime().bind_historical_full_block(0, repository, handle, *writer, producer, payload),
+            "capture failure fixture binding failed");
+    std::weak_ptr<kvmem::HistoricalKvShadowDirectory::WriterContext> weak_producer = producer;
+    const uint32_t qdim = kvmem_transfer_test_access::query_dim(mem);
+    MeanTensors first(mem, 0, 8, false, GGML_TYPE_F32);
+    MeanTensors second(mem, 8, 8, false, GGML_TYPE_F32);
+    MeanTensors first_q(mem, 0, 8, false, GGML_TYPE_F32, qdim);
+    MeanTensors second_q(mem, 8, 8, false, GGML_TYPE_F32, qdim);
+    CaptureFailure fault{scenario == 14 || ordered_fallback ? CaptureFaultPoint::EventWait :
+                        host_error ? CaptureFaultPoint::HostCommit :
+                        scenario == 16 ? CaptureFaultPoint::SnapshotCopy :
+                        scenario == 19 ? CaptureFaultPoint::HostCopy : CaptureFaultPoint::CompletionEvent};
+    fault.index = (host_error || scenario == 16) ? 1 : 0;
+    fault.gate = worker_error || ordered_fallback;
+    fault.fail_drain = unconfirmed;
+    fault.ordered_fallback = ordered_fallback;
+    CaptureFailureGuard guard(mem, fault);
+    kvmem_transfer_test_access::mean_inputs(mem, first.layers, 0, 8);
+    kvmem_transfer_test_access::query_nodes(mem, first_q.layers);
+    if (ordered_fallback) {
+        // The second batch enters the full production harvest entry, which
+        // also captures packed KV. Supply its first executed prefix too.
+        const auto cell = mem.runtime().store().blocks()[0].gpu_slot * block;
+        for (uint32_t il : cfg.attention_layers) {
+            const auto k = pattern(block * cfg.packed_k_bytes_per_token, il + 700);
+            const auto v = pattern(block * cfg.packed_v_bytes_per_token, il + 800);
+            ggml_backend_tensor_set(mem.get_kv()->get_k_storage(il), k.data(),
+                                    cell * cfg.packed_k_bytes_per_token, k.size());
+            ggml_backend_tensor_set(mem.get_kv()->get_v_storage(il), v.data(),
+                                    cell * cfg.packed_v_bytes_per_token, v.size());
+        }
+        kvmem_transfer_test_access::capture_current(mem);
+        kvmem_transfer_test_access::commit(mem);
+        kvmem_transfer_test_access::capture_start(mem);
+        require(kvmem_transfer_test_access::capture_submit(mem), "ordered first batch not submitted");
+        fault.wait_entered();
+        kvmem_transfer_test_access::mean_inputs(mem, second.layers, 8, 8);
+        kvmem_transfer_test_access::query_nodes(mem, second_q.layers);
+        auto fallback = std::async(std::launch::async, [&] { mem.harvest_pending(nullptr); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!fault.fallback_entered && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        const bool reached = fault.fallback_entered;
+        const bool waited = fallback.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout;
+        fault.open = true; // Always release before any throwing assertion/future destructor.
+        fallback.get();
+        require(reached && waited, "synchronous fallback overtook the unfinished previous capture");
+        mem.harvest_flush();
+        kvmem_transfer_test_access::commit(mem);
+    } else if (worker_error) {
+        kvmem_transfer_test_access::capture_start(mem);
+        require(kvmem_transfer_test_access::capture_submit(mem), "first worker fault batch not submitted");
+        fault.wait_entered();
+        kvmem_transfer_test_access::mean_inputs(mem, second.layers, 8, 8);
+        kvmem_transfer_test_access::query_nodes(mem, second_q.layers);
+        require(kvmem_transfer_test_access::capture_submit(mem), "second worker fault batch not submitted");
+        require(kvmem_transfer_test_access::capture_queued(mem) == 1, "second task missing behind blocked worker");
+        producer.reset();
+        fault.open = true;
+        expect_capture_error(mem, scenario == 14);
+        expect_capture_error(mem); // A second completion call must not replay partial Q/K commits.
+        require(kvmem_transfer_test_access::capture_queued(mem) == 1, "failed worker consumed queued successor");
+    } else if (unconfirmed) {
+        bool threw = false;
+        try { kvmem_transfer_test_access::capture_submit(mem); }
+        catch (const std::exception &) { threw = true; }
+        require(threw && kvmem_transfer_test_access::capture_domain_failed(mem),
+                "unconfirmed partial DMA permitted synchronous fallback");
+        expect_capture_error(mem);
+        bool shutdown_rejected = false;
+        try { kvmem_transfer_test_access::capture_shutdown(mem); }
+        catch (const std::exception &) { shutdown_rejected = true; }
+        require(shutdown_rejected, "unconfirmed shutdown released device task ownership");
+        require(kvmem_transfer_test_access::capture_positions(mem) == 1, "failed submission lost original positions");
+        producer.reset();
+    } else {
+        require(!kvmem_transfer_test_access::capture_submit(mem), "fault did not select checked sync fallback");
+        require(fault.entered && !kvmem_transfer_test_access::capture_domain_failed(mem) &&
+                kvmem_transfer_test_access::capture_positions(mem) == 1,
+                "drained submission failed to preserve fallback input");
+        kvmem_transfer_test_access::mean_sync(mem);
+        require(kvmem_transfer_test_access::query_matches(mem, 8, mean_sum(0, 8, qdim)),
+                "synchronous fallback lost or duplicated query rows");
+    }
+    if (worker_error || unconfirmed) {
+        require(repository->retire(handle) == Repository::RetireResult::Committed, "failed task retirement failed");
+        require(repository->try_reclaim(handle) == Repository::ReclaimResult::Deferred,
+                "failed capture dropped its CPU writer before device settlement/cancellation");
+        require(!repository->acquire_read(handle), "retired incomplete generation admitted new read");
+    }
+    {
+        auto held = weak_producer.lock();
+        require(bool(held), "failed capture lost same-generation producer");
+        for (size_t i = 0; i < cfg.attention_layers.size(); ++i) {
+            const auto progress = payload->write_progress(held->writer(), handle, cfg.attention_layers[i]);
+            const uint32_t expected = ordered_fallback ? 16 :
+                worker_error ? (host_error && i == 0 ? 8 : 0) : (unconfirmed ? 0 : 8);
+            require(progress && progress->mean_k_tokens == expected,
+                    "failed capture wrote unexpected Mean-K prefix or lost its payload");
+        }
+    }
+    const uint32_t expected_q = ordered_fallback ? 16 : (host_error || (!worker_error && !unconfirmed)) ? 8 : 0;
+    require(kvmem_transfer_test_access::query_matches(mem, expected_q, mean_sum(0, expected_q, qdim)),
+            "worker failure duplicated or partially replayed Q accumulation");
+    // Remove the hook after joining; only a successful real stream drain may
+    // discard the incomplete CPU tasks and their original position owners.
+    kvmem_transfer_test_access::capture_hook(mem, nullptr, nullptr);
+    kvmem_transfer_test_access::capture_shutdown(mem);
+    kvmem_transfer_test_access::cancel_capture_inputs(mem);
+    require(kvmem_transfer_test_access::query_matches(mem, expected_q, mean_sum(0, expected_q, qdim)),
+            "cancellation retried already committed Q rows");
+    if (!worker_error && !unconfirmed) {
+        producer.reset();
+        require(repository->retire(handle) == Repository::RetireResult::Committed, "fallback retirement failed");
+    }
+    require(weak_producer.expired(), "cancelled capture retained writer after confirmed drain");
+    require(repository->inspect(handle)->life == kvmem::HistoricalKvLife::Retired,
+            "failed/cancelled capture resurrected a retired generation");
+    require(repository->try_reclaim(handle) == Repository::ReclaimResult::Complete && payload->allocated_payload_bytes() == 0,
+            "cancelled capture payload was not reclaimable after writer release");
+    std::printf("PASS capture failure scenario=%u: error/fallback, exact Q/K prefixes, retained writer, checked cancellation, CPU release\n", scenario);
 }
 
 static void check_mean_ranges(llama_memory_kvmem & mem) {
@@ -1313,13 +1589,19 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u}) {
-            if (scenario >= 3) {
+        for (unsigned scenario = 0; scenario < 21; ++scenario) {
+            if (scenario >= 3 && scenario <= 12) {
                 kp.method = 0;
                 kp.budget = 96;
                 llama_kvmem_set_params(&kp);
                 cp.n_ubatch = 16;
                 cp.type_k = cp.type_v = scenario == 4 ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
+            } else if (scenario >= 13) {
+                kp.method = 1;
+                kp.budget = 128;
+                llama_kvmem_set_params(&kp);
+                cp.n_ubatch = 64;
+                cp.type_k = cp.type_v = GGML_TYPE_F16;
             }
             std::unique_ptr<llama_context, decltype(&llama_free)> ctx(
                 llama_init_from_model(model.get(), cp), llama_free);
@@ -1328,7 +1610,9 @@ int main(int argc, char ** argv) {
             if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
-            if (scenario >= 3) check_request_capture(ctx.get(), model.get(), *mem,
+            if (scenario == 13) check_capture_start_failure(*mem);
+            else if (scenario >= 14) check_capture_failure(*mem, scenario);
+            else if (scenario >= 3) check_request_capture(ctx.get(), model.get(), *mem,
                 scenario == 5 ? RetirementPoint::BetweenCalls :
                 scenario == 6 ? RetirementPoint::AfterSubmission :
                 scenario == 7 ? RetirementPoint::WritingAfterSubmission :
