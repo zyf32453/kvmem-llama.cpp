@@ -428,7 +428,8 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_kin
     return lease;
 }
 
-HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(HistoricalKvHandle handle) {
+HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(
+        HistoricalKvHandle handle, std::optional<uint64_t> expected_content_version) {
     const auto shared = shared_;
     if (handle.incarnation != shared->incarnation || handle.slot >= shared->capacity ||
         handle.generation == 0) return RetireResult::Stale;
@@ -451,12 +452,17 @@ HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(HistoricalKv
     }
     Lease guard(shared, handle, LeaseKind::Read);
     if (!shared->matches(handle.slot, handle)) return RetireResult::Stale;
-    auto & control = shared->slots[handle.slot].control;
+    auto & slot = shared->slots[handle.slot];
+    auto & control = slot.control;
     uint64_t observed = control.load(std::memory_order_acquire);
     for (unsigned attempt = 0; attempt < kCasAttempts; ++attempt) {
         if (phase_of(observed) == Phase::Retired) return RetireResult::AlreadyRetired;
         if (phase_of(observed) != Phase::Writing && phase_of(observed) != Phase::Live)
             return RetireResult::Retry;
+        // This field is published before Writing and remains immutable for the
+        // generation. The guard prevents the slot from being reused here.
+        if (expected_content_version && slot.content_version != *expected_content_version)
+            return RetireResult::VersionChanged;
         const uint64_t desired = (observed & ~kPhaseMask) | static_cast<uint64_t>(Phase::Retired);
         if (control.compare_exchange_weak(observed, desired, std::memory_order_acq_rel,
                                           std::memory_order_acquire)) return RetireResult::Committed;

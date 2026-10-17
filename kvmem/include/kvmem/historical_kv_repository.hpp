@@ -29,7 +29,7 @@ public:
         uint32_t pending = 0; // Retired or Releasing full-slot credits.
     };
 
-    enum class RetireResult { Committed, AlreadyRetired, Stale, Retry };
+    enum class RetireResult { Committed, AlreadyRetired, Stale, VersionChanged, Retry };
     enum class ReclaimResult { Complete, Deferred, Stale, Retry };
     enum class LeaseKind { Writer, Execution, Read, Transfer };
     enum class CompletionState { Unfinished, Live, Retired };
@@ -124,7 +124,10 @@ public:
     std::optional<Lease> acquire_gpu_ready_writing(HistoricalKvHandle handle);
     std::optional<Lease> acquire_read(HistoricalKvHandle handle);
     std::optional<Lease> acquire_transfer(HistoricalKvHandle handle);
-    RetireResult retire(HistoricalKvHandle handle);
+    // When supplied, the content version is checked under the same slot guard
+    // as the phase transition. A mismatch leaves the generation Live/Writing.
+    RetireResult retire(HistoricalKvHandle handle,
+                        std::optional<uint64_t> expected_content_version = std::nullopt);
     // Call from the CPU reclaimer, not from the foreground. False/throwing
     // callbacks leave the slot Releasing and are retried with the same handle.
     ReclaimResult try_reclaim(HistoricalKvHandle handle);

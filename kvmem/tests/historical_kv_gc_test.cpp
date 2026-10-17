@@ -40,8 +40,9 @@ struct DenyCppAllocation {
 // reference count. The manager must apply the same safe protocol as for LRU.
 class DeleteOnce final : public HistoricalKvPolicy {
 public:
-    explicit DeleteOnce(HistoricalKvHandle victim, bool conditional = false)
-        : victim_(victim), conditional_(conditional) {}
+    explicit DeleteOnce(HistoricalKvHandle victim,
+                        std::optional<uint64_t> expected_content_version = std::nullopt)
+        : victim_(victim), expected_content_version_(expected_content_version) {}
     HistoricalKvStepResult step(const HistoricalKvSnapshot & snapshot,
                                 const HistoricalKvPressure &,
                                 HistoricalKvWorkBudget,
@@ -51,14 +52,14 @@ public:
         intent.victim = victim_;
         intent.round_id = snapshot.round_id;
         intent.reason = HistoricalKvDeleteReason::Custom;
-        if (conditional_) intent.expected_content_version = 1;
+        intent.expected_content_version = expected_content_version_;
         check(out.push(intent), "policy output buffer unexpectedly full");
         sent_ = true;
         return {HistoricalKvStepStatus::Complete, 1, 1};
     }
 private:
     HistoricalKvHandle victim_;
-    bool conditional_ = false;
+    std::optional<uint64_t> expected_content_version_;
     bool sent_ = false;
 };
 
@@ -158,13 +159,20 @@ void test_shadow_and_conditional_intent() {
               "shadow mode made the block unavailable");
     }
     {
-        HistoricalKvGc gc(repo, std::make_unique<DeleteOnce>(handle, true),
+        HistoricalKvGc gc(repo, std::make_unique<DeleteOnce>(handle, 2),
                           config(HistoricalKvGc::Mode::Delete));
         gc.manual_tick();
         check(gc.stats().reevaluate == 1 && gc.stats().committed == 0,
-              "unsupported content-version condition was ignored");
+              "mismatched content-version condition was ignored");
         check(repo->acquire_new(handle).has_value() && releases == 0,
-              "conditional intent deleted data without atomic version check");
+              "mismatched conditional intent deleted live data");
+    }
+    {
+        HistoricalKvGc gc(repo, std::make_unique<DeleteOnce>(handle, 1),
+                          config(HistoricalKvGc::Mode::Delete));
+        gc.manual_tick();
+        check(gc.stats().committed == 1 && !repo->acquire_new(handle),
+              "matching content-version intent failed to retire live data");
     }
 }
 

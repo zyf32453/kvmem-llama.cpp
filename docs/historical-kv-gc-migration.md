@@ -505,8 +505,6 @@ Linux 补丁连续重放两次及从已装 `0011` 升级到 `0012` 均通过；P
 
 Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受本机已知的 `unexpected memory mapping` 启动错误阻挡，按此前已验证的 `setarch x86_64 -R` 仅调整测试进程后相关 **2/2** 通过。真实 GGUF/CUDA 模型 **35/35** 项与 backend guard 通过；recency/RAM delete 推理完成 356-token 输入、8-token 输出，`proposed=committed=reclaimed=6`，policy/worker failure 为 0。原始日志保存在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`，前缀为 `bounded-worker-`。
 
-## 剩余生产接入与完整验收
-
 ### 逻辑身份与元数据表下标分离（2026-10-17）
 
 此前预约追加要求 repository 的 `logical_id` 等于 `KvMemStore` 的稠密 `block_id`。即使物理 repository/RAM 槽位已经按代回收，后续新代仍无法沿用一个旧表位置而拥有独立身份。本轮给块记录和 shadow directory 绑定增加 64 位 `logical_id`，预约追加按 repository 元数据写入它，并要求跨批次严格递增；`block_id` 继续作为现有表下标。旧式追加及单块绑定仍沿用 `logical_id == block_id`，保持现有选择器和适配器行为。绑定有效性检查同时比较逻辑身份，避免表项被替换后误认旧代。
@@ -515,12 +513,22 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 
 这是后续循环复用表项的身份准备，**尚未实现**生产 `KvMemStore::blocks_` 的槽位复用、长序列位置映射或跨请求接纳。当前完整生产请求的追加上界和单请求限制仍然存在，不能据此称 P4 的 10 倍容量长轨迹已经完成。
 
+### 条件版本删除的原子提交（2026-10-17）
+
+此前策略可以在删除意图中填写 `expected_content_version`，但 manager 对任何有版本条件的意图一律返回 `Reevaluate`，无法执行。现在 repository 的 `retire` 在同一物理槽位保护下核对代际、当前 Writing/Live 状态和内容版本，再用原有 CAS 关闭新引用入口；版本不符返回 `VersionChanged`，manager 将其报告为 `Reevaluate`，不退休该块。无条件 LRU 沿用原接口语义。当前一个 generation 的内容版本在进入 Writing 前发布，随后保持不变；将来若支持原地修改内容，必须先设计与该退休 CAS 同步的版本更新协议。
+
+宿主 CTest **27/27**、相关 ASan/UBSan **2/2**、TSan **2/2** 通过。新增测试确认错误版本不删除仍可取得新执行许可，匹配版本才退休；manager 在两个结果下分别计入重评与已提交。真实 GGUF/CUDA 模型 **35/35** 项及 backend guard 通过；recency/RAM delete 推理完成 356-token 输入、8-token 输出，`proposed=committed=reclaimed=6`，policy/worker failure 为 0。原始日志以 `conditional-version-` 开头，保存在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`。
+
+这补齐的是策略意图的提交前置条件，不等于已经实现冗余判定算法、完整生产入口或长时有界元数据。
+
+## 剩余生产接入与完整验收
+
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；仍需接入 server、多请求生命周期及错误取消。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
-5. **策略开关、观测与效果。** 将受限 CLI 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到完整生产入口，提供独立新策略模板及版本前置条件；策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补独立 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
+5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到完整生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 
 单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository 与按句柄 payload store 已使用固定物理槽位，但生产 `KvMemStore::blocks_`、位置映射及相关队列仍需改造；当前结果不证明长期总内存有界，也不证明已接纳请求完全不依赖 GC。

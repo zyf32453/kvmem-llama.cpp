@@ -70,16 +70,15 @@ void HistoricalKvGc::run() noexcept {
 }
 
 HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & intent) {
-    // The repository does not yet have an atomic content-version/retire
-    // transaction. Never silently ignore a condition from redundancy policy.
-    if (intent.expected_content_version) return HistoricalKvCommitCode::Reevaluate;
-    switch (repository_->retire(intent.victim)) {
+    switch (repository_->retire(intent.victim, intent.expected_content_version)) {
     case HistoricalKvRepository::RetireResult::Committed:
         return HistoricalKvCommitCode::Committed;
     case HistoricalKvRepository::RetireResult::AlreadyRetired:
         return HistoricalKvCommitCode::AlreadyRetired;
     case HistoricalKvRepository::RetireResult::Stale:
         return HistoricalKvCommitCode::Stale;
+    case HistoricalKvRepository::RetireResult::VersionChanged:
+        return HistoricalKvCommitCode::Reevaluate;
     case HistoricalKvRepository::RetireResult::Retry:
         return HistoricalKvCommitCode::Retry;
     }

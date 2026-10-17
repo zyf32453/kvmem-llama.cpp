@@ -28,7 +28,10 @@ static void test_retire_closes_new_entry_but_keeps_old_reader() {
     check(repo.publish_write(*writer), "writer failed to publish Live");
     auto old_execution = repo.acquire_new(handle);
     check(old_execution.has_value(), "old execution did not get a lease");
-    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+    check(repo.retire(handle, 2) == HistoricalKvRepository::RetireResult::VersionChanged &&
+          repo.acquire_new(handle).has_value(),
+          "mismatched content version retired a live generation");
+    check(repo.retire(handle, 1) == HistoricalKvRepository::RetireResult::Committed,
           "retire with live references failed");
     check(!repo.acquire_new(handle), "retired block granted new execution");
     check(repo.mark_executed(*old_execution, 5),
