@@ -6,6 +6,7 @@
 
 #include "kvmem/kvmem_runtime.hpp"
 #include "kvmem/historical_kv_cleanup.hpp"
+#include "kvmem/historical_kv_active_set.hpp"
 #include "kvmem/raw_kv_store.hpp"
 #include "kvmem/rope.hpp"
 
@@ -16,6 +17,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -275,6 +277,49 @@ private:
                 (gsrc.capacity() + ssrc.capacity() + gdst.capacity() + sdst.capacity()) * sizeof(void *);
         }
     } layout_workspace_;
+    struct HistoricalActiveWorkspace {
+        std::vector<kvmem::HistoricalKvActiveRequest> requested;
+        std::vector<uint32_t> requested_ids, remove_ids;
+        std::vector<uint8_t> seen;
+        void reserve(size_t slots) {
+            requested.reserve(slots); requested_ids.reserve(slots); remove_ids.reserve(slots);
+            seen.resize(slots);
+        }
+        size_t capacity_bytes() const noexcept {
+            return requested.capacity() * sizeof(kvmem::HistoricalKvActiveRequest) +
+                (requested_ids.capacity() + remove_ids.capacity()) * sizeof(uint32_t) + seen.capacity();
+        }
+    } historical_active_workspace_;
+    // Scratch for rebuilding the cells of one GPU block. apply_ubatch's
+    // upstream index nodes and full graph ubatches need separate reservation.
+    struct CellWorkspace {
+        llama_kv_cache::slot_info slots;
+        std::vector<llama_pos> positions, logical;
+        std::vector<int32_t> n_seq_id;
+        std::vector<llama_seq_id> seq_data;
+        std::vector<llama_seq_id *> seq_id;
+        std::vector<int8_t> output;
+        std::vector<llama_token> tokens;
+        uint32_t max_tokens = 0;
+        void reserve(uint32_t count) {
+            if (size_t(count) > SIZE_MAX / 4) throw std::length_error("cell workspace size overflow");
+            slots.s0 = slots.s1 = 0;
+            slots.resize(1); slots.strm[0] = 0; slots.idxs[0].resize(count);
+            positions.resize(size_t(count) * 4); logical.resize(count);
+            n_seq_id.resize(count, 1); seq_data.resize(count, 0);
+            seq_id.resize(count); output.resize(count, 0); tokens.resize(count, 0);
+            max_tokens = count;
+        }
+        size_t capacity_bytes() const noexcept {
+            return slots.strm.capacity() * sizeof(llama_seq_id) +
+                slots.idxs.capacity() * sizeof(llama_kv_cache::slot_info::idx_vec_t) +
+                (slots.idxs.empty() ? 0 : slots.idxs[0].capacity() * sizeof(uint32_t)) +
+                (positions.capacity() + logical.capacity()) * sizeof(llama_pos) +
+                n_seq_id.capacity() * sizeof(int32_t) + seq_data.capacity() * sizeof(llama_seq_id) +
+                seq_id.capacity() * sizeof(llama_seq_id *) + output.capacity() +
+                tokens.capacity() * sizeof(llama_token);
+        }
+    } cell_workspace_;
     bool gpu_kv_already_resident(uint32_t block_id) const;
     bool gpu_kv_complete(uint32_t block_id, const llama_kv_cache * cache) const;
     std::vector<uint32_t> retrieval_mandatory() const;

@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -24,7 +26,44 @@
 #include <cuda_runtime_api.h>
 #endif
 
+// Only the foreground interval explicitly guarded by a test rejects C++
+// allocation. Model loading, CUDA and background capture are unaffected.
+static thread_local bool deny_cpp_allocation = false;
+void * operator new(size_t size) {
+    if (deny_cpp_allocation) throw std::bad_alloc();
+    if (void * p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void * operator new[](size_t size) { return ::operator new(size); }
+void operator delete(void * p) noexcept { std::free(p); }
+void operator delete[](void * p) noexcept { ::operator delete(p); }
+void operator delete(void * p, size_t) noexcept { ::operator delete(p); }
+void operator delete[](void * p, size_t) noexcept { ::operator delete(p); }
+struct DenyCppAllocation {
+    DenyCppAllocation() { deny_cpp_allocation = true; }
+    ~DenyCppAllocation() { deny_cpp_allocation = false; }
+};
+
 struct kvmem_transfer_test_access {
+    static std::array<const void *, 16> execution_buffers(const llama_memory_kvmem & mem) {
+        const auto & a = mem.historical_active_workspace_;
+        const auto & c = mem.cell_workspace_;
+        return {mem.historical_active_.get(), mem.historical_active_->handles().data(),
+                a.requested.data(), a.requested_ids.data(), a.remove_ids.data(), a.seen.data(),
+                c.slots.strm.data(), c.slots.idxs.data(), c.slots.idxs[0].data(),
+                c.positions.data(), c.logical.data(), c.n_seq_id.data(), c.seq_data.data(),
+                c.seq_id.data(), c.output.data(), c.tokens.data()};
+    }
+    static size_t execution_bytes(const llama_memory_kvmem & mem) {
+        return mem.historical_active_workspace_.capacity_bytes() + mem.cell_workspace_.capacity_bytes() +
+            (mem.historical_active_ ? mem.historical_active_->capacity_bytes() : 0);
+    }
+    static bool execution_storage_empty(const llama_memory_kvmem & mem) {
+        return !mem.historical_active_ && !execution_bytes(mem);
+    }
+    static size_t active_count(const llama_memory_kvmem & mem) {
+        return mem.historical_active_->handles().size();
+    }
     static bool layout(llama_memory_kvmem & mem) { return mem.layout_gpu_slots_by_orig_pos(); }
     static std::array<const void *, 10> layout_buffers(const llama_memory_kvmem & mem) {
         const auto & w = mem.layout_workspace_;
@@ -1386,12 +1425,15 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         require(!admitted && mem.store_n_tokens() == 0 && !failed.reserved && !failed.device_bytes &&
                 !failed.pinned_bytes && !failed.events && !failed.host_bytes && cleanup.occupied() == 1 &&
                 mem.runtime().store().allocated_bytes() == table_bytes &&
-                !mem.runtime().historical_shadow_directory().size(),
+                !mem.runtime().historical_shadow_directory().size() &&
+                kvmem_transfer_test_access::execution_storage_empty(mem),
                 "real request preparation failure published an owner or retained workspace");
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
     }
     require(llama_kvmem_historical_capture_begin(12, 160, 3, 7), "real request capture admission failed");
     const auto table_bytes = mem.runtime().store().allocated_bytes();
+    const auto execution_buffers = kvmem_transfer_test_access::execution_buffers(mem);
+    const auto execution_bytes = kvmem_transfer_test_access::execution_bytes(mem);
     const auto packed_workspace = kvmem_transfer_test_access::packed_workspace(mem);
     require(packed_workspace.capacity >= 2 * KVMEM_CAPTURE_MAX_JOBS && packed_workspace.fallback_bytes,
             "real request did not prepare both queues and fallback");
@@ -1416,6 +1458,9 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 "real capture reallocated a prepared queue or fallback buffer");
         require(mem.runtime().store().allocated_bytes() == table_bytes,
                 "real capture grew the prepared dense block table");
+        require(kvmem_transfer_test_access::execution_buffers(mem) == execution_buffers &&
+                kvmem_transfer_test_access::execution_bytes(mem) == execution_bytes,
+                "real capture changed prepared active or cell scratch storage");
         for (uint32_t id = first; id < mem.store().block_count(); ++id) {
             if (id == retired_during_request) continue;
             const auto & block = mem.store().blocks()[id];
@@ -1443,6 +1488,26 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     uint32_t position = 0;
     execute(tokens.data(), 48);
     position += 48;
+    if (layout_case == 1) {
+        const auto repository = kvmem_transfer_test_access::capture_repository(mem);
+        const auto first = mem.runtime().historical_shadow_directory().observe(0).handle;
+        const auto last_use = repository->inspect(first)->last_use_seq;
+        const llama_pos next_position = position;
+        bool admitted = true;
+        size_t selected = 0;
+        for (unsigned i = 0; i < 32; ++i) {
+            DenyCppAllocation guard;
+            admitted = mem.begin_active_ubatch(1, &next_position) && admitted;
+            selected = kvmem_transfer_test_access::active_count(mem);
+            // An abandoned plan releases permission without recording use.
+            mem.complete_active_ubatch();
+        }
+        require(admitted && selected && repository->inspect(first)->last_use_seq == last_use &&
+                !repository->outstanding_operations() &&
+                kvmem_transfer_test_access::execution_buffers(mem) == execution_buffers,
+                "prepared model active allocated, retained a lease, or recorded abandoned execution");
+        std::puts("PASS prepared model active: 32 fresh admissions without C++ allocation, no abandoned LRU use, fixed storage");
+    }
     if (layout_case) {
         struct LayoutFault {
             KvmemLayoutPoint point;
@@ -1467,7 +1532,9 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         try { require(kvmem_transfer_test_access::layout(mem), "scrambled layout was not moved"); }
         catch (const std::exception &) { threw = true; }
         require(kvmem_transfer_test_access::layout_buffers(mem) == buffers &&
-                kvmem_capture_workspace_status().device_bytes == prepared.device_bytes,
+                kvmem_capture_workspace_status().device_bytes == prepared.device_bytes &&
+                kvmem_transfer_test_access::execution_buffers(mem) == execution_buffers &&
+                kvmem_transfer_test_access::execution_bytes(mem) == execution_bytes,
                 "real layout reallocated admitted scratch or descriptors");
         if (layout_case > 1) {
             require(threw && fault.fired && kvmem_transfer_test_access::capture_domain_failed(mem) &&

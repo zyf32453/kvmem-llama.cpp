@@ -374,6 +374,28 @@ Windows 相关宿主 **12/12**、Linux 全部宿主 **24/24**、独立 CUDA **4/
 
 **本轮仍是有限单请求的资源准备。** 预留节点数随该请求的最大追加需求增长；这没有完成多请求累计追加时的目录/墓碑复用，也不是所有资源的 byte 计费或长期内存有界证明。cell/ubatch、ActiveSet、backend、冷块恢复、GPU 工作集和 rollback 等仍有执行中分配，后续继续逐项纳入入口事务。旧动态目录 API 保留给未启用这一请求模式的路径。当前仍处于 P3，完整 P0–P6 交付范围不变。
 
+### ActiveSet 及块 cell 临时记录的入口预留（2026-10-17）
+
+上一轮完成历史块创建记录的预留后，本轮处理执行窗口。原 `begin_active_ubatch` 每次新建三个候选数组，并创建新的 ActiveSet 对象及 lease/handle 数组；`occupy_in` 每次重建一个块的槽位、位置、序列、token 等临时数组。现在在请求私有准备阶段，按物理 GPU 槽位数预留 active 候选、待移除记录、槽位校验数组和一个 ActiveSet；另按 `block_tokens` 准备单块 cell 临时数组。外层 GPU 准备失败仍同步回滚这些私有资源，接纳后不能扩大它们；退出时随已确认设备完成的 CPU 所有权一起交给后台 cleanup。
+
+ActiveSet 增加 `prepare`、`try_acquire` 和 `release`。复用的是对象和数组，每个新窗口仍逐块取得新的 ExecLease，不继承上一窗口的权限。已经退休的可选块仍被跳过，缺少必需块时退回本次已经取得的全部许可；超过准备上限会在获取许可前拒绝。已有窗口未结束时返回 Busy 并保留它，空选择也标为一个已接纳窗口，不能用空数组绕过重叠检查。仅在实际提交后更新 LRU；放弃未执行计划不更新。调用 `release` 前仍由设备 owner 证明执行完成，该方法本身不等待设备。旧按次分配的 `acquire` 接口保留并复用同一套校验，避免两套许可规则分歧。
+
+生产适配器在既有 `harvest_pending` 确认执行依赖完成之后释放许可，保留 ActiveSet 容量供下一窗口使用。若采集抛出错误，完成调用不会执行，许可继续保留至原有取消/设备确认路径。选择阶段检查 GPU 槽位范围及重复映射，防止错误 residency 突破预留数组上界；登记失败时本次许可由作用域回滚。cell 临时记录只在同步 `apply_ubatch` 调用期间借用，没有被提交给异步图或跨调用保存。
+
+验证结果：
+
+- 新增 ActiveSet 准备分配故障测试；禁止 C++ 分配时在同一物理槽位上完成 **64 代**“新许可 → 退休 → 旧执行保护 → 退出 → 回收”。检查数组地址/容量不变、没有前台释放准备数组、重叠拒绝及必需块失败不会泄漏许可。该结果仅证明组件复用，不代表生产目录已通过长期追加门槛。
+- 模型测试在实际完成 48-token 输入后，禁止前台 C++ 分配并连续进行 **32 次**新 active 接纳及放弃，检查许可最终归零且 LRU 没有更新。原有 35 个模型场景全部通过，进程正常退出；每批推理和实际布局移动还核对 active 对象与 15 组数组地址、容量不变。入口 pinned 分配失败场景同时检查新准备空间没有发布或残留。
+- Windows 宿主 **12/12**、Linux 宿主 **24/24**、独立 CUDA **4/4**、宿主 ASan/UBSan **4/4**、独立 TSan **4/4** 通过。TSan 沿用仅对子进程禁用地址随机化的配置；宿主检查不覆盖 CUDA 适配器的全部并发行为。
+
+模型场景的 7 个物理 GPU 槽位对应 active 数组容量 **791 bytes**，单块 cell 临时数组 **1468 bytes**；这是容器持有的数据容量，不含对象自身、分配器和其它执行资源开销。本轮没有修改 GC 的回收对象，GC 仍回收 CPU historical payload，GPU 源槽仍遵循原有前台设备完成协议。
+
+同版 recency CLI delete 正常完成 356-token 输入、8-token 生成和退出：32/14/16 的容量及水位配置下，`proposed=committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 为 0。24 个 GPU 槽位的 active 数组容量为 **2712 bytes**，cell 临时数组仍为 1468 bytes；结束时 `payload_bytes=26738688` 仍可能包含等待清理的私有预留。普通 retrieval（未启用 historical GC）也正常完成 8-token 生成，实际移动 4 个驻留块，trace 为 `layout_writeback move=4 raw=0 d2d=1`，输入 356 token 加 64-token replay，总 prompt eval 420 token。它的退出诊断仍显示 compute buffer 实际 15.9652 MiB、预估 12.2700 MiB；对照上一轮 `historical-layout-cli-retrieval.log` 已有相同数值。这是后续 backend 工作区预算必须覆盖的现有缺口，不能据本轮功能通过宣称严格资源承诺已成立。
+
+六个源码/测试文件的本地与远程 SHA256 一致。原始日志为 `historical-active-workspace-{windows,host,asan,tsan,native,gpu}-test.log`、`historical-active-workspace-cli-{delete,retrieval}.log/.tokens/.exit` 及构建日志；模型测试退出码另存于 `historical-active-workspace-gpu-test.exit`，三次模型/CLI 运行均为 0。资料保存在本地 `build-local/capture-session-validation/` 和远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`。本轮没有前后性能对照，不宣称提速；CUDA sanitizer 的环境限制保持不变。
+
+本轮检查还明确了下一处实际分配：上游 `llama_kv_cells` 的 `used` 和 `seq_pos` 是节点容器，`apply_ubatch` 的插入、移除仍会分配/释放节点。完整 `llama_ubatch::data_t`、slot_info 列表、memory context、采集范围及 rollback 快照也没有全部准备。不能把外层 cell 临时数组复用或 active 接纳零分配解释为完整 ubatch/模型请求零动态分配。下一步须继续处理这些真实节点及上下文所有权，覆盖 prepare、apply、取消与恢复路径，再推进其它 active 入口、server、多请求及完整 P4 长轨迹。P0–P6 总目标保持不变。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

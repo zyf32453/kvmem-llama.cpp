@@ -21,38 +21,65 @@ HistoricalKvActiveSet::HistoricalKvActiveSet(
 HistoricalKvActiveSet::AcquireResult HistoricalKvActiveSet::acquire(
     std::shared_ptr<HistoricalKvRepository> repository,
     const std::vector<HistoricalKvActiveRequest> & requested) {
-    if (!repository) throw std::invalid_argument("historical KV active repository is required");
-
     AcquireResult result;
-    auto active = std::unique_ptr<HistoricalKvActiveSet>(
-        new HistoricalKvActiveSet(std::move(repository)));
-    active->leases_.reserve(requested.size());
-    active->handles_.reserve(requested.size());
+    auto active = prepare(std::move(repository), requested.size());
+    auto acquired = active->try_acquire(requested);
+    result.missing_mandatory = acquired.missing_mandatory;
+    if (acquired) result.active = std::move(active);
+    return result;
+}
+
+std::unique_ptr<HistoricalKvActiveSet> HistoricalKvActiveSet::prepare(
+        std::shared_ptr<HistoricalKvRepository> repository, size_t max_requested) {
+    if (!repository) throw std::invalid_argument("historical KV active repository is required");
+    auto active = std::unique_ptr<HistoricalKvActiveSet>(new HistoricalKvActiveSet(std::move(repository)));
+    active->leases_.reserve(max_requested);
+    active->handles_.reserve(max_requested);
+    active->max_requested_ = max_requested;
+    return active;
+}
+
+HistoricalKvActiveSet::TryAcquireResult HistoricalKvActiveSet::try_acquire(
+        const std::vector<HistoricalKvActiveRequest> & requested) {
+    if (engaged_) return {AcquireStatus::Busy, {}};
+    if (requested.size() > max_requested_) return {AcquireStatus::CapacityExceeded, {}};
+    if (repository_->closed()) return {AcquireStatus::Closed, {}};
+
+    // Clear partially acquired permissions even if a repository operation
+    // throws. Busy/capacity rejection above must preserve an older operation.
+    struct Rollback {
+        HistoricalKvActiveSet & active;
+        ~Rollback() { if (!active.engaged()) active.release(); }
+    } rollback{*this};
 
     for (const auto & item : requested) {
-        const bool admitted = std::any_of(active->handles_.begin(), active->handles_.end(),
+        const bool admitted = std::any_of(handles_.begin(), handles_.end(),
             [&](HistoricalKvHandle handle) { return same_handle(handle, item.handle); });
         if (admitted) continue;
 
         auto lease = item.gpu_ready_writing ?
-            active->repository_->acquire_gpu_ready_writing(item.handle) :
-            active->repository_->acquire_new(item.handle);
+            repository_->acquire_gpu_ready_writing(item.handle) :
+            repository_->acquire_new(item.handle);
         if (!lease) {
             if (!item.mandatory) continue;
-            // Destroying active drops every lease obtained earlier in this
-            // attempt. No partial active window escapes to the caller.
-            result.missing_mandatory = item.handle;
-            return result;
+            return {AcquireStatus::MissingMandatory, item.handle};
         }
-        active->handles_.push_back(item.handle);
-        active->leases_.push_back(std::move(*lease));
+        handles_.push_back(item.handle);
+        leases_.push_back(std::move(*lease));
     }
 
-    result.active = std::move(active);
-    return result;
+    engaged_ = true; // Even an empty selection is an admitted active operation.
+    return {AcquireStatus::Acquired, {}};
+}
+
+void HistoricalKvActiveSet::release() noexcept {
+    leases_.clear();
+    handles_.clear();
+    engaged_ = false;
 }
 
 bool HistoricalKvActiveSet::mark_execution_submitted(uint64_t sequence) {
+    if (!engaged_) return false;
     bool all_recorded = true;
     for (const auto & lease : leases_)
         all_recorded = repository_->mark_executed(lease, sequence) && all_recorded;

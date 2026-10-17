@@ -33,6 +33,30 @@ public:
         std::shared_ptr<HistoricalKvRepository> repository,
         const std::vector<HistoricalKvActiveRequest> & requested);
 
+    // Allocate the object and both arrays before request admission. One
+    // prepared set supports one active operation at a time; each successful
+    // try_acquire obtains fresh leases. Before calling release(), the owner
+    // must confirm that its real execution/device work has finished; release
+    // itself does not synchronize a device. Calls are owner-serialized.
+    static std::unique_ptr<HistoricalKvActiveSet> prepare(
+        std::shared_ptr<HistoricalKvRepository> repository, size_t max_requested);
+    enum class AcquireStatus { Acquired, Busy, CapacityExceeded, Closed, MissingMandatory };
+    struct TryAcquireResult {
+        AcquireStatus status;
+        std::optional<HistoricalKvHandle> missing_mandatory;
+        explicit operator bool() const { return status == AcquireStatus::Acquired; }
+    };
+    // Does not allocate or grow prepared arrays. Busy/overflow preserves the
+    // previous operation; a failed mandatory admission returns all new leases.
+    TryAcquireResult try_acquire(const std::vector<HistoricalKvActiveRequest> & requested);
+    void release() noexcept;
+    bool engaged() const noexcept { return engaged_; }
+    size_t capacity() const noexcept { return max_requested_; }
+    size_t capacity_bytes() const noexcept {
+        return leases_.capacity() * sizeof(HistoricalKvRepository::Lease) +
+               handles_.capacity() * sizeof(HistoricalKvHandle);
+    }
+
     HistoricalKvActiveSet(const HistoricalKvActiveSet &) = delete;
     HistoricalKvActiveSet & operator=(const HistoricalKvActiveSet &) = delete;
 
@@ -51,6 +75,8 @@ private:
     std::shared_ptr<HistoricalKvRepository> repository_;
     std::vector<HistoricalKvRepository::Lease> leases_;
     std::vector<HistoricalKvHandle> handles_;
+    size_t max_requested_ = 0;
+    bool engaged_ = false;
 };
 
 } // namespace kvmem
