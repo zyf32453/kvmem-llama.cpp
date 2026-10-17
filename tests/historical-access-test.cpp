@@ -6,6 +6,7 @@
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
+#include "kvmem/historical_kv_capture_session.hpp"
 #include "kvmem/historical_kv_raw_store.hpp"
 #include "kvmem/historical_kv_gc.hpp"
 
@@ -34,6 +35,12 @@ struct kvmem_transfer_test_access {
     static void commit(llama_memory_kvmem & mem) { mem.harvest_gpu_v_commit(); }
     static size_t pending(const llama_memory_kvmem & mem) {
         return mem.harvest_v_jobs_.size() + mem.harvest_v_pending_.jobs.size();
+    }
+    static std::shared_ptr<kvmem::HistoricalKvRepository> capture_repository(const llama_memory_kvmem & mem) {
+        return mem.historical_capture_ ? mem.historical_capture_->repository() : nullptr;
+    }
+    static std::shared_ptr<kvmem::HistoricalKvRawStore> capture_storage(const llama_memory_kvmem & mem) {
+        return mem.historical_capture_ ? mem.historical_capture_->storage() : nullptr;
     }
     static void mean_inputs(llama_memory_kvmem & mem, const std::vector<ggml_tensor *> & tensors,
                             uint32_t begin, uint32_t count) {
@@ -825,11 +832,70 @@ static void check_request_capture(llama_context * ctx, llama_model * model, llam
         cold |= mem.store().blocks()[expected.id].gpu_slot < 0;
     }
     require(cold && mem.store_n_tokens() == 163, "real capture did not exercise GPU eviction");
+    // Let LRU reclaim real graph-produced allocations. With all model
+    // work drained, the background manager must return Host bytes and Ready
+    // slots while leaving the adapter's existing GPU cells untouched.
+    auto repository = kvmem_transfer_test_access::capture_repository(mem);
+    auto storage = kvmem_transfer_test_access::capture_storage(mem);
+    require(repository && storage && repository->capacity() == 12,
+            "real capture owner did not retain the managed RAM repository");
+    const auto bytes_before_gc = storage->allocated_payload_bytes();
+    const auto ready_before_gc = repository->ready_count();
+    require(bytes_before_gc > 0 && ready_before_gc == 3,
+            "finished request did not return its unused private RAM slots");
+    const auto & resident = mem.store().blocks().back();
+    require(resident.gpu_slot >= 0, "real capture has no resident GPU comparison block");
+    const auto il = mem.raw().config().historical_gc_attention_layers.front();
+    const auto resident_binding = mem.runtime().historical_shadow_directory().find(resident.block_id);
+    auto resident_read = mem.runtime().historical_shadow_directory().acquire_read(resident.block_id);
+    require(resident_binding && resident_read, "resident block was unavailable before LRU deletion");
+    const auto resident_layer = resident_read.storage->read_layer(
+        resident_read.lease, resident_binding->handle, il);
+    require(bool(resident_layer), "resident CPU payload was unavailable before LRU deletion");
+    std::vector<uint8_t> gpu_k_before(resident_layer->packed_k.size());
+    auto * gpu_k = mem.get_kv()->get_k_storage(il);
+    const size_t resident_cell = size_t(resident.gpu_slot) * mem.block_tokens();
+    ggml_backend_tensor_get(gpu_k, gpu_k_before.data(), resident_cell * gpu_k->nb[1], gpu_k_before.size());
+    resident_read = {};
+    kvmem::HistoricalKvGc::Config gc_config;
+    gc_config.mode = kvmem::HistoricalKvGc::Mode::Delete;
+    gc_config.ready_low = 4;
+    gc_config.ready_high = 5;
+    gc_config.scan_blocks = 12;
+    gc_config.batch_blocks = 2;
+    gc_config.reclaim_blocks = 12;
+    gc_config.poll_ms = 1;
+    kvmem::HistoricalKvGc gc(repository,
+        std::make_unique<kvmem::HistoricalKvLruPolicy>(repository->capacity()), gc_config);
+    gc.start();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (repository->ready_count() < gc_config.ready_high &&
+            std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    gc.stop();
+    require(repository->ready_count() >= gc_config.ready_high &&
+            gc.stats().committed >= 2 && gc.stats().reclaimed >= 2 &&
+            storage->allocated_payload_bytes() < bytes_before_gc,
+            "LRU did not physically release real model CPU payloads");
+    uint32_t reclaimed_model_blocks = 0;
+    for (uint32_t id = 0; id < mem.store().block_count(); ++id) {
+        const auto handle = mem.runtime().historical_shadow_directory().observe(id).handle;
+        if (!repository->reclaim_completed(handle, repository->repository_id())) continue;
+        ++reclaimed_model_blocks;
+        require(!mem.runtime().historical_shadow_directory().acquire_read(id),
+                "reclaimed real-model block remained readable");
+    }
+    require(reclaimed_model_blocks >= 2, "LRU released no exact real-model generations");
+    std::vector<uint8_t> gpu_k_after(gpu_k_before.size());
+    ggml_backend_tensor_get(gpu_k, gpu_k_after.data(), resident_cell * gpu_k->nb[1], gpu_k_after.size());
+    require(gpu_k_after == gpu_k_before,
+            "background Host GC changed the resident GPU working set");
     auto extra = llama_batch_get_one(tokens.data(), 1);
     require(llama_decode(ctx, extra) != 0 && mem.store_n_tokens() == 163,
             "finished capture session accepted another append");
-    std::printf("PASS real model historical capture: type=%s, 160 input + 3 generated tokens, 16-token microbatches, %zu layer spans byte-equal, cold CPU payload preserved, deletion OFF\n",
-                ggml_type_name(mem.type_k()), saved.size());
+    std::printf("PASS real model historical capture and post-request LRU release: type=%s, 160 input + 3 generated tokens, 16-token microbatches, %zu layer spans byte-equal, reclaimed=%u, released_bytes=%llu, GPU unchanged\n",
+                 ggml_type_name(mem.type_k()), saved.size(), reclaimed_model_blocks,
+                 (unsigned long long) (bytes_before_gc - storage->allocated_payload_bytes()));
 }
 
 int main(int argc, char ** argv) {

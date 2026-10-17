@@ -172,6 +172,8 @@ build-cuda/bin/llama-kvmem-cli -m "$MODEL" -f prompt.txt -n 8 -c 1024 \
 
 GPU 验收在原有已知张量用例之外，新增真正调用 `llama_decode` 的两个场景（F16、Q8_0）。每个场景输入 160 token，使用 16-token 微批次并生成 3 token，自动建立 9 个 span；逐层比较新块 CPU payload 与实际 GPU K/V，分别检查 **432 个块×层** 的字节一致性。主动覆盖 GPU 物理槽压力换出，最后重新读取冷历史并比较保存的内容 hash；所有块均 Live、引用归零，超出已完成请求的下一次追加被拒绝。最初运行准确复现短块物理槽不足，修复后两种格式及原有 GC/异步 fixture 全部通过。该真实图测试仍未开启策略退休，不能把已有 fixture 的 CPU 释放量计入它。
 
+2026-10-17 补充了真实图数据进入新 LRU 回收器的端到端验证：上述 F16、Q8_0 两个模型场景在请求完成并排空设备任务后，对同一按句柄仓库启动后台 LRU，分别退休并物理归还 2 个真实历史块。F16 释放 **6,291,456 bytes**，Q8_0 释放 **3,342,336 bytes**；Ready 增加，已回收代拒绝新 CPU 读取，已有 GPU 工作集字节保持不变。测试使用真实模型自动采集的 payload，没有手工写入或绑定。它验证了真实数据的回收闭环，但删除发生在请求完成后；普通 CLI/server 仍未启动生产 GC，也尚未证明执行中的 active 许可、长期复用和已接纳请求的完整资源保证。GPU 原始日志保存在本地 `build-local/capture-session-validation/historical-real-gc-postrequest-test.log`，以及远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-real-gc-postrequest-test.log`。
+
 原始日志保存在远程隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-capture-session-*` 文件，并复制到本地 `build-local/capture-session-validation/`；最终逐层模型检查使用 `historical-capture-session-quant-gpu-test.log`。首次失败日志也保留。9 个变更源码/构建文件的本地与远程 SHA256 一致，远程原工作仓库未改动。
 
 ## 剩余生产接入与完整验收

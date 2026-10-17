@@ -35,6 +35,10 @@ public:
     uint32_t created_blocks() const noexcept { return static_cast<uint32_t>(handles_.size()); }
     uint32_t reserved_blocks() const noexcept { return reserved_blocks_; }
     uint64_t payload_bytes() const noexcept { return storage_->allocated_payload_bytes(); }
+    // The request owner may attach one GC manager to this exact repository.
+    // Keeping these owners alive also keeps late release callbacks' target alive.
+    std::shared_ptr<HistoricalKvRepository> repository() const noexcept { return repository_; }
+    std::shared_ptr<HistoricalKvRawStore> storage() const noexcept { return storage_; }
     uint64_t input_remaining() const noexcept { return input_remaining_; }
     uint64_t output_remaining() const noexcept { return output_remaining_; }
     uint64_t appends_remaining() const noexcept { return appends_remaining_; }
