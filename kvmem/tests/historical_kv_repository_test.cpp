@@ -74,6 +74,33 @@ static void test_retire_closes_new_entry_but_keeps_old_reader() {
     next->reset();
 }
 
+static void test_gpu_ready_writing_execution_is_not_cpu_publication() {
+    HistoricalKvRepository repo(1);
+    std::atomic<unsigned> releases{0};
+    auto writer = repo.begin_write(50, 0, 16, 1, 128, successful_release(releases));
+    check(writer.has_value(), "GPU-ready Writing fixture had no slot");
+    const auto handle = writer->handle();
+    check(!repo.acquire_new(handle) && !repo.acquire_read(handle) &&
+          !repo.acquire_transfer(handle),
+          "Writing block became generally visible before Host publication");
+    auto gpu_execution = repo.acquire_gpu_ready_writing(handle);
+    check(gpu_execution && repo.mark_executed(*gpu_execution, 5) &&
+          repo.inspect(handle)->last_use_seq == 5,
+          "GPU-complete Writing span did not receive execution permission/use");
+    check(repo.retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          !repo.acquire_gpu_ready_writing(handle) && !repo.acquire_new(handle),
+          "retired Writing span granted a new GPU execution lease");
+    check(repo.mark_executed(*gpu_execution, 6) &&
+          !repo.publish_write(*writer),
+          "old admitted GPU execution lost use or retired writer republished");
+    writer->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred &&
+          releases == 0, "retired Writing span was released before old GPU execution finished");
+    gpu_execution->reset();
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          releases == 1, "GPU-ready Writing span failed eventual physical release");
+}
+
 static void test_writing_retire_cannot_resurrect() {
     HistoricalKvRepository repo(2, 7);
     std::atomic<unsigned> releases{0};
@@ -367,6 +394,7 @@ static void test_final_publication_under_ref_churn_and_retirement() {
 
 int main() {
     test_retire_closes_new_entry_but_keeps_old_reader();
+    test_gpu_ready_writing_execution_is_not_cpu_publication();
     test_writing_retire_cannot_resurrect();
     test_failed_release_stays_closed_and_retries();
     test_snapshot_and_last_use();

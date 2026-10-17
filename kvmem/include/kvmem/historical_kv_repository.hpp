@@ -114,6 +114,11 @@ public:
     // A retired block never grants a new lease, even if old leases remain.
     // acquire_new is the execution permission used at each active boundary.
     std::optional<Lease> acquire_new(HistoricalKvHandle handle);
+    // A specialized execution permission for a request's older GPU-complete
+    // span while its asynchronous Host capture is still Writing. The adapter
+    // must prove the whole span's GPU producer has completed and it does not
+    // overlap the current write range. This never grants a CPU read/transfer.
+    std::optional<Lease> acquire_gpu_ready_writing(HistoricalKvHandle handle);
     std::optional<Lease> acquire_read(HistoricalKvHandle handle);
     std::optional<Lease> acquire_transfer(HistoricalKvHandle handle);
     RetireResult retire(HistoricalKvHandle handle);
@@ -161,7 +166,7 @@ private:
     friend class HistoricalKvGc;
     bool claim_gc_owner() noexcept;
     void release_gc_owner() noexcept;
-    std::optional<Lease> acquire_kind(HistoricalKvHandle, LeaseKind);
+    std::optional<Lease> acquire_kind(HistoricalKvHandle, LeaseKind, uint32_t allowed_phases);
     std::shared_ptr<Shared> shared_;
 };
 

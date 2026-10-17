@@ -435,6 +435,7 @@ private:
     // harvest synchronization. Empty in production requests.
     std::function<void()> historical_submission_test_hook_;
     uint64_t historical_active_skips_ = 0;
+    uint64_t historical_active_pending_drains_ = 0;
     std::vector<int32_t> free_slots_;
     struct RowPosition {
         std::array<llama_pos, 4> pos{};

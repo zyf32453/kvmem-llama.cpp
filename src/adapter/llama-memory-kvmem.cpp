@@ -2668,8 +2668,13 @@ bool llama_memory_kvmem::begin_active_ubatch(
                 requested_ids.push_back(block.block_id);
                 continue;
             }
-            if (meta && meta->life == kvmem::HistoricalKvLife::Writing)
-                return reject("older writer not published", block.block_id);
+            if (meta && meta->life == kvmem::HistoricalKvLife::Writing) {
+                // This older span's GPU graph finished in the prior harvest,
+                // but its packed Host copy may still be asynchronous.
+                requested.push_back({observation.handle, false, true});
+                requested_ids.push_back(block.block_id);
+                continue;
+            }
         }
         remove_ids.push_back(block.block_id);
     }
@@ -2684,6 +2689,16 @@ bool llama_memory_kvmem::begin_active_ubatch(
                        handle.generation == target.generation;
             });
         if (!permitted) remove_ids.push_back(requested_ids[i]);
+    }
+    if (!remove_ids.empty()) {
+        // A retired block can still have an admitted packed-K/V D2H copy
+        // reading its old GPU slot. Drain those producers before returning
+        // the slot to the allocator; this waits on our transfer, not GC.
+        const size_t pending = harvest_v_jobs_.size() + harvest_v_pending_.jobs.size();
+        historical_active_pending_drains_ += pending != 0;
+        if (trace_) kvmem_diag("KVMEM_TRACE historical_active_drain retired=%zu pending=%zu\n",
+                remove_ids.size(), pending);
+        harvest_gpu_v_commit();
     }
     for (uint32_t id : remove_ids) {
         const auto block = store.blocks()[id];
@@ -3622,11 +3637,6 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         // Recency has no Mean-K graph nodes. Consume the executed batch after
         // its packed jobs captured ownership, including between microbatches.
         if (managed_packed) pos_queue_.erase(pos_queue_.begin());
-        if (managed_packed && historical_capture_) {
-            // The next microbatch may attend to this one. Publish its Host
-            // payload before that new active boundary can acquire a Live lease.
-            harvest_gpu_v_commit();
-        }
         harvest_flush();
         if (sched) {
             ggml_backend_sched_synchronize(sched);

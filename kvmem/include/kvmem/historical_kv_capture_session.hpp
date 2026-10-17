@@ -10,7 +10,7 @@ namespace kvmem {
 // the RAM reservation and producer handoff. This is NOT
 // full production request admission: directory/GPU/backend allocations are
 // still fallible, and a failed session must be discarded after draining its
-// tasks. No reset, continuation, streaming or policy deletion is supported.
+// tasks. No reset, continuation or streaming is supported.
 class HistoricalKvCaptureSession {
 public:
     static std::unique_ptr<HistoricalKvCaptureSession> try_create(

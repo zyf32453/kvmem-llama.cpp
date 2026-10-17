@@ -12,6 +12,7 @@ namespace kvmem {
 struct HistoricalKvActiveRequest {
     HistoricalKvHandle handle;
     bool mandatory = false;
+    bool gpu_ready_writing = false;
 };
 
 // One caller-defined active operation. Every invocation of acquire() obtains

@@ -27,6 +27,9 @@ struct kvmem_transfer_test_access {
         return mem.historical_active_ ? mem.historical_active_->handles() :
                                         std::vector<kvmem::HistoricalKvHandle>{};
     }
+    static uint64_t active_pending_drains(const llama_memory_kvmem & mem) {
+        return mem.historical_active_pending_drains_;
+    }
     static void restore(llama_memory_kvmem & mem, uint32_t id) {
         mem.write_block_to_gpu(id);
     }
@@ -895,6 +898,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         gc.start();
         bool retired_after_submit = false, protected_old_execution = false;
         const auto skips_before = mem.historical_active_skips();
+        const auto drains_before = kvmem_transfer_test_access::active_pending_drains(mem);
         kvmem_transfer_test_access::on_submission(mem, [&] {
             if (retired_after_submit) return;
             const auto handles = kvmem_transfer_test_access::active_handles(mem);
@@ -923,8 +927,9 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         position += 32;
         kvmem_transfer_test_access::on_submission(mem, {});
         require(retired_after_submit && protected_old_execution &&
-                mem.historical_active_skips() > skips_before,
-                "submitted GPU operation lost its lease or next microbatch reused retired history");
+                mem.historical_active_skips() > skips_before &&
+                kvmem_transfer_test_access::active_pending_drains(mem) > drains_before,
+                "submitted GPU operation lost its lease or retired slot reused before pending D2H drained");
         const auto handle = mem.runtime().historical_shadow_directory().observe(retired_during_request).handle;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!repository->reclaim_completed(handle, repository->repository_id()) &&

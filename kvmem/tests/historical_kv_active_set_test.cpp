@@ -107,9 +107,36 @@ static void test_mandatory_failure_rolls_back_prior_admission() {
           "abandoned active operation recorded a use");
 }
 
+static void test_gpu_ready_writing_requires_explicit_request() {
+    auto repository = std::make_shared<HistoricalKvRepository>(1);
+    std::atomic<unsigned> released{0};
+    auto writer = repository->begin_write(40, 0, 8, 1, 64,
+        [&released](const HistoricalKvHandle &) { ++released; return true; });
+    check(writer.has_value(), "GPU-ready active fixture had no writer");
+    const auto handle = writer->handle();
+    auto ordinary = HistoricalKvActiveSet::acquire(repository, {{handle, false}});
+    check(ordinary && ordinary.active->empty(),
+          "ordinary active request selected unpublished Host payload");
+    auto admitted = HistoricalKvActiveSet::acquire(repository, {{handle, true, true}});
+    check(admitted && admitted.active->handles().size() == 1 &&
+          admitted.active->mark_execution_submitted(5),
+          "GPU-ready Writing active request did not submit its real use");
+    check(repository->retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "GPU-ready active block did not retire");
+    auto later = HistoricalKvActiveSet::acquire(repository, {{handle, false, true}});
+    check(later && later.active->empty(), "retired GPU-ready block entered a later active");
+    writer->reset();
+    check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred,
+          "old GPU-ready active did not protect the retiring payload");
+    admitted.active.reset();
+    check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+          released.load() == 1, "GPU-ready active payload did not finish releasing");
+}
+
 int main() {
     test_preview_then_retire_then_new_active();
     test_old_active_finishes_after_retirement();
     test_mandatory_failure_rolls_back_prior_admission();
+    test_gpu_ready_writing_requires_explicit_request();
     std::cout << "historical KV active-set checks passed\n";
 }

@@ -377,25 +377,31 @@ bool HistoricalKvRepository::publish_write(const Lease & writer) {
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_new(
     HistoricalKvHandle handle) {
-    return acquire_kind(handle, LeaseKind::Execution);
+    return acquire_kind(handle, LeaseKind::Execution, phase_bit(Phase::Live));
+}
+
+std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_gpu_ready_writing(
+    HistoricalKvHandle handle) {
+    return acquire_kind(handle, LeaseKind::Execution,
+        phase_bit(Phase::Writing) | phase_bit(Phase::Live));
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_read(
     HistoricalKvHandle handle) {
-    return acquire_kind(handle, LeaseKind::Read);
+    return acquire_kind(handle, LeaseKind::Read, phase_bit(Phase::Live));
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_transfer(
     HistoricalKvHandle handle) {
-    return acquire_kind(handle, LeaseKind::Transfer);
+    return acquire_kind(handle, LeaseKind::Transfer, phase_bit(Phase::Live));
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_kind(
-    HistoricalKvHandle handle, LeaseKind kind) {
+    HistoricalKvHandle handle, LeaseKind kind, uint32_t allowed_phases) {
     const auto shared = shared_;
     if (handle.incarnation != shared->incarnation || handle.slot >= shared->capacity ||
         shared->closing.load(std::memory_order_acquire)) return std::nullopt;
-    if (!shared->try_pin(handle.slot, phase_bit(Phase::Live))) return std::nullopt;
+    if (!shared->try_pin(handle.slot, allowed_phases)) return std::nullopt;
     Lease lease(shared, handle, kind);
     if (!shared->matches(handle.slot, handle) || shared->closing.load(std::memory_order_acquire))
         return std::nullopt;
@@ -495,7 +501,7 @@ bool HistoricalKvRepository::mark_executed(const Lease & admitted, uint64_t sequ
     const HistoricalKvHandle handle = admitted.handle_;
     if (handle.slot >= shared->capacity || !shared->matches(handle.slot, handle)) return false;
     const Phase phase = phase_of(shared->slots[handle.slot].control.load(std::memory_order_acquire));
-    if (phase != Phase::Live && phase != Phase::Retired) return false;
+    if (phase != Phase::Writing && phase != Phase::Live && phase != Phase::Retired) return false;
     auto & use = shared->slots[handle.slot].last_use_seq;
     uint64_t previous = use.load(std::memory_order_relaxed);
     for (unsigned attempt = 0; attempt < kCasAttempts; ++attempt) {

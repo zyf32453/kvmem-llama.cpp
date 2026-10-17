@@ -178,7 +178,11 @@ GPU 验收在原有已知张量用例之外，新增真正调用 `llama_decode` 
 
 托管 recency 的正常 `llama_decode` 在每个微批次应用 KV cell 后、构图前为仍驻留的历史块取得新的 `ExecLease`。已退休块不能借旧 GPU 槽绕过许可：适配器从后续 attention cell 视图移除该块并归还槽位；成功提交模型计算才更新这些获准块的 LRU `last_use`，许可持有到图同步与采集回调完成。无托管采集时该 hook 保持原路径。执行入口补丁为 `patches/0007-historical-active-hook.patch`。
 
-模型实测暴露了一个生产者时序：刚完成 GPU 计算的块可能仍在异步 packed K/V 的 Host 拷贝中，仓库状态仍是 `Writing`。首版受限采集模式在进入下一微批次前结算这批 packed 拷贝，确保该块已发布 `Live` 后才授予新的执行许可。这增加 Host 采集等待，尚未做稳定性能对照；后续可设计区分 GPU 已可执行与 CPU payload 已完整发布的许可，以恢复重叠，而不能直接把 `Writing` 当作 `Live` 放行。
+模型实测暴露了一个生产者时序：刚完成 GPU 计算的块可能仍在异步 packed K/V 的 Host 拷贝中，仓库状态仍是 `Writing`。现在增加专用 `acquire_gpu_ready_writing` 执行许可：适配器在上一微批次图同步完成、历史 span 已驻留且不与本轮写入范围重叠时使用；它允许旧 GPU 数据参与本次执行，不授予 CPU 读取或搬运权。普通读/搬运仍要求 `Live`，退休则关闭全部新许可。这样去掉了每个微批次都等待 packed Host 发布的额外结算；图完成同步本身仍存在，尚未测量稳定性能收益。
+
+退休块退出后续 GPU attention 视图时，其旧槽位可能仍被已获准的 packed D2H 任务读取。当前先 `harvest_gpu_v_commit()` 排空这些任务，再归还 GPU 槽位，防止新数据覆盖旧 DMA 源。此时等待的是实际搬运完成，但触发点与退休有关，**尚不满足完整交付的前台无新增 GC 等待证明**；后续需将 attention 排除与 GPU 槽位延期归还分开，并补测等待开销。回收策略和后台 worker 始终负责 CPU 历史资源，不直接操作 GPU 槽位。
+
+这一改动通过 Windows/Linux 的 repository、ActiveSet 测试与远程真实模型 F16/Q8_0 回归。提交后退休用例新增断言，要求实际进入“存在未结算 D2H 任务”的排空分支；原始日志为隔离目录的 `historical-writing-exec-drain-gpu-test.log`。普通 CLI delete 日志 `historical-writing-exec-final-cli-delete.log` 显示 6 次 `retired=1 pending=96`，随后成功回收 6 个 CPU 历史块，policy/worker failure 均为 0。最终 shadow 日志 `historical-writing-exec-shadow.log` 为 `proposed=6, committed=0, shadow=6, reclaimed=0`，8 个输出 token 与先前 off 文件逐字节相同。上述记录证明功能和该分支的覆盖，不代表长期内存、延迟或 agent 质量验收。
 
 远程真实模型测试保留了原 F16、Q8_0 的请求后 LRU 回收检查，并新增 F16 请求中退休：第一段 48 token 之后退休一个当时 GPU 驻留的块，旧 CPU `ReadLease` 持有期间仓库拒绝物理释放，新 CPU 读立即关闭；继续第二段真实 `llama_decode` 时，新 active 跳过该块并从 GPU 工作集去掉它；旧读者退出后后台 worker 归还对应 Host payload，余下 160-token 输入和 3-token 生成正常完成。请求结束校验现在允许确实已退休、释放中或同代已回收的块，不再错误要求每个创建块仍为 `Live`。本地 capture-session 测试及远程五项相关宿主 CTest 均通过；隔离远程日志为 `historical-active-midrequest-gpu-test.log`。此用例的退休发生在两次 `llama_decode` 之间，**尚未验证退休与已提交的 GPU kernel 真正重叠**。
 

@@ -34,7 +34,9 @@ HistoricalKvActiveSet::AcquireResult HistoricalKvActiveSet::acquire(
             [&](HistoricalKvHandle handle) { return same_handle(handle, item.handle); });
         if (admitted) continue;
 
-        auto lease = active->repository_->acquire_new(item.handle);
+        auto lease = item.gpu_ready_writing ?
+            active->repository_->acquire_gpu_ready_writing(item.handle) :
+            active->repository_->acquire_new(item.handle);
         if (!lease) {
             if (!item.mandatory) continue;
             // Destroying active drops every lease obtained earlier in this
