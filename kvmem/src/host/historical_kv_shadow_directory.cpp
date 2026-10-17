@@ -38,6 +38,7 @@ struct HistoricalKvShadowDirectory::AppendReservation::Impl {
     std::map<uint32_t, Entry> nodes;
     std::vector<Producer> contexts;
     std::vector<KvMemBlock> table, pending;
+    std::vector<uint32_t> position_order;
 };
 
 HistoricalKvShadowDirectory::AppendReservation::AppendReservation(std::unique_ptr<Impl> impl)
@@ -61,6 +62,7 @@ HistoricalKvShadowDirectory::prepare_append_reservation(
     r->repository = repository; r->storage = storage;
     r->limit = capacity; r->block_tokens = store.config().block_tokens;
     r->table.reserve(capacity);
+    r->position_order.reserve(capacity);
     r->pending.reserve(capacity);
     r->contexts.reserve(capacity);
     for (uint32_t id = 0; id < capacity; ++id) {
@@ -84,6 +86,7 @@ bool HistoricalKvShadowDirectory::install_append_reservation(
         store.historical_shadow_directory_ != this || repository_id_ || !entries_.empty() ||
         reserved_append_mode_ || store.config().block_tokens != r.block_tokens) return false;
     store.blocks_.swap(r.table);
+    store.position_order_.swap(r.position_order);
     repository_id_ = r.repository->repository_id();
     reserved_append_capacity_ = r.limit;
     reserved_append_mode_ = true;
@@ -104,7 +107,8 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
         store.block_count() != r.used || store.gc_ || store.historical_shadow_directory_ != this ||
         store.config().block_tokens != r.block_tokens || !tail_span_matches(store) ||
         store.append_tail_room() || writers.size() > r.limit - r.used ||
-        writers.size() > producers.capacity() || store.blocks_.capacity() < r.limit) return false;
+        writers.size() > producers.capacity() || store.blocks_.capacity() < r.limit ||
+        store.position_order_.capacity() < r.limit) return false;
     r.pending.clear();
     uint64_t position = store.total_tokens();
     uint64_t previous_logical_id = r.last_logical_id;
@@ -143,6 +147,8 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
         producers.push_back(std::move(context));
     }
     store.blocks_.insert(store.blocks_.end(), r.pending.begin(), r.pending.end());
+    for (size_t i = 0; i < writers.size(); ++i)
+        store.position_order_.push_back(r.used + uint32_t(i));
     store.total_tokens_ = uint32_t(position);
     r.used += uint32_t(writers.size());
     if (!writers.empty()) r.last_logical_id = previous_logical_id;
@@ -274,12 +280,16 @@ bool HistoricalKvShadowDirectory::append_blocks(
     if (count > store.blocks_.capacity())
         store.blocks_.reserve(std::max(count, std::min<size_t>(INT32_MAX,
             std::max<size_t>(1, store.blocks_.capacity()) * 2)));
+    if (count > store.position_order_.capacity())
+        store.position_order_.reserve(std::max(count, std::min<size_t>(INT32_MAX,
+            std::max<size_t>(1, store.position_order_.capacity()) * 2)));
     size_t i = 0;
     for (auto & context : contexts) context->writer_ = std::move(writers[i++]);
     // map node transfer uses the same allocator and a nonthrowing integer
     // comparator. The reserved vector only copies plain block descriptors.
     entries_.merge(pending);
     store.blocks_.insert(store.blocks_.end(), blocks.begin(), blocks.end());
+    for (const auto & block : blocks) store.position_order_.push_back(block.block_id);
     store.total_tokens_ = static_cast<uint32_t>(position);
     repository_id_ = repository->repository_id();
     producers = std::move(contexts);
@@ -370,12 +380,38 @@ bool HistoricalKvShadowDirectory::confirm_reclaimed(uint32_t block_id) {
     return true;
 }
 
+bool HistoricalKvShadowDirectory::detach_reclaimed_span(
+        KvMemStore & store, uint32_t block_id) noexcept {
+    if (store.historical_shadow_directory_ != this || block_id >= store.block_count()) return false;
+    auto entry = entries_.find(block_id);
+    if (entry == entries_.end()) return false;
+    if (entry->second.state != State::Reclaimed && !confirm_reclaimed(block_id)) return false;
+    if (!entry->second.producer.expired()) return false;
+    auto & block = store.blocks_[block_id];
+    if (!same_span(entry->second.binding, block) || block.gpu_slot >= 0 ||
+        block.cpu_slot >= 0 || block.nvme_slot >= 0 || block.in_flight ||
+        block.in_working_set) return false;
+    const auto indexed = std::find(store.position_order_.begin(),
+                                   store.position_order_.end(), block_id);
+    if (indexed == store.position_order_.end()) return false;
+    store.position_order_.erase(indexed);
+    block.n_tokens = 0;
+    block.tier = KvTier::CPU;
+    return true;
+}
+
 bool HistoricalKvShadowDirectory::tail_span_matches(const KvMemStore & store) const {
     if (entries_.empty()) return true;
-    const auto & record = entries_.rbegin()->second;
-    const auto & entry = record.binding;
-    return entry.block_id < store.block_count() &&
-           same_span(entry, store.blocks()[entry.block_id]);
+    for (auto it = store.position_order_.rbegin(); it != store.position_order_.rend(); ++it) {
+        const auto record = entries_.find(*it);
+        if (record == entries_.end()) continue;
+        const auto & entry = record->second.binding;
+        return entry.block_id < store.block_count() &&
+               same_span(entry, store.blocks()[entry.block_id]);
+    }
+    return std::all_of(entries_.begin(), entries_.end(), [](const auto & record) {
+        return record.second.state == State::Reclaimed;
+    });
 }
 
 void HistoricalKvShadowDirectory::validate_append(

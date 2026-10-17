@@ -2959,6 +2959,16 @@ bool llama_memory_kvmem::begin_active_ubatch(
         if (trace_) kvmem_diag("KVMEM_TRACE historical_active_skip block=%u slot=%d\n",
                                id, block.gpu_slot);
     }
+    // Reclamation is asynchronous. At this quiescent active boundary, drop
+    // fully released spans from the position index without waiting for GC.
+    // Their stable table records remain tombstones until slot reuse is safe.
+    for (uint32_t id = 0; id < store.block_count(); ++id) {
+        const auto & block = store.blocks()[id];
+        if (block.n_tokens && block.gpu_slot < 0 &&
+            runtime_->detach_reclaimed_historical_block(id) && trace_)
+            kvmem_diag("KVMEM_TRACE historical_position_detach block=%u logical=%llu\n",
+                id, static_cast<unsigned long long>(block.logical_id));
+    }
     release_on_failure.keep = true;
     return true;
 }

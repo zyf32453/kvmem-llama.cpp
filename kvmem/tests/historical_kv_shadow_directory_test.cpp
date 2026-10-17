@@ -669,6 +669,54 @@ static void test_task_completion_allows_autonomous_reclaim() {
     }
 }
 
+static void test_detached_reclaimed_span_keeps_position_order() {
+    auto cfg = config();
+    cfg.store.prefill_budget = 8;
+    KvMemRuntime runtime(cfg);
+    runtime.register_append(12);
+    auto repo = std::make_shared<HistoricalKvRepository>(1);
+    auto writer = repo->begin_write(1, 4, 4, 1, 0,
+        [](const HistoricalKvHandle &) { return true; });
+    CHECK(writer.has_value());
+    if (!writer) return;
+    const auto handle = writer->handle();
+    HistoricalKvShadowDirectory::Producer producer;
+    CHECK(runtime.bind_historical_full_block(1, repo, handle, *writer, producer));
+    runtime.store().set_block_gpu_slot(1, 2);
+    CHECK(!runtime.detach_reclaimed_historical_block(1));
+    CHECK(repo->retire(handle) == HistoricalKvRepository::RetireResult::Committed);
+    CHECK(runtime.unbind_retired_historical_block(1));
+    producer.reset();
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete);
+    CHECK(!runtime.detach_reclaimed_historical_block(1));
+    runtime.store().set_block_gpu_slot(1, -1);
+    CHECK(runtime.detach_reclaimed_historical_block(1));
+    auto & store = runtime.store();
+    CHECK(!runtime.detach_reclaimed_historical_block(1) &&
+          store.block_count() == 3 && store.total_tokens() == 12 &&
+          store.chronological_ids() == std::vector<uint32_t>({0, 2}) &&
+          store.block_id_containing(5) == -1 && store.block_id_containing(8) == 2 &&
+          store.gc_missing_required_prefix_block(4, 8, 12) == store.block_count());
+    runtime.register_append(4);
+    CHECK(store.chronological_ids() == std::vector<uint32_t>({0, 2, 3}) &&
+          store.pick_topk_blocks() == std::vector<uint32_t>({0, 2, 3}));
+    store.set_runtime_select_budget(8);
+    CHECK(store.pick_topk_blocks() == std::vector<uint32_t>({0, 3}) &&
+          store.pick_prefill_pressure_blocks() == std::vector<uint32_t>({0, 3}) &&
+          store.pick_semantic_groups({{4, 12}}, {10.0}) == std::vector<uint32_t>({0, 3}));
+    store.set_media_ranges({{4, 12}});
+    CHECK(store.pick_topk_blocks() == std::vector<uint32_t>({0, 3}));
+    store.set_media_ranges({});
+    store.set_runtime_select_budget(0);
+    const auto plan = store.set_selection({3, 0, 2});
+    CHECK(plan.remaps.size() == 3 && plan.remaps[0].block_id == 0 &&
+          plan.remaps[1].block_id == 2 && plan.remaps[2].block_id == 3);
+    const auto dropped = runtime.truncate_to(4);
+    CHECK(dropped.size() == 2 && store.block_count() == 1 &&
+          store.total_tokens() == 4 && store.chronological_ids() == std::vector<uint32_t>({0}) &&
+          runtime.historical_shadow_directory().size() == 0);
+}
+
 int main() {
     test_full_block_binding_and_runtime_owner_move();
     test_truncate_then_reuse_dense_id();
@@ -681,6 +729,7 @@ int main() {
     test_read_admission_requires_live_exact_generation();
     test_binding_captures_exact_payload_owner();
     test_task_completion_allows_autonomous_reclaim();
+    test_detached_reclaimed_span_keeps_position_order();
     if (failures != 0) {
         std::printf("FAILED: %d check(s)\n", failures);
         return 1;

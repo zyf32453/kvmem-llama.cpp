@@ -342,6 +342,9 @@ public:
     uint32_t block_count() const { return static_cast<uint32_t>(blocks_.size()); }
     uint32_t total_tokens() const { return total_tokens_; }
     const std::vector<KvMemBlock> &blocks() const { return blocks_; }
+    // Physical table indices in original-position order. Today the legacy
+    // append path makes this 0..N-1; reclaimed-slot reuse will not.
+    const std::vector<uint32_t> & chronological_ids() const { return position_order_; }
 
     // Optional historical-block GC. The owner must stop the worker before
     // destroying the physical backing store captured by its release callback.
@@ -356,6 +359,8 @@ public:
     void gc_end_step() { gc_view_.reset(); }
     bool is_live(uint32_t id) const;
     std::shared_ptr<KvMemGc::Lease> gc_checkpoint_lease() const;
+    // Returns UINT32_MAX when the required span is intact, a deleted slot ID
+    // when still represented, or block_count() when a recycled slot left a gap.
     uint32_t gc_missing_required_prefix_block(uint32_t begin, uint32_t end,
                                                uint32_t prefix_end) const;
 
@@ -376,8 +381,8 @@ public:
     // inverse of register_append). Used by the kvmem prefix cache to rewind the
     // block table when resuming at a prompt-end checkpoint whose position is
     // BELOW the live end. A partially-covered trailing block is shrunk in place;
-    // fully-past blocks are popped from the back (block_id == vector index, so
-    // popping keeps indices dense). Returns the popped blocks + their tier slots
+    // fully-past blocks and detached tombstones are popped from the back.
+    // Returns the popped live blocks + their tier slots
     // so the caller can release CPU/NVMe storage. `token_pos >= total_tokens_`
     // is a no-op (returns empty).
     std::vector<KvMemDroppedBlock> truncate_to(uint32_t token_pos);
@@ -418,7 +423,7 @@ public:
 
     // Built-in v1 selection: top-k blocks by cumulative attention score, always
     // keeping the first `sink_blocks` and last `recent_blocks` blocks. Returns
-    // selected block IDs in ascending (window) order. Honors the budget.
+    // selected block IDs in chronological (window) order. Honors the budget.
     std::vector<uint32_t> pick_topk_blocks() const;
     // Same selector with additional mandatory block IDs. Mandatory blocks
     // consume ordinary top-k slots; they are never appended beyond the budget.
@@ -492,8 +497,8 @@ public:
     // stage-in or a resident block exceeding the configured drift thresholds
     // is marked raw_refresh and rebuilt from the CPU raw-K mirror; otherwise a
     // resident move is an in-place delta rotation. `selected_ids` need not be sorted;
-    // it is sorted ascending internally so window order is deterministic (sink
-    // first ... recent last). Blocks are packed contiguously from window pos 0.
+    // it is sorted by original position internally so window order is
+    // deterministic (sink first ... recent last). Blocks are packed from 0.
     KvMemPlan set_selection(std::vector<uint32_t> selected_ids,
                            bool force_raw_refresh = false);
     // Metadata only; every live GPU block must be selected and already valid.
@@ -515,6 +520,7 @@ public:
     void set_media_ranges(std::vector<std::pair<uint32_t, uint32_t>> ranges) { media_ranges_ = std::move(ranges); }
     size_t allocated_bytes() const {
         return sizeof(*this) + blocks_.capacity()*sizeof(KvMemBlock) +
+            position_order_.capacity()*sizeof(uint32_t) +
             media_ranges_.capacity()*sizeof(std::pair<uint32_t,uint32_t>);
     }
 private:
@@ -522,6 +528,7 @@ private:
     HistoricalKvShadowDirectory * historical_shadow_directory_ = nullptr;
     uint32_t runtime_select_budget_ = 0;
     std::vector<KvMemBlock> blocks_;
+    std::vector<uint32_t> position_order_;
     uint32_t total_tokens_ = 0;  // total appended context length
     std::shared_ptr<KvMemGc> gc_;
     std::shared_ptr<const KvMemGc::View> gc_view_;

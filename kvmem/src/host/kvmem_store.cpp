@@ -27,7 +27,7 @@ void KvMemStore::gc_begin_step() {
 }
 
 bool KvMemStore::is_live(uint32_t id) const {
-    return id < block_count() &&
+    return id < block_count() && blocks_[id].n_tokens != 0 &&
         (!gc_ || (gc_view_ && gc_->is_live(id, gc_view_))) &&
         (!historical_shadow_directory_ ||
          historical_shadow_directory_->allows_new_selection(id));
@@ -36,7 +36,8 @@ bool KvMemStore::is_live(uint32_t id) const {
 std::shared_ptr<KvMemGc::Lease> KvMemStore::gc_checkpoint_lease() const {
     if (!gc_) return {};
     std::vector<uint32_t> ids;
-    for (const auto &b : blocks_) {
+    for (uint32_t id : position_order_) {
+        const auto & b = blocks_[id];
         if (b.in_working_set || b.tier == KvTier::GPU) ids.push_back(b.block_id);
     }
     return gc_->pin(ids);
@@ -51,12 +52,18 @@ uint32_t KvMemStore::gc_missing_required_prefix_block(uint32_t begin,
     if (end <= begin) return UINT32_MAX;
     end = std::min(end, total_tokens_);
     if (end <= begin) return UINT32_MAX;
-    const auto first = block_id_containing(begin);
-    const auto last = block_id_containing(end - 1);
-    for (uint32_t id = static_cast<uint32_t>(first); id <= static_cast<uint32_t>(last); ++id) {
+    uint32_t covered = begin;
+    for (uint32_t id : position_order_) {
+        const auto & block = blocks_[id];
+        if (block.orig_pos_end() <= covered) continue;
+        if (block.orig_pos_start >= end) break;
+        if (block.orig_pos_start > covered) return block_count();
         if (!is_live(id)) return id;
+        covered = std::min(end, block.orig_pos_end());
+        if (covered == end) return UINT32_MAX;
     }
-    return UINT32_MAX;
+    // There is no table record for part of the required prefix.
+    return covered == end ? UINT32_MAX : block_count();
 }
 
 void KvMemStore::gc_validate_mandatory(const std::vector<uint32_t> &ids) const {
@@ -228,22 +235,25 @@ KvMemKeepAllocation resolve_kvmem_keep_allocation(
 }
 
 int32_t KvMemStore::block_id_containing(uint32_t pos) const {
-    if (blocks_.empty() || pos >= total_tokens_) {
+    if (position_order_.empty() || pos >= total_tokens_) {
         return -1;
     }
-    auto it = std::upper_bound(blocks_.begin(), blocks_.end(), pos,
-        [](uint32_t position, const KvMemBlock & block) {
-            return position < block.orig_pos_start;
+    auto it = std::upper_bound(position_order_.begin(), position_order_.end(), pos,
+        [this](uint32_t position, uint32_t id) {
+            return position < blocks_[id].orig_pos_start;
         });
-    if (it == blocks_.begin()) return -1;
+    if (it == position_order_.begin()) return -1;
     --it;
-    return pos < it->orig_pos_end() ? static_cast<int32_t>(it->block_id) : -1;
+    const auto & block = blocks_[*it];
+    return pos < block.orig_pos_end() ? static_cast<int32_t>(*it) : -1;
 }
 
 uint32_t KvMemStore::append_tail_room() const noexcept {
-    if (blocks_.empty() || (historical_shadow_directory_ &&
-            historical_shadow_directory_->fixes_span(blocks_.back().block_id))) return 0;
-    return cfg_.block_tokens - blocks_.back().n_tokens;
+    if (position_order_.empty()) return 0;
+    const auto & tail = blocks_[position_order_.back()];
+    if (historical_shadow_directory_ &&
+        historical_shadow_directory_->fixes_span(tail.block_id)) return 0;
+    return cfg_.block_tokens - tail.n_tokens;
 }
 
 uint64_t KvMemStore::additional_blocks_for_append(uint64_t tokens) const {
@@ -270,11 +280,14 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
     if (count > blocks_.capacity())
         blocks_.reserve(static_cast<size_t>(std::max<uint64_t>(count,
             std::min<uint64_t>(INT32_MAX, std::max<uint64_t>(1, blocks_.capacity()) * 2))));
+    if (count > position_order_.capacity())
+        position_order_.reserve(static_cast<size_t>(std::max<uint64_t>(count,
+            std::min<uint64_t>(INT32_MAX, std::max<uint64_t>(1, position_order_.capacity()) * 2))));
 
     // Extend the trailing partial block first, then spill into new blocks.
     uint32_t remaining = n_new_tokens;
     if (append_tail_room() != 0) {
-        KvMemBlock &last = blocks_.back();
+        KvMemBlock &last = blocks_[position_order_.back()];
         if (last.n_tokens < bt) {
             const uint32_t room = bt - last.n_tokens;
             const uint32_t take = std::min(room, remaining);
@@ -292,6 +305,7 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
         b.n_tokens = std::min(bt, remaining);
         b.baked_pos = static_cast<int64_t>(b.orig_pos_start);  // baked at true pos after prefill
         blocks_.push_back(b);
+        position_order_.push_back(b.block_id);
         if (gc_) {
             gc_->register_block(b.block_id, b.n_tokens == bt);
             if (b.block_id < cfg_.sink_blocks) {
@@ -310,27 +324,30 @@ std::vector<KvMemDroppedBlock> KvMemStore::truncate_to(uint32_t token_pos) {
     if (token_pos >= total_tokens_) return dropped;
     // Allocate before changing the dense table. An allocation failure must
     // not leave its historical identity directory describing removed blocks.
-    const auto first_dropped = std::lower_bound(blocks_.begin(), blocks_.end(), token_pos,
-        [](const KvMemBlock & block, uint32_t pos) { return block.orig_pos_start < pos; });
-    dropped.reserve(static_cast<size_t>(blocks_.end() - first_dropped));
-    // Pop fully-past blocks from the back, then shrink the trailing partial one.
+    const auto first_dropped = std::lower_bound(position_order_.begin(), position_order_.end(), token_pos,
+        [this](uint32_t id, uint32_t pos) { return blocks_[id].orig_pos_start < pos; });
+    dropped.reserve(static_cast<size_t>(position_order_.end() - first_dropped));
+    // Pop fully-past blocks from the back, including any already detached
+    // tombstones. The original end position is not the sum of live lengths
+    // once a reclaimed span has been removed from the position index.
     while (!blocks_.empty() && blocks_.back().orig_pos_start >= token_pos) {
         const KvMemBlock &b = blocks_.back();
-        dropped.push_back(KvMemDroppedBlock{b.block_id, b.tier,
+        if (b.n_tokens) dropped.push_back(KvMemDroppedBlock{b.block_id, b.tier,
                                             b.gpu_slot, b.cpu_slot, b.nvme_slot});
-        total_tokens_ -= b.n_tokens;
+        if (!position_order_.empty() && position_order_.back() == b.block_id)
+            position_order_.pop_back();
         blocks_.pop_back();
     }
     if (gc_) gc_->forget_tail(block_count());
-    if (!blocks_.empty()) {
-        KvMemBlock &last = blocks_.back();
+    if (!position_order_.empty()) {
+        KvMemBlock &last = blocks_[position_order_.back()];
         if (last.orig_pos_end() > token_pos) {
             const uint32_t keep = token_pos - last.orig_pos_start;
-            total_tokens_ -= (last.n_tokens - keep);
             last.n_tokens = keep;
             gc_sync_block(last.block_id);
         }
     }
+    total_tokens_ = token_pos;
     if (historical_shadow_directory_)
         historical_shadow_directory_->prune_dropped(*this);
     return dropped;
@@ -490,62 +507,86 @@ std::vector<uint32_t> KvMemStore::pick_topk_blocks(const std::vector<uint32_t> &
 std::vector<uint32_t> KvMemStore::constrain_media(std::vector<uint32_t> selected,
         const std::vector<uint32_t> & mandatory, uint32_t budget, bool recency) const {
     const uint32_t n = block_count();
-    if (media_ranges_.empty() || n <= budget || budget == 0) return selected;
+    const uint32_t active = static_cast<uint32_t>(position_order_.size());
+    if (media_ranges_.empty() || active <= budget || budget == 0) return selected;
     std::vector<std::pair<uint32_t, uint32_t>> groups;
     for (const auto & range : media_ranges_) {
         if (range.first >= total_tokens_ || range.second <= range.first) continue;
-        const uint32_t first = static_cast<uint32_t>(block_id_containing(range.first));
-        const uint32_t end = static_cast<uint32_t>(
-            block_id_containing(std::min(range.second, total_tokens_) - 1)) + 1;
+        const uint32_t first = static_cast<uint32_t>(std::lower_bound(
+            position_order_.begin(), position_order_.end(), range.first,
+            [this](uint32_t id, uint32_t pos) { return blocks_[id].orig_pos_end() <= pos; }) -
+            position_order_.begin());
+        const uint32_t end = static_cast<uint32_t>(std::lower_bound(
+            position_order_.begin(), position_order_.end(),
+            std::min(range.second, total_tokens_),
+            [this](uint32_t id, uint32_t pos) { return blocks_[id].orig_pos_start < pos; }) -
+            position_order_.begin());
+        if (first >= end) continue;
+        uint32_t covered = range.first;
+        for (uint32_t rank = first; rank < end; ++rank) {
+            const auto & block = blocks_[position_order_[rank]];
+            if (block.orig_pos_start > covered) break;
+            covered = std::max(covered, block.orig_pos_end());
+        }
+        if (covered < std::min(range.second, total_tokens_)) continue;
         if (!groups.empty() && first < groups.back().second) groups.back().second = std::max(groups.back().second, end);
         else groups.emplace_back(first, end);
     }
     std::vector<uint32_t> lo(n), hi(n);
-    for (uint32_t i = 0; i < n; ++i) { lo[i] = i; hi[i] = i + 1; }
-    for (const auto & group : groups) for (uint32_t i = group.first; i < group.second; ++i) {
-        lo[i] = group.first; hi[i] = group.second;
+    for (uint32_t rank = 0; rank < active; ++rank) {
+        const uint32_t id = position_order_[rank];
+        lo[id] = rank; hi[id] = rank + 1;
+    }
+    for (const auto & group : groups) for (uint32_t rank = group.first; rank < group.second; ++rank) {
+        const uint32_t id = position_order_[rank];
+        lo[id] = group.first; hi[id] = group.second;
     }
     std::vector<bool> kept(n, false);
     uint32_t count = 0;
     auto keep = [&](uint32_t id, bool required) {
         if (id >= n) return;
-        for (uint32_t i = lo[id]; i < hi[id]; ++i) {
-            if (!is_live(i)) {
+        for (uint32_t rank = lo[id]; rank < hi[id]; ++rank) {
+            if (!is_live(position_order_[rank])) {
                 if (required) throw std::runtime_error("KVMem GC: required media group contains deleted block");
                 return;
             }
         }
         uint32_t need = 0;
-        for (uint32_t i = lo[id]; i < hi[id]; ++i) need += !kept[i];
+        for (uint32_t rank = lo[id]; rank < hi[id]; ++rank) need += !kept[position_order_[rank]];
         if (count + need > budget) {
             if (required) throw std::runtime_error("mandatory image group and query exceed KV selection budget");
             return;
         }
-        for (uint32_t i = lo[id]; i < hi[id]; ++i) kept[i] = true;
+        for (uint32_t rank = lo[id]; rank < hi[id]; ++rank) kept[position_order_[rank]] = true;
         count += need;
     };
-    for (uint32_t i = 0; i < std::min(n, cfg_.sink_blocks); ++i) keep(i, true);
+    for (uint32_t rank = 0; rank < std::min(active, cfg_.sink_blocks); ++rank)
+        keep(position_order_[rank], true);
     // Keep the latest image as a whole, including its boundary blocks.
-    if (!groups.empty()) keep(groups.back().first, true);
+    if (!groups.empty()) keep(position_order_[groups.back().first], true);
     // Retrieval suffixes are best effort when they exceed the budget. Preserve
     // the newest rows after reserving the sink and latest complete image; the
     // caller must skip query replay if any replay block was dropped.
     // During prefill these are incoming rows, which must all have slots.
     auto newest = mandatory;
-    std::sort(newest.begin(), newest.end(), std::greater<uint32_t>());
+    newest.erase(std::remove_if(newest.begin(), newest.end(),
+        [n](uint32_t id) { return id >= n; }), newest.end());
+    std::sort(newest.begin(), newest.end(), [this](uint32_t a, uint32_t b) {
+        return blocks_[a].orig_pos_start > blocks_[b].orig_pos_start;
+    });
     for (auto id : newest) keep(id, recency);
     auto better = [&](uint32_t a, uint32_t b) {
         if (!recency && blocks_[a].attn_score != blocks_[b].attn_score) return blocks_[a].attn_score > blocks_[b].attn_score;
-        return a > b;
+        return blocks_[a].orig_pos_start > blocks_[b].orig_pos_start;
     };
     std::sort(selected.begin(), selected.end(), better);
     for (auto id : selected) keep(id, false);
     std::vector<uint32_t> rest;
-    for (uint32_t i = 0; i < n; ++i) if (!kept[i] && is_live(i)) rest.push_back(i);
+    for (uint32_t id : position_order_) if (!kept[id] && is_live(id)) rest.push_back(id);
     std::sort(rest.begin(), rest.end(), better);
     for (auto id : rest) keep(id, false);
     selected.clear();
-    for (uint32_t i = 0; i < n; ++i) if (kept[i]) selected.push_back(i);
+    for (uint32_t id : position_order_) if (kept[id]) selected.push_back(id);
     return selected;
 }
 
@@ -556,17 +597,18 @@ std::vector<uint32_t> KvMemStore::pick_prefill_pressure_blocks() const {
 std::vector<uint32_t> KvMemStore::pick_prefill_ungrouped(
         const std::vector<uint32_t> &mandatory_blocks) const {
     const uint32_t n = block_count();
+    const uint32_t active = static_cast<uint32_t>(position_order_.size());
     std::vector<uint32_t> selected;
-    if (n == 0) return selected;
+    if (active == 0) return selected;
 
     const uint32_t budget = prefill_budget_blocks();
-    if (budget == 0 || n <= budget) {
-        selected.reserve(n);
-        for (uint32_t i = 0; i < n; ++i) if (is_live(i)) selected.push_back(i);
+    if (budget == 0 || active <= budget) {
+        selected.reserve(active);
+        for (uint32_t id : position_order_) if (is_live(id)) selected.push_back(id);
         return selected;
     }
 
-    const uint32_t sink = std::min({cfg_.sink_blocks, budget, n});
+    const uint32_t sink = std::min({cfg_.sink_blocks, budget, active});
     std::vector<uint8_t> kept(n, 0);
     uint32_t kept_count = 0;
     auto keep = [&](uint32_t id) {
@@ -575,7 +617,8 @@ std::vector<uint32_t> KvMemStore::pick_prefill_ungrouped(
             ++kept_count;
         }
     };
-    for (uint32_t id = 0; id < sink && kept_count < budget; ++id) keep(id);
+    for (uint32_t rank = 0; rank < sink && kept_count < budget; ++rank)
+        keep(position_order_[rank]);
     // Newest mandatory first so a huge query suffix cannot evict the tail
     // or throw. Drop older mandatory blocks that do not fit.
     uint32_t mand_kept = 0;
@@ -601,11 +644,11 @@ std::vector<uint32_t> KvMemStore::pick_prefill_ungrouped(
                      "KVMEM_TRACE mandatory_trim policy=prefill kept=%u dropped=%u budget=%u\n",
                      mand_kept, mand_unique - mand_kept, budget);
     }
-    for (uint32_t id = n; id > 0 && kept_count < budget; --id) {
-        keep(id - 1);
+    for (uint32_t rank = active; rank > 0 && kept_count < budget; --rank) {
+        keep(position_order_[rank - 1]);
     }
     selected.reserve(kept_count);
-    for (uint32_t id = 0; id < n; ++id) {
+    for (uint32_t id : position_order_) {
         if (kept[id]) selected.push_back(id);
     }
     return selected;
@@ -618,30 +661,32 @@ std::vector<uint32_t> KvMemStore::pick_topk_blocks() const {
 std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         const std::vector<uint32_t> &mandatory_blocks) const {
     const uint32_t n = block_count();
+    const uint32_t active = static_cast<uint32_t>(position_order_.size());
     std::vector<uint32_t> selected;
-    if (n == 0) return selected;
+    if (active == 0) return selected;
 
     const uint32_t budget = budget_blocks();
-    if (budget == 0 || n <= budget) {
+    if (budget == 0 || active <= budget) {
         // Everything fits: select all in order.
-        selected.reserve(n);
-        for (uint32_t i = 0; i < n; ++i) if (is_live(i)) selected.push_back(i);
+        selected.reserve(active);
+        for (uint32_t id : position_order_) if (is_live(id)) selected.push_back(id);
         return selected;
     }
 
     // Always-keep windows: first `sink_blocks` and last `recent_blocks`.
-    const uint32_t sink = std::min(cfg_.sink_blocks, n);
+    const uint32_t sink = std::min(cfg_.sink_blocks, active);
     // Zero is literal: do not reserve any suffix blocks.  Earlier versions used
     // zero as an implicit "auto = budget/4", which made a 200K-token budget
     // silently pin 50K tokens and was both surprising and hard to control.
-    const uint32_t recent = std::min(cfg_.recent_blocks, n);
+    const uint32_t recent = std::min(cfg_.recent_blocks, active);
 
     std::vector<bool> kept(n, false);
     uint32_t kept_count = 0;
     auto keep = [&](uint32_t id) {
         if (id < n && is_live(id) && !kept[id]) { kept[id] = true; ++kept_count; }
     };
-    for (uint32_t i = 0; i < sink && kept_count < budget; ++i) keep(i);
+    for (uint32_t i = 0; i < sink && kept_count < budget; ++i)
+        keep(position_order_[i]);
     uint32_t mand_kept = 0;
     uint32_t mand_unique = 0;
     {
@@ -666,7 +711,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
                      mand_kept, mand_unique - mand_kept, budget);
     }
     for (uint32_t i = 0; i < recent && kept_count < budget; ++i) {
-        keep(n - 1 - i);
+        keep(position_order_[active - 1 - i]);
     }
 
     auto take_top = [&](uint32_t quota, auto score_fn) {
@@ -684,7 +729,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
             const double sa = score_fn(blocks_[a]);
             const double sb = score_fn(blocks_[b]);
             if (sa != sb) return sa > sb;
-            return a > b;
+            return blocks_[a].orig_pos_start > blocks_[b].orig_pos_start;
         };
         if (need < candidates.size()) {
             std::nth_element(candidates.begin(), candidates.begin() + need,
@@ -721,7 +766,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
             });
         }
         selected.reserve(kept_count);
-        for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t i : position_order_) {
             if (kept[i]) selected.push_back(i);
         }
         return selected;
@@ -735,13 +780,13 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
             if (!kept[i] && is_live(i)) candidates.push_back(i);
         }
         const uint32_t need = budget - kept_count;
-        // Partial sort by attn_score desc; tie-break by recency (higher id) so
+        // Partial sort by attn_score desc; tie-break by original recency so
         // selection is deterministic.
         auto better = [&](uint32_t a, uint32_t b) {
             if (blocks_[a].attn_score != blocks_[b].attn_score) {
                 return blocks_[a].attn_score > blocks_[b].attn_score;
             }
-            return a > b;
+            return blocks_[a].orig_pos_start > blocks_[b].orig_pos_start;
         };
         if (need < candidates.size()) {
             std::nth_element(candidates.begin(), candidates.begin() + need,
@@ -752,7 +797,7 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
     }
 
     selected.reserve(kept_count);
-    for (uint32_t i = 0; i < n; ++i) {
+    for (uint32_t i : position_order_) {
         if (kept[i]) selected.push_back(i);
     }
     return selected;
@@ -763,8 +808,9 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
         const std::vector<double> &group_scores,
         const std::vector<uint32_t> &mandatory_blocks) const {
     const uint32_t n = block_count();
+    const uint32_t active = static_cast<uint32_t>(position_order_.size());
     std::vector<uint32_t> selected;
-    if (n == 0) return selected;
+    if (active == 0) return selected;
     if (groups.size() != group_scores.size()) {
         throw std::runtime_error(
             "KVMem semantic group spans/scores size mismatch");
@@ -772,9 +818,9 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
     gc_validate_mandatory(mandatory_blocks);
 
     const uint32_t budget = budget_blocks();
-    if (budget == 0 || n <= budget) {
-        selected.reserve(n);
-        for (uint32_t id = 0; id < n; ++id) if (is_live(id)) selected.push_back(id);
+    if (budget == 0 || active <= budget) {
+        selected.reserve(active);
+        for (uint32_t id : position_order_) if (is_live(id)) selected.push_back(id);
         return selected;
     }
 
@@ -787,9 +833,10 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
         }
     };
 
-    const uint32_t sink = std::min(cfg_.sink_blocks, n);
-    const uint32_t recent = std::min(cfg_.recent_blocks, n);
-    for (uint32_t id = 0; id < sink && kept_count < budget; ++id) keep(id);
+    const uint32_t sink = std::min(cfg_.sink_blocks, active);
+    const uint32_t recent = std::min(cfg_.recent_blocks, active);
+    for (uint32_t rank = 0; rank < sink && kept_count < budget; ++rank)
+        keep(position_order_[rank]);
     uint32_t mand_kept = 0;
     uint32_t mand_unique = 0;
     {
@@ -814,7 +861,7 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
                      mand_kept, mand_unique - mand_kept, budget);
     }
     for (uint32_t i = 0; i < recent && kept_count < budget; ++i) {
-        keep(n - 1 - i);
+        keep(position_order_[active - 1 - i]);
     }
 
     struct Candidate {
@@ -825,20 +872,31 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
     };
     std::vector<Candidate> candidates;
     candidates.reserve(groups.size());
-    const uint64_t covered_tokens =
-        static_cast<uint64_t>(blocks_.back().orig_pos_start) +
-        blocks_.back().n_tokens;
+    const uint64_t covered_tokens = total_tokens_;
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const uint32_t begin = groups[g].first;
         const uint32_t end = groups[g].second;
         if (end <= begin || begin >= covered_tokens) continue;
         const uint32_t capped_end = static_cast<uint32_t>(
             std::min<uint64_t>(end, covered_tokens));
-        const uint32_t first = static_cast<uint32_t>(block_id_containing(begin));
-        const uint32_t last = static_cast<uint32_t>(block_id_containing(capped_end - 1));
-        if (first >= n) continue;
+        const uint32_t first = static_cast<uint32_t>(std::lower_bound(
+            position_order_.begin(), position_order_.end(), begin,
+            [this](uint32_t id, uint32_t pos) { return blocks_[id].orig_pos_end() <= pos; }) -
+            position_order_.begin());
+        const uint32_t end_rank = static_cast<uint32_t>(std::lower_bound(
+            position_order_.begin(), position_order_.end(), capped_end,
+            [this](uint32_t id, uint32_t pos) { return blocks_[id].orig_pos_start < pos; }) -
+            position_order_.begin());
+        if (first >= end_rank) continue;
+        uint32_t covered = begin;
+        for (uint32_t rank = first; rank < end_rank; ++rank) {
+            const auto & block = blocks_[position_order_[rank]];
+            if (block.orig_pos_start > covered) break;
+            covered = std::max(covered, block.orig_pos_end());
+        }
+        if (covered < capped_end) continue;
         candidates.push_back(Candidate{
-            g, first, std::min(last, n - 1), group_scores[g]});
+            g, first, end_rank - 1, group_scores[g]});
     }
 
     // GPU has already reduced fine-grained sub-block scores to one score per
@@ -854,27 +912,27 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
     uint32_t skipped_for_budget = 0;
     for (const Candidate &candidate : candidates) {
         bool live_group = true;
-        for (uint32_t id = candidate.first; id <= candidate.last; ++id) {
-            live_group = live_group && is_live(id);
+        for (uint32_t rank = candidate.first; rank <= candidate.last; ++rank) {
+            live_group = live_group && is_live(position_order_[rank]);
         }
         if (!live_group) continue;
         uint32_t new_blocks = 0;
-        for (uint32_t id = candidate.first; id <= candidate.last; ++id) {
-            new_blocks += kept[id] ? 0u : 1u;
+        for (uint32_t rank = candidate.first; rank <= candidate.last; ++rank) {
+            new_blocks += kept[position_order_[rank]] ? 0u : 1u;
         }
         if (new_blocks > budget - kept_count) {
             ++skipped_for_budget;
             continue;
         }
-        for (uint32_t id = candidate.first; id <= candidate.last; ++id) {
-            keep(id);
+        for (uint32_t rank = candidate.first; rank <= candidate.last; ++rank) {
+            keep(position_order_[rank]);
         }
         ++selected_groups;
         if (kept_count == budget) break;
     }
 
     selected.reserve(kept_count);
-    for (uint32_t id = 0; id < n; ++id) {
+    for (uint32_t id : position_order_) {
         if (kept[id]) selected.push_back(id);
     }
     if (std::getenv("KVMEM_TRACE")) {
@@ -898,16 +956,19 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
 
 KvMemPlan KvMemStore::set_selection(std::vector<uint32_t> selected_ids,
                                     bool force_raw_refresh) {
-    // Sort + dedupe so window order is deterministic (ascending block_id =
-    // original chronological order: sink first ... recent last).
-    std::sort(selected_ids.begin(), selected_ids.end());
-    selected_ids.erase(std::unique(selected_ids.begin(), selected_ids.end()),
-                       selected_ids.end());
-    // Drop out-of-range IDs defensively (external selector could be stale).
+    // Physical table IDs may be reused, so window order follows original
+    // positions rather than numeric slot order.
     selected_ids.erase(
         std::remove_if(selected_ids.begin(), selected_ids.end(),
                        [&](uint32_t id) { return id >= block_count(); }),
         selected_ids.end());
+    std::sort(selected_ids.begin(), selected_ids.end(), [&](uint32_t a, uint32_t b) {
+        if (blocks_[a].orig_pos_start != blocks_[b].orig_pos_start)
+            return blocks_[a].orig_pos_start < blocks_[b].orig_pos_start;
+        return a < b;
+    });
+    selected_ids.erase(std::unique(selected_ids.begin(), selected_ids.end()),
+                       selected_ids.end());
 
     gc_validate_mandatory(selected_ids);
 
@@ -1035,7 +1096,8 @@ KvMemPlan KvMemStore::set_selection(std::vector<uint32_t> selected_ids,
 bool KvMemStore::commit_resident_selection(const std::vector<uint32_t> & selected_ids) {
     gc_validate_mandatory(selected_ids);
     std::vector<uint32_t> resident;
-    for (const auto & b : blocks_) {
+    for (uint32_t id : position_order_) {
+        const auto & b = blocks_[id];
         if (b.gpu_slot >= 0 && b.n_tokens) {
             if (b.tier != KvTier::GPU || b.in_flight) return false;
             resident.push_back(b.block_id);

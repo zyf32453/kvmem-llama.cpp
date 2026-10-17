@@ -521,6 +521,14 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 
 这补齐的是策略意图的提交前置条件，不等于已经实现冗余判定算法、完整生产入口或长时有界元数据。
 
+### 生产位置顺序索引与已回收跨度脱离（2026-10-17）
+
+原 `KvMemStore::blocks_` 同时充当物理表与时间顺序，位置二分查找、sink/recent、recency/top-k、语义组和窗口打包均隐含 `block_id` 递增。一旦复用较小的表下标，新块会被误当成旧块。本轮增加单独的 `position_order_`，存放按原始位置排列的物理表下标；受限 historical 请求在入口按表容量预留它。追加和截断同步维护索引，位置查询及主要选择器按原始位置而不是下标运行，跨已删除空洞的媒体/语义组不会被当成完整组。
+
+当 repository 已确认精确代际释放、producer 不再存在且 GPU/CPU/NVMe 槽位和 in-flight/working-set 权利均清零时，前台在下一次 active 边界把该跨度从位置索引移除；这一步不等待 GC，也不释放 CPU payload。旧表项暂留为不可选的墓碑，旧位置查询返回缺失。宿主回归验证中间块删除后的空洞、紧预算下 sink/recent 选择、跨空洞的媒体/语义组、后续追加、按原始位置打包以及跨墓碑截断。宿主 CTest **27/27**、相关 ASan/UBSan **3/3**、TSan **3/3**、真实 GGUF/CUDA 模型 **35/35** 项及 backend guard 通过。recency/RAM delete 推理完成 356-token 输入、8-token 输出，`proposed=committed=reclaimed=6`，trace 实际记录 **6 次**位置脱离，policy/worker failure 为 0。未开启 historical GC 的普通 retrieval 同样正常退出，完成 420-token prompt eval、8-token 输出和 `layout_writeback move=4`；原始日志前缀为 `position-order-`，位于远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`。
+
+此时位置索引可稀疏，**物理块表和 shadow 目录仍未循环复用**；生产请求仍按整请求一次性预约并在用完后拒绝追加。下一步必须让墓碑在旧计划/设备/任务引用全部结清后获得新代，改造剩余按密集下标寻址的适配器与快照，并完成累计追加至少 10 倍物理容量的端到端验收。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

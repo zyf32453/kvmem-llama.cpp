@@ -169,9 +169,13 @@ public:
     // Reclamation does not depend on calling this, or on another active.
     bool unbind_retired(uint32_t block_id);
     // Marks the tombstone Reclaimed only after this repository confirms the
-    // exact generation's release callback completed. It remains fail-closed
-    // until the runtime actually drops the dense block on truncate.
+    // exact generation's release callback completed. The old identity stays
+    // fail-closed through position detachment and until table-slot reuse.
     bool confirm_reclaimed(uint32_t block_id);
+    // At a foreground quiescent boundary, stop indexing an exactly reclaimed
+    // span once every physical tier and producer has let go. The stable table
+    // slot remains a tombstone until a later generation can reuse it.
+    bool detach_reclaimed_span(KvMemStore & store, uint32_t block_id) noexcept;
 
     // Called before store mutations. Fixed spans may not be extended/shrunk;
     // append must roll over. Drop/reuse requires confirmed reclamation.
