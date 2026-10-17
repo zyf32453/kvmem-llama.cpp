@@ -1,4 +1,5 @@
 #include "kvmem/historical_kv_capture_session.hpp"
+#include "kvmem/historical_kv_gc.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -6,6 +7,22 @@
 #include <new>
 #include <stdexcept>
 #include <thread>
+#include <future>
+#include <chrono>
+
+namespace kvmem {
+struct HistoricalKvCaptureSessionTestAccess {
+    static void before_release(HistoricalKvCaptureSession & session, uint32_t index,
+                               std::function<void()> before) {
+        auto original = std::move(session.callbacks_.at(index));
+        session.callbacks_[index] = [original = std::move(original), before = std::move(before)](
+                HistoricalKvHandle handle) {
+            before();
+            return original(handle);
+        };
+    }
+};
+}
 
 static thread_local int64_t allocation_budget = -1;
 void * operator new(size_t size) {
@@ -101,6 +118,65 @@ static void retired_blocks_do_not_invalidate_completed_request() {
           session->payload_bytes() == 0, "retired payload did not finish releasing after request");
 }
 
+static void request_finishes_while_background_release_is_blocked() {
+    KvMemRuntime runtime(runtime_config());
+    auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, demand(8, 0, 1));
+    check(bool(session), "blocked release fixture admission failed");
+    std::promise<void> entered, allow_release;
+    auto entered_future = entered.get_future();
+    auto release_future = allow_release.get_future().share();
+    std::thread::id release_thread;
+    HistoricalKvCaptureSessionTestAccess::before_release(*session, 0, [&] {
+        release_thread = std::this_thread::get_id();
+        entered.set_value();
+        release_future.wait();
+    });
+    check(session->append(8), "blocked release fixture append failed");
+    auto first = runtime.historical_shadow_directory().find(0)->writer_context;
+    auto second = runtime.historical_shadow_directory().find(1)->writer_context;
+    const auto handle = first->handle();
+    session->producers_captured();
+    complete(first, 4);
+    complete(second, 4);
+    first.reset();
+    second.reset();
+    check(session->end_input(), "blocked release fixture input remained open");
+    const auto repository = session->repository();
+    check(repository->retire(handle) == HistoricalKvRepository::RetireResult::Committed,
+          "blocked release fixture did not retire");
+    HistoricalKvGc::Config config;
+    config.mode = HistoricalKvGc::Mode::Off;
+    config.scan_blocks = config.reclaim_blocks = 3;
+    config.batch_blocks = 1;
+    config.poll_ms = 1;
+    HistoricalKvGc gc(repository, std::make_unique<HistoricalKvLruPolicy>(3), config);
+    // Declared after the manager so unwinding cannot join a closed barrier.
+    struct Unblock {
+        std::promise<void> & promise;
+        bool opened = false;
+        void open() { if (!opened) { promise.set_value(); opened = true; } }
+        ~Unblock() { open(); }
+    } unblock{allow_release};
+    gc.start();
+    check(entered_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready &&
+          repository->is_releasing(handle) && repository->outstanding_operations() == 0,
+          "worker did not reach the controlled release barrier");
+    auto finish = std::async(std::launch::async, [&] { return session->finish(); });
+    const bool returned_while_blocked = finish.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    const auto bytes_while_blocked = session->payload_bytes();
+    // Always unblock before retrieving the future, including a timeout.
+    unblock.open();
+    const bool finished = finish.get();
+    gc.stop();
+    check(returned_while_blocked && finished && bytes_while_blocked == 40 &&
+          session->live_blocks_at_finish() == 1,
+          "request completion depended on background physical release");
+    check(release_thread != std::this_thread::get_id() &&
+          repository->reclaim_completed(handle, repository->repository_id()) &&
+          session->payload_bytes() == 20 && gc.stats().reclaimed == 1,
+          "background release did not finish after request completion");
+}
+
 static void boundary_limit() {
     KvMemRuntime runtime(runtime_config());
     auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, demand(9, 0, 1));
@@ -174,6 +250,7 @@ int main() {
     try {
         quotas_and_handoff();
         retired_blocks_do_not_invalidate_completed_request();
+        request_finishes_while_background_release_is_blocked();
         boundary_limit();
         cancelled_owner_keeps_tasks();
         failures_are_atomic();

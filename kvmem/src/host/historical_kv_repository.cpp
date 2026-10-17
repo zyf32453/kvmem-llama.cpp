@@ -148,6 +148,7 @@ struct HistoricalKvRepository::Shared {
     std::atomic<uint32_t> cursor{0};
     std::atomic<bool> closing{false};
     std::atomic<bool> gc_owner_claimed{false};
+    std::atomic<uint64_t> operations{0};
 };
 
 HistoricalKvRepository::Lease::Lease(std::shared_ptr<Shared> shared,
@@ -158,9 +159,10 @@ HistoricalKvRepository::Lease::~Lease() { reset(); }
 
 HistoricalKvRepository::Lease::Lease(Lease && other) noexcept
     : shared_(std::move(other.shared_)), handle_(other.handle_), kind_(other.kind_),
-      counted_exec_(other.counted_exec_) {
+      counted_exec_(other.counted_exec_), counted_operation_(other.counted_operation_) {
     other.kind_ = LeaseKind::Read;
     other.counted_exec_ = false;
+    other.counted_operation_ = false;
 }
 
 HistoricalKvRepository::Lease & HistoricalKvRepository::Lease::operator=(Lease && other) noexcept {
@@ -170,8 +172,10 @@ HistoricalKvRepository::Lease & HistoricalKvRepository::Lease::operator=(Lease &
         handle_ = other.handle_;
         kind_ = other.kind_;
         counted_exec_ = other.counted_exec_;
+        counted_operation_ = other.counted_operation_;
         other.kind_ = LeaseKind::Read;
         other.counted_exec_ = false;
+        other.counted_operation_ = false;
     }
     return *this;
 }
@@ -193,16 +197,28 @@ void HistoricalKvRepository::Lease::reset() noexcept {
         if (counted_exec_)
             shared_->slots[handle_.slot].exec_refs.fetch_sub(1, std::memory_order_acq_rel);
         shared_->unpin(handle_.slot);
+        if (counted_operation_) shared_->operations.fetch_sub(1, std::memory_order_acq_rel);
         shared_.reset();
     }
     kind_ = LeaseKind::Read;
     counted_exec_ = false;
+    counted_operation_ = false;
+}
+
+void HistoricalKvRepository::Lease::count_operation() noexcept {
+    shared_->operations.fetch_add(1, std::memory_order_acq_rel);
+    counted_operation_ = true;
+    if (kind_ == LeaseKind::Execution) {
+        shared_->slots[handle_.slot].exec_refs.fetch_add(1, std::memory_order_acq_rel);
+        counted_exec_ = true;
+    }
 }
 
 void HistoricalKvRepository::Lease::disarm() noexcept {
     shared_.reset();
     kind_ = LeaseKind::Read;
     counted_exec_ = false;
+    counted_operation_ = false;
 }
 
 HistoricalKvRepository::HistoricalKvRepository(uint32_t capacity, uint64_t incarnation)
@@ -319,7 +335,9 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reser
     slot.release = std::move(release);
     ++reservation.consumed_;
     slot.control.store(code(Phase::Writing, 1), std::memory_order_release);
-    return Lease(shared, handle, LeaseKind::Writer);
+    Lease writer(shared, handle, LeaseKind::Writer);
+    writer.count_operation();
+    return writer;
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_write(
@@ -355,6 +373,7 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_write
         slot.generation.store(handle.generation, std::memory_order_release);
         slot.control.store(code(Phase::Writing, 1), std::memory_order_release);
         Lease writer(shared, handle, LeaseKind::Writer);
+        writer.count_operation();
         // A write admitted before close may complete with its writer lease.
         // Returning nullopt here would orphan a Writing slot if a bounded
         // retire CAS happened to return Retry during the close race.
@@ -405,10 +424,7 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_kin
     Lease lease(shared, handle, kind);
     if (!shared->matches(handle.slot, handle) || shared->closing.load(std::memory_order_acquire))
         return std::nullopt;
-    if (kind == LeaseKind::Execution) {
-        shared->slots[handle.slot].exec_refs.fetch_add(1, std::memory_order_acq_rel);
-        lease.counted_exec_ = true;
-    }
+    lease.count_operation();
     return lease;
 }
 
@@ -560,6 +576,36 @@ std::optional<HistoricalKvBlockMeta> HistoricalKvRepository::inspect(
     if (!shared->matches(handle.slot, handle)) return std::nullopt;
     return shared->copy_meta(handle.slot,
         shared->slots[handle.slot].control.load(std::memory_order_acquire));
+}
+
+uint64_t HistoricalKvRepository::outstanding_operations() const noexcept {
+    return shared_->operations.load(std::memory_order_acquire);
+}
+
+HistoricalKvRepository::CompletionState HistoricalKvRepository::completion_state(
+        HistoricalKvHandle handle) const noexcept {
+    const auto & shared = shared_;
+    if (handle.incarnation != shared->incarnation || handle.slot >= shared->capacity ||
+            !handle.generation) return CompletionState::Unfinished;
+    const auto & slot = shared->slots[handle.slot];
+    const auto before = slot.generation.load(std::memory_order_acquire);
+    const auto phase = phase_of(slot.control.load(std::memory_order_acquire));
+    const auto after = slot.generation.load(std::memory_order_acquire);
+    // A newer generation can exist only after this one's release completed.
+    // Double sampling avoids mistaking the next writer for this request's
+    // unfinished writer when Ready is claimed between these atomic reads.
+    if (before > handle.generation || after > handle.generation) return CompletionState::Retired;
+    if (before != handle.generation || after != handle.generation) return CompletionState::Unfinished;
+    switch (phase) {
+    case Phase::Live: return CompletionState::Live;
+    case Phase::Retired:
+    case Phase::Releasing:
+    case Phase::Ready:
+    case Phase::Reserving: return CompletionState::Retired;
+    case Phase::Writing:
+    case Phase::Reserved: return CompletionState::Unfinished;
+    }
+    return CompletionState::Unfinished;
 }
 
 std::vector<HistoricalKvBlockMeta> HistoricalKvRepository::snapshot() const {

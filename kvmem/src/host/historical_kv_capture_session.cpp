@@ -124,18 +124,15 @@ bool HistoricalKvCaptureSession::end_input() noexcept {
 }
 
 bool HistoricalKvCaptureSession::finish() {
-    if (failed_ || finished_ || input_ || !producers_.empty()) return false;
+    if (failed_ || finished_ || input_ || !producers_.empty() ||
+        repository_->outstanding_operations()) return false;
     uint32_t live = 0;
     for (const auto handle : handles_) {
-        const auto meta = repository_->inspect(handle);
-        if (!meta) {
-            if (!repository_->reclaim_completed(handle, repository_->repository_id())) return false;
-            continue;
+        switch (repository_->completion_state(handle)) {
+        case HistoricalKvRepository::CompletionState::Unfinished: return false;
+        case HistoricalKvRepository::CompletionState::Live: ++live; break;
+        case HistoricalKvRepository::CompletionState::Retired: break;
         }
-        if (meta->references || (meta->life != HistoricalKvLife::Live &&
-                meta->life != HistoricalKvLife::Retired &&
-                meta->life != HistoricalKvLife::Releasing)) return false;
-        if (meta->life == HistoricalKvLife::Live) ++live;
     }
     reservation_.reset();
     live_blocks_at_finish_ = live;

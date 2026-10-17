@@ -29,7 +29,8 @@ public:
     bool end_input() noexcept;
     // Caller first drains graph, D2H and accumulators. Remaining Live blocks
     // must be published; blocks retired during the request may already be
-    // releasing or reclaimed. No task references may remain.
+    // releasing or reclaimed. No task references may remain; background
+    // metadata guards/release callbacks do not delay this request boundary.
     bool finish();
     void fail() noexcept;
     bool failed() const noexcept { return failed_; }
@@ -48,6 +49,7 @@ public:
     uint64_t appends_remaining() const noexcept { return appends_remaining_; }
 
 private:
+    friend struct HistoricalKvCaptureSessionTestAccess;
     explicit HistoricalKvCaptureSession(KvMemRuntime & runtime) : runtime_(runtime) {}
     KvMemRuntime & runtime_;
     std::shared_ptr<HistoricalKvRepository> repository_;

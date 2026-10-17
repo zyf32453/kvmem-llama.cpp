@@ -32,6 +32,7 @@ public:
     enum class RetireResult { Committed, AlreadyRetired, Stale, Retry };
     enum class ReclaimResult { Complete, Deferred, Stale, Retry };
     enum class LeaseKind { Writer, Execution, Read, Transfer };
+    enum class CompletionState { Unfinished, Live, Retired };
 
     class Lease {
     public:
@@ -54,10 +55,12 @@ public:
         friend class HistoricalKvRepository;
         Lease(std::shared_ptr<Shared>, HistoricalKvHandle, LeaseKind);
         void disarm() noexcept;
+        void count_operation() noexcept;
         std::shared_ptr<Shared> shared_;
         HistoricalKvHandle handle_{};
         LeaseKind kind_ = LeaseKind::Read;
         bool counted_exec_ = false;
+        bool counted_operation_ = false;
     };
 
     // Request-private, real physical slots. Reserved slots are neither Ready
@@ -145,6 +148,15 @@ public:
     // from being used as a reclaim acknowledgement.
     bool reclaim_completed(HistoricalKvHandle handle,
                            uint64_t expected_repository_id) const noexcept;
+    // Request-completion observations only; neither grants access nor permits
+    // physical release. Call after the request has quiesced new task admission.
+    // Public writer/read/transfer/execution leases count, internal metadata
+    // guards do not. Reclamation still uses the full control reference count.
+    uint64_t outstanding_operations() const noexcept;
+    // For a handle returned by begin_write/begin_reserved_write, Live means
+    // its producer published; Retired includes ongoing/completed release or
+    // later slot reuse. Uses atomic scalars, never a worker lock or a guard.
+    CompletionState completion_state(HistoricalKvHandle handle) const noexcept;
     std::optional<HistoricalKvBlockMeta> inspect(HistoricalKvHandle handle) const;
     // Bounded, individually guarded observations; not a global atomic instant.
     // `active` counts repository ExecLease objects, not device work; the

@@ -18,8 +18,22 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <future>
 
 struct kvmem_transfer_test_access {
+    static void install_gc_policy(llama_memory_kvmem & mem,
+                                  std::unique_ptr<kvmem::HistoricalKvPolicy> policy) {
+        const auto repository = mem.historical_capture_->repository();
+        kvmem::HistoricalKvGc::Config cfg;
+        cfg.mode = kvmem::HistoricalKvGc::Mode::Delete;
+        cfg.scan_blocks = cfg.reclaim_blocks = repository->capacity();
+        cfg.batch_blocks = 1;
+        cfg.poll_ms = 1;
+        mem.historical_gc_ = std::make_unique<kvmem::HistoricalKvGc>(repository, std::move(policy), cfg);
+        mem.historical_gc_mode_ = 2;
+        mem.historical_gc_->start();
+    }
+    static void stop_gc(llama_memory_kvmem & mem) { mem.historical_gc_->stop(); }
     static void on_submission(llama_memory_kvmem & mem, std::function<void()> hook) {
         mem.historical_submission_test_hook_ = std::move(hook);
     }
@@ -781,7 +795,32 @@ static void check_partial_rollover(llama_memory_kvmem & mem) {
 }
 
 // Real graph outputs, not fixture-written GPU tensors or manual bindings.
-enum class RetirementPoint { None, BetweenCalls, AfterSubmission, WritingAfterSubmission };
+struct HistoricalPolicyGate {
+    std::promise<void> entered, resume;
+    std::future<void> entered_signal = entered.get_future();
+    std::shared_future<void> resume_signal = resume.get_future().share();
+    std::atomic<bool> announced{false}, resumed{false};
+    void wait() {
+        if (!announced.exchange(true)) entered.set_value();
+        resume_signal.wait();
+    }
+    void open() { if (!resumed.exchange(true)) resume.set_value(); }
+};
+
+class PausedHistoricalPolicy final : public kvmem::HistoricalKvPolicy {
+public:
+    explicit PausedHistoricalPolicy(std::shared_ptr<HistoricalPolicyGate> gate) : gate_(std::move(gate)) {}
+    kvmem::HistoricalKvStepResult step(const kvmem::HistoricalKvSnapshot &,
+            const kvmem::HistoricalKvPressure &, kvmem::HistoricalKvWorkBudget,
+            kvmem::HistoricalKvDecisionBuffer &) override {
+        gate_->wait();
+        return {kvmem::HistoricalKvStepStatus::Complete, 0, 0};
+    }
+private:
+    std::shared_ptr<HistoricalPolicyGate> gate_;
+};
+
+enum class RetirementPoint { None, BetweenCalls, AfterSubmission, WritingAfterSubmission, PausedWorker };
 static void check_request_capture(llama_context * ctx, llama_model * model,
                                   llama_memory_kvmem & mem,
                                   RetirementPoint retirement = RetirementPoint::None) {
@@ -839,6 +878,19 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     uint32_t position = 0;
     execute(tokens.data(), 48);
     position += 48;
+    std::shared_ptr<HistoricalPolicyGate> paused;
+    // Open the barrier before the context's GC destructor can join, including
+    // on any failed model assertion below.
+    struct UnpauseOnExit {
+        std::shared_ptr<HistoricalPolicyGate> & gate;
+        ~UnpauseOnExit() { if (gate) gate->open(); }
+    } unpause{paused};
+    if (retirement == RetirementPoint::PausedWorker) {
+        paused = std::make_shared<HistoricalPolicyGate>();
+        kvmem_transfer_test_access::install_gc_policy(mem, std::make_unique<PausedHistoricalPolicy>(paused));
+        require(paused->entered_signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+                "GC worker did not reach controlled pause before remaining model work");
+    }
     if (retirement == RetirementPoint::BetweenCalls) {
         auto repository = kvmem_transfer_test_access::capture_repository(mem);
         auto storage = kvmem_transfer_test_access::capture_storage(mem);
@@ -1003,7 +1055,25 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         llama_token next = std::max_element(logits, logits + llama_vocab_n_tokens(vocab)) - logits;
         execute(&next, 1);
     }
-    require(llama_kvmem_historical_capture_finish(), "real managed request failed completion verification");
+    if (paused) {
+        std::promise<void> returned;
+        auto finished_signal = returned.get_future();
+        // A watchdog makes a regression fail instead of hanging the test.
+        // In the passing case ONLY request finish opens the barrier.
+        auto watchdog = std::async(std::launch::async, [&, signal = std::move(finished_signal)]() mutable {
+            const bool request_returned = signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+            paused->open();
+            return request_returned;
+        });
+        const bool finished = llama_kvmem_historical_capture_finish();
+        returned.set_value();
+        const bool worker_was_still_paused = watchdog.get();
+        kvmem_transfer_test_access::stop_gc(mem); // Test cleanup after the proven request boundary.
+        require(finished && worker_was_still_paused,
+                "admitted model request or its finish waited for paused GC worker");
+    } else {
+        require(llama_kvmem_historical_capture_finish(), "real managed request failed completion verification");
+    }
     bool cold = false;
     for (const auto & expected : saved) {
         if (expected.id == retired_during_request) continue;
@@ -1016,6 +1086,10 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         cold |= mem.store().blocks()[expected.id].gpu_slot < 0;
     }
     require(cold && mem.store_n_tokens() == 163, "real capture did not exercise GPU eviction");
+    if (paused) {
+        std::printf("PASS real model with paused GC worker: 160 input + full 3-token output bound, request finish returned before worker resumed\n");
+        return;
+    }
     if (retirement != RetirementPoint::None) {
         std::printf("PASS real model active retirement: type=%s, point=%s, skipped GPU-resident historical block=%u, request completed\n",
                 ggml_type_name(mem.type_k()),
@@ -1118,7 +1192,7 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u}) {
+        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u}) {
             if (scenario >= 3) {
                 kp.method = 0;
                 kp.budget = 96;
@@ -1136,7 +1210,8 @@ int main(int argc, char ** argv) {
             if (scenario >= 3) check_request_capture(ctx.get(), model.get(), *mem,
                 scenario == 5 ? RetirementPoint::BetweenCalls :
                 scenario == 6 ? RetirementPoint::AfterSubmission :
-                scenario == 7 ? RetirementPoint::WritingAfterSubmission : RetirementPoint::None);
+                scenario == 7 ? RetirementPoint::WritingAfterSubmission :
+                scenario == 8 ? RetirementPoint::PausedWorker : RetirementPoint::None);
             else if (scenario == 2) check_partial_rollover(*mem);
             else if (scenario == 1) check_managed_async_harvest(*mem);
             else {

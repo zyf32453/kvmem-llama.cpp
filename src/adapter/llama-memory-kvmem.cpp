@@ -1147,9 +1147,9 @@ bool llama_memory_kvmem::finish_historical_capture() {
             std::any_of(historical_gpu_retired_.begin(), historical_gpu_retired_.end(),
                         [](uint8_t retired) { return retired != 0; }))
             throw std::logic_error("historical request still owns pending GPU source slots");
-        // Stop short metadata observations before the request's final
-        // zero-task-reference check. The worker never releases on this thread.
-        if (historical_gc_) historical_gc_->stop();
+        // Request completion observes task leases only. The GC may keep
+        // observing metadata or releasing payloads after this boundary;
+        // joining it belongs to context shutdown, never to request finish.
         if (!historical_capture_->finish()) {
             LLAMA_LOG_ERROR("historical capture: incomplete publication or outstanding producers\n");
             return false;
@@ -1167,7 +1167,7 @@ bool llama_memory_kvmem::finish_historical_capture() {
                 (unsigned long long) historical_capture_->payload_bytes());
             if (stats.policy_failures || stats.worker_failures) return false;
         }
-        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live=%u references=0 rows=%u payload_bytes=%llu gpu_deferred=%llu gpu_returned=%llu\n",
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live_observed=%u task_references=0 rows=%u payload_bytes=%llu gpu_deferred=%llu gpu_returned=%llu\n",
             historical_capture_->created_blocks(), historical_capture_->live_blocks_at_finish(), store_n_tokens(),
             (unsigned long long) historical_capture_->payload_bytes(),
             (unsigned long long) historical_gpu_deferred_,

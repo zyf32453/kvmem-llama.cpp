@@ -101,6 +101,65 @@ static void test_gpu_ready_writing_execution_is_not_cpu_publication() {
           releases == 1, "GPU-ready Writing span failed eventual physical release");
 }
 
+static void test_operation_accounting_and_completion_observation() {
+    HistoricalKvRepository repo(2);
+    std::atomic<unsigned> releases{0};
+    auto first = repo.begin_write(1, 0, 4, 1, 64, successful_release(releases));
+    auto reserved = repo.try_reserve_slots(1);
+    check(first && reserved && repo.outstanding_operations() == 1,
+          "writer or reservation counted as the wrong number of operations");
+    auto second = repo.begin_reserved_write(*reserved, 2, 4, 4, 2, 64,
+                                            successful_release(releases));
+    check(second && repo.outstanding_operations() == 2, "reserved writer was not counted");
+    const auto old = first->handle();
+    const auto unfinished = second->handle();
+    check(repo.completion_state(old) == HistoricalKvRepository::CompletionState::Unfinished &&
+          repo.publish_write(*first) &&
+          repo.completion_state(old) == HistoricalKvRepository::CompletionState::Live,
+          "completion observation lost unpublished/published state");
+    auto read = repo.acquire_read(old);
+    auto transfer = repo.acquire_transfer(old);
+    auto execution = repo.acquire_new(old);
+    check(read && transfer && execution && repo.outstanding_operations() == 5,
+          "public operation lease was not counted");
+    (void) repo.snapshot();
+    (void) repo.inspect(old);
+    check(repo.retire(old) == HistoricalKvRepository::RetireResult::Committed &&
+          !repo.acquire_read(old) && repo.outstanding_operations() == 5 &&
+          repo.completion_state(old) == HistoricalKvRepository::CompletionState::Retired,
+          "control observations or rejected admission changed operation count");
+    auto moved = std::move(*read);
+    read.reset();
+    check(repo.outstanding_operations() == 5, "move construction lost operation ownership");
+    moved = std::move(*transfer);
+    transfer.reset();
+    check(repo.outstanding_operations() == 4, "move assignment duplicated operation ownership");
+    execution.reset();
+    moved.reset();
+    first.reset();
+    second.reset();
+    check(repo.outstanding_operations() == 0 &&
+          repo.completion_state(unfinished) == HistoricalKvRepository::CompletionState::Unfinished,
+          "zero operations incorrectly proved producer publication");
+    check(repo.try_reclaim(old) == HistoricalKvRepository::ReclaimResult::Complete &&
+          repo.completion_state(old) == HistoricalKvRepository::CompletionState::Retired,
+          "released generation no longer observed as retired");
+    auto reused = repo.begin_write(3, 8, 4, 3, 64, successful_release(releases));
+    check(reused && reused->handle().slot == old.slot &&
+          repo.completion_state(old) == HistoricalKvRepository::CompletionState::Retired &&
+          repo.completion_state(reused->handle()) == HistoricalKvRepository::CompletionState::Unfinished &&
+          repo.outstanding_operations() == 1,
+          "completion observation confused old and reused generation");
+    const auto next = reused->handle();
+    reused.reset();
+    check(repo.retire(unfinished) == HistoricalKvRepository::RetireResult::Committed &&
+          repo.retire(next) == HistoricalKvRepository::RetireResult::Committed &&
+          repo.try_reclaim(unfinished) == HistoricalKvRepository::ReclaimResult::Complete &&
+          repo.try_reclaim(next) == HistoricalKvRepository::ReclaimResult::Complete &&
+          repo.outstanding_operations() == 0 && releases == 3,
+          "operation accounting prevented eventual physical release");
+}
+
 static void test_writing_retire_cannot_resurrect() {
     HistoricalKvRepository repo(2, 7);
     std::atomic<unsigned> releases{0};
@@ -395,6 +454,7 @@ static void test_final_publication_under_ref_churn_and_retirement() {
 int main() {
     test_retire_closes_new_entry_but_keeps_old_reader();
     test_gpu_ready_writing_execution_is_not_cpu_publication();
+    test_operation_accounting_and_completion_observation();
     test_writing_retire_cannot_resurrect();
     test_failed_release_stays_closed_and_retries();
     test_snapshot_and_last_use();

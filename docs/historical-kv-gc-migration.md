@@ -184,7 +184,7 @@ GPU 验收在原有已知张量用例之外，新增真正调用 `llama_decode` 
 
 专用 Writing 执行许可在 `b69332f` 通过 Windows/Linux 的 repository、ActiveSet 测试与远程真实模型 F16/Q8_0 回归。首版提交后退休用例确认进入“全局存在未结算 D2H 任务”的排空分支，**并未证明这些任务读取的是退休块自身**；日志为 `historical-writing-exec-drain-gpu-test.log`。普通 CLI delete 日志 `historical-writing-exec-final-cli-delete.log` 显示 6 次 `retired=1 pending=96`，随后回收 6 个 CPU 历史块，policy/worker failure 均为 0。shadow 日志 `historical-writing-exec-shadow.log` 为 `proposed=6, committed=0, shadow=6, reclaimed=0`，8 个输出 token 与先前 off 文件逐字节相同。上述记录保留为上一版功能证据，不代表长期内存、延迟或 agent 质量验收。
 
-新增精确源槽位场景在 Writing 块最后一段 GPU 计算提交后、其 packed D2H 采集前退休它；下一微批次检查该块已退出 attention、对应槽位仍有自己的 D2H 读取数且不在空闲表，普通采集完成后再检查只归还一次。该测试针对真实源槽位生命周期；原有已发布历史块的提交后退休场景同时验证不会因其它块的 D2H 而延期归还。此设计去掉的是 active 退休入口的额外 D2H 同步，现有采集同步、请求结束停止 worker、全资源预约等仍需分别审计，不能据此宣称整套前台无 GC 等待已通过。
+新增精确源槽位场景在 Writing 块最后一段 GPU 计算提交后、其 packed D2H 采集前退休它；下一微批次检查该块已退出 attention、对应槽位仍有自己的 D2H 读取数且不在空闲表，普通采集完成后再检查只归还一次。该测试针对真实源槽位生命周期；原有已发布历史块的提交后退休场景同时验证不会因其它块的 D2H 而延期归还。此设计去掉的是 active 退休入口的额外 D2H 同步，现有采集同步、请求结束资源清理、域退出和全资源预约等仍需分别审计，不能据此宣称整套前台无 GC 等待已通过。
 
 最终 CUDA 构建和全部八个顶层模型场景通过。`historical-deferred-source-gpu-test.log` 记录新场景的 `historical_gpu_defer slot=2 readers=96` 与一次 `historical_gpu_return slot=2`；新断言在下一微批次提交时直接检查同一槽位仍被保留。F16/Q8_0 各 432 个块×层的真实采集字节校验、各回收 2 块，以及两种旧退休场景也继续通过。这证明待结算 D2H 的所有权跨过了退休边界，不声称退休瞬间 DMA 或 kernel 一定仍在硬件上执行。本地和远程三个变更源码文件的 SHA256 完全一致，原始日志保存在远程隔离目录及本地 `build-local/capture-session-validation/`。
 
@@ -196,13 +196,27 @@ GPU 验收在原有已知张量用例之外，新增真正调用 `llama_decode` 
 
 ### 受限 CLI 的 off/shadow/delete（2026-10-17）
 
-CLI 的 `--kvmem-historical-capture N` 现在可配 `--kvmem-historical-gc-mode off|shadow|delete` 和成对的 `--kvmem-historical-gc-low/--kvmem-historical-gc-high`。默认 off；显式 shadow/delete 在请求仓库上启动唯一后台 manager，退出请求时先停止 worker，再检查发布与任务引用。阈值要求 `0 < low < high <= N`；未给时取容量的约四分之一与二分之一。首版只使用独立的按句柄 RAM 存储，不能用于 server、检索、MTP、NVMe、CPU spill arena、hybrid、多请求或会话恢复。
+CLI 的 `--kvmem-historical-capture N` 现在可配 `--kvmem-historical-gc-mode off|shadow|delete` 和成对的 `--kvmem-historical-gc-low/--kvmem-historical-gc-high`。默认 off；显式 shadow/delete 在请求仓库上启动唯一后台 manager。请求结束检查现在不再停止或等待 worker，具体边界见下节。阈值要求 `0 < low < high <= N`；未给时取容量的约四分之一与二分之一。首版只使用独立的按句柄 RAM 存储，不能用于 server、检索、MTP、NVMe、CPU spill arena、hybrid、多请求或会话恢复。
 
 在同一 GGUF、356-token 提示词、8-token 生成、容量 32、低/高水位 14/16 下，delete 模式由普通 CLI 请求的 worker 提交并回收 **6 个**历史块：初始预留 payload 36,765,696 bytes，结束时剩余 23,396,352 bytes，`policy_failures=worker_failures=0`，请求正常完成。off 模式结束时剩余 33,423,360 bytes。差值为真实按句柄 CPU K/V payload，不是 RSS 降幅；请求完成时的未用私有额度也会归还，不能全部算作 GC 收益。原始日志：远程隔离目录的 `historical-cli-gc-delete.log` 与 `historical-cli-gc-off.log`。
 
 shadow 不退休块、不释放 payload；相同配置结束为 `committed=0, reclaimed=0, live=20`，生成的 8 个 token 与 off 的文件逐字节相同。首轮实测重复提出同代候选 6508 次；修正后使用每槽代数模拟已提交的待回收额度，同一请求只提出 **6 个**不同候选，`shadow=6`，输出仍与 off 完全相同。对应日志是 `historical-cli-gc-shadow2.log`；宿主 GC 去重测试在 Windows 与远程 Linux 均通过。这是短请求功能对照，尚未完成稳定延迟/吞吐与 Agent 质量验收。
 
 原始日志保存在远程隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU/` 的 `historical-capture-session-*` 文件，并复制到本地 `build-local/capture-session-validation/`；最终逐层模型检查使用 `historical-capture-session-quant-gpu-test.log`。首次失败日志也保留。9 个变更源码/构建文件的本地与远程 SHA256 一致，远程原工作仓库未改动。
+
+### 请求完成检查与后台回收分离（2026-10-17）
+
+先前 `finish_historical_capture()` 为避免 GC 的短期元数据 guard 干扰 `references==0`，会先调用 `HistoricalKvGc::stop()` 并 join worker。现在 repository 单独计数对外授予的 Writer/Read/Transfer/Execution 许可，内部的观察/退休保护不计入这个操作数；全部控制引用仍留在原有 `control` 中，后台物理释放条件没有放宽。移动、拒绝申请与同槽代数复用均覆盖到计数测试。
+
+新 `completion_state(handle)` 只读取原子 phase/generation，判断这个已创建 writer 是否仍未发布、已 Live 或已退休；Releasing 及已回收代也属于已退休。该查询不取得数据许可、不持有 worker 的锁，也不能据此释放内存。请求方停止建立新任务并排空设备/搬运后，`finish()` 检查操作许可为零和每个已创建块的完成状态，直接返回；后台可以继续观察或释放。`live_observed`、回收计数和 payload bytes 是各自时刻的观测，不构成冻结的最终快照。`task_references=0` 不表示后台元数据 guard 数为零。
+
+宿主新增屏障测试把本请求一个实际 RAM 块的释放回调停在 Releasing：请求完成检查在屏障仍关闭时返回，打开后由同一个后台线程归还 payload。真实模型新增暂停 worker 的场景：前 48 个输入 token 完成后把 worker 停在受控策略屏障，余下输入与全部 3-token 输出额度继续执行；请求 finish 返回后才打开屏障。5 秒 watchdog 只负责将回归转换成测试失败，成功条件是明确的屏障先后关系，而非靠延时碰撞。
+
+本轮 Windows 相关宿主测试 11/11、Linux 全部宿主测试 23/23、repository/capture-session 的 ASan/UBSan 2/2 及独立 TSan 2/2 均通过。最终 CUDA 构建及九个顶层真实模型场景通过，包含前述暂停 worker 用例与所有旧回归；sanitizer 数字不包含 CUDA adapter。八个变更源码文件本地/远程 SHA256 一致。远程隔离目录中对应记录为 `historical-request-finish-{host,asan,tsan}-test.log` 和 `historical-request-finish-gpu-test.log`，本地保存在 `build-local/capture-session-validation/`。
+
+同版普通 CLI delete 继续使用既定模型、356-token 提示词、8-token 输出和容量/水位 32/14/16，正常完成；本次结束观测为 `committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 为 0。日志为 `historical-request-finish-cli-delete.log`。这些数值是本次实际观测，调用方不应要求每次请求结束时所有 Retired 都已经变成 Ready。
+
+这只证明当前受限请求的计算与完成检查不依赖 worker 继续推进。未使用的私有 RAM 预约仍在 `finish()` 中销毁，上下文销毁仍需停止 worker；CLI 进程退出不等于上述请求完成边界。还需把私有预约清理和域退出交给后台、有界管理结束中的 owner，并补全 GPU/metadata/backend/rollback 预约及取消恢复，才可宣称完整生产请求没有 GC 等待与前台释放。实际 GPU 提交/完成失败的取消协议也尚待验收。
 
 ## 剩余生产接入与完整验收
 
