@@ -469,13 +469,21 @@ ActiveSet 增加 `prepare`、`try_acquire` 和 `release`。复用的是对象和
 
 补丁重放第一次检查发现 `0011` 改动了 `0010` 的上下文行，导致已装 `0011` 时单独反向检查 `0010` 误判。Linux、PowerShell 和 HIP 脚本现先识别 `0011`，把它作为 `0010` 已满足的凭证；Linux 连续两次重放和从仅有 `0010` 升级的路径都通过，PowerShell 构建脚本语法检查通过。本轮没有执行 Windows CUDA/HIP 全构建。这个里程碑只消除受限输入整理路径的已识别分配。每次解码创建的 memory execution context、backend 图/调度器、rollback 快照及其它 active 路径仍未纳入统一严格预算；P3 继续推进，P4–P6 不变。
 
+### 请求前准备并复用解码上下文对象（2026-10-17）
+
+在上述向量已可复用后，`init_batch` 每次仍以 `new HistoricalBatchContext` 分配一个多态解码上下文。现在受限请求在 `begin_historical_capture` 的私有准备阶段为这个对象取得一块实际存储，随其它资源一起发布；请求准备失败时本地 RAII 释放它。每次成功解码在同一地址原位构造上下文，并沿原有虚析构路径把槽位和微批次向量交还请求；对象析构不释放这块预留存储，直到 memory owner 退出才释放。重复/并行占用同一槽位会拒绝，符合当前单请求、单解码上下文限制。
+
+已接纳请求若在 `init_batch` 中失败，现直接返回终止性错误，不创建一个临时错误上下文。这样也避免上游对 `FAILED_PREPARE` 进行重试时，在旧失败对象尚未析构前再次索取同一槽位。入口日志报告实际预留对象字节；最终真实模型本次为 **160 字节**，不包含对象内已分别预约的向量容量、分配器开销或 backend 图。
+
+最终真实 GGUF/CUDA 测试 **35/35** 个顶层场景通过。测试检查入口失败后没有发布上下文存储，以及每次实际 `llama_decode` 后仍是同一地址、相同容量且不再被占用；受阻 CPU 清理队列下的请求回滚也通过。另在请求完成后的失败解码检查槽位没有泄漏。recency CLI delete 完成 356-token 输入和 8-token 生成，`proposed=committed=reclaimed=6`，策略与 worker 错误均为 0；普通 retrieval CLI 正常完成 420-token prompt eval 和 8 次输出，`layout_writeback move=4`。三项程序退出码均为 0，原始日志在远程隔离目录，前缀为 `historical-batch-context-`。当前只消除这一受限路径的上下文对象分配；backend 调度器/输出缓冲区、图结果、rollback 快照以及非受限 active 路径仍需请求前预算和长期有界验证。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；仍需接入 server、多请求生命周期及错误取消。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
-3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据和受限输入整理的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、元数据、各后端、执行上下文和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
+3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理和单个解码上下文对象的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、元数据、各后端、输出缓冲区和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 将受限 CLI 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到完整生产入口，提供独立新策略模板及版本前置条件；策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补独立 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 

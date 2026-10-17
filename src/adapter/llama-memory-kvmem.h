@@ -605,6 +605,11 @@ private:
     kvmem::HistoricalKvCleanup::Ticket historical_cleanup_ticket_;
     std::unique_ptr<HistoricalCpuCleanup> historical_cleanup_;
     std::unique_ptr<kvmem::HistoricalKvCaptureSession> historical_capture_;
+    // One decode context at a time. Prepared before capture admission and
+    // reused by successful historical init_batch calls; failure is terminal.
+    void * historical_batch_context_storage_ = nullptr;
+    size_t historical_batch_context_storage_bytes_ = 0;
+    bool historical_batch_context_in_use_ = false;
     std::unique_ptr<kvmem::HistoricalKvGc> historical_gc_;
     int historical_gc_mode_ = 0;
     std::unique_ptr<kvmem::HistoricalKvActiveSet> historical_active_;

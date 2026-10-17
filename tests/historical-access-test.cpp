@@ -193,6 +193,16 @@ struct kvmem_transfer_test_access {
     static bool execution_storage_empty(const llama_memory_kvmem & mem) {
         return !mem.historical_active_ && !execution_bytes(mem);
     }
+    struct BatchContextStatus {
+        const void * storage = nullptr;
+        size_t bytes = 0;
+        bool in_use = false;
+    };
+    static BatchContextStatus batch_context(const llama_memory_kvmem & mem) {
+        return {mem.historical_batch_context_storage_,
+                mem.historical_batch_context_storage_bytes_,
+                mem.historical_batch_context_in_use_};
+    }
     static size_t active_count(const llama_memory_kvmem & mem) {
         return mem.historical_active_->handles().size();
     }
@@ -1594,6 +1604,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 kvmem_transfer_test_access::capture_arena_unpublished(mem) &&
                 !kvmem_transfer_test_access::slot_workspace(mem).bytes &&
                 !kvmem_transfer_test_access::microbatch_workspace(mem).bytes &&
+                !kvmem_transfer_test_access::batch_context(mem).storage &&
                 kvmem_transfer_test_access::execution_storage_empty(mem),
                 "real request preparation failure published an owner or retained workspace");
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
@@ -1607,6 +1618,9 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     const auto execution_bytes = kvmem_transfer_test_access::execution_bytes(mem);
     const auto slot_workspace = kvmem_transfer_test_access::slot_workspace(mem);
     const auto microbatch_workspace = kvmem_transfer_test_access::microbatch_workspace(mem);
+    const auto batch_context = kvmem_transfer_test_access::batch_context(mem);
+    require(batch_context.storage && batch_context.bytes && !batch_context.in_use,
+            "real request did not reserve one decode context before admission");
     require(microbatch_workspace.objects == 14 && microbatch_workspace.max_ubatches == 4 &&
             microbatch_workspace.capacities.size() == 3 + 9 * microbatch_workspace.objects &&
             microbatch_workspace.capacities[0] >= 14 &&
@@ -1666,6 +1680,10 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 returned_microbatches.capacities == microbatch_workspace.capacities &&
                 returned_microbatches.graph_held <= 10,
                 "real decode did not return the same prepared microbatch buffers");
+        const auto returned_context = kvmem_transfer_test_access::batch_context(mem);
+        require(returned_context.storage == batch_context.storage &&
+                returned_context.bytes == batch_context.bytes && !returned_context.in_use,
+                "real decode did not return the same prepared context storage");
         const auto & cells = mem.get_kv()->get_cells(0);
         const auto index = cells.index_status();
         require(index.reserved && index.nodes == cell_nodes &&
@@ -2125,6 +2143,10 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     auto extra = llama_batch_get_one(tokens.data(), 1);
     require(llama_decode(ctx, extra) != 0 && mem.store_n_tokens() == 163,
             "finished capture session accepted another append");
+    const auto failed_context = kvmem_transfer_test_access::batch_context(mem);
+    require(failed_context.storage == batch_context.storage &&
+            failed_context.bytes == batch_context.bytes && !failed_context.in_use,
+            "failed decode consumed or leaked the prepared context slot");
     std::printf("PASS real model historical capture and post-request LRU release: type=%s, 160 input + 3 generated tokens, 16-token microbatches, %zu layer spans byte-equal, reclaimed=%u, released_bytes=%llu, GPU unchanged\n",
                  ggml_type_name(mem.type_k()), saved.size(), reclaimed_model_blocks,
                  (unsigned long long) (bytes_before_gc - storage->allocated_payload_bytes()));

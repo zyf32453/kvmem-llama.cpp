@@ -43,6 +43,7 @@
 #include <memory>
 #include <map>
 #include <mutex>
+#include <new>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -1047,13 +1048,22 @@ public:
             !owner_.historical_ubatch_workspace_.ubatches.empty()) std::terminate();
         owner_.historical_ubatch_workspace_.ubatches = take_ubatches();
         owner_.historical_slot_workspace_.slots = take_slot_infos();
+        owner_.historical_batch_context_in_use_ = false;
     }
+
+    // The unique_ptr returned to upstream still uses a normal virtual delete.
+    // Its destructor runs, but the request owns this fixed storage until
+    // llama_memory_kvmem teardown.
+    static void operator delete(void *) noexcept {}
 
 private:
     llama_memory_kvmem & owner_;
 };
 
 llama_memory_kvmem::~llama_memory_kvmem() {
+    if (historical_batch_context_in_use_) std::terminate();
+    ::operator delete(historical_batch_context_storage_);
+    historical_batch_context_storage_ = nullptr;
     if (historical_capture_) historical_capture_->repository()->close();
     if (historical_gc_) historical_gc_->request_stop();
     try {
@@ -1115,7 +1125,7 @@ llama_memory_kvmem::~llama_memory_kvmem() {
 
 bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t input_tokens,
         uint64_t max_output_tokens, uint64_t max_appends) {
-    if (historical_capture_ || method_ != 0 || multi_gpu_ || mtp_ || recr_ || v_trans_ ||
+    if (historical_capture_ || historical_batch_context_storage_ || method_ != 0 || multi_gpu_ || mtp_ || recr_ || v_trans_ ||
         replay_ || !kv_ || raw_cfg_.nvme_bytes || rt_cfg_.cpu_bytes || rt_cfg_.nvme_bytes ||
         raw_cfg_.historical_gc_attention_layers.empty() ||
         !harvest_v_jobs_.empty() || !harvest_v_pending_.jobs.empty() ||
@@ -1171,6 +1181,9 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             LLAMA_LOG_ERROR("historical capture: cell indexes are not fresh before admission\n");
             return false;
         }
+        auto release_context_storage = [](void * ptr) noexcept { ::operator delete(ptr); };
+        std::unique_ptr<void, decltype(release_context_storage)> context_storage(
+            ::operator new(sizeof(HistoricalBatchContext)), release_context_storage);
         // Prepare both sides of the pipeline before publishing this owner.
         // Full ubatch contexts and backend allocations still need admission.
         auto active = kvmem::HistoricalKvActiveSet::prepare(session->repository(), n_slots_);
@@ -1244,6 +1257,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         cell_workspace_ = std::move(cells);
         historical_slot_workspace_ = std::move(slot_workspace);
         historical_ubatch_workspace_ = std::move(ubatch_workspace);
+        historical_batch_context_storage_ = context_storage.release();
+        historical_batch_context_storage_bytes_ = sizeof(HistoricalBatchContext);
         pos_queue_.swap(queued_captures);
         capture_arena_.swap(capture_arena);
         capture_max_tokens_ = max_capture_tokens;
@@ -1261,6 +1276,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         LLAMA_LOG_INFO("KVMEM_UBATCH_POOL blocks=%zu vector_bytes=%zu max_batch=%u ubatch=%u\n",
             historical_ubatch_workspace_.data.size(), historical_ubatch_workspace_.vector_bytes(),
             historical_ubatch_workspace_.max_tokens, historical_ubatch_workspace_.n_ubatch);
+        LLAMA_LOG_INFO("KVMEM_BATCH_CONTEXT reserved_bytes=%zu\n", historical_batch_context_storage_bytes_);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_ARENA bytes=%zu queue_capacity=%zu max_tokens=%zu\n",
             capture_arena_->capacity_bytes(), pos_queue_.capacity(), max_capture_tokens);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu layout_bytes=%zu layout_slots=%u layout_host_bytes=%zu\n",
@@ -2963,12 +2979,17 @@ llama_memory_context_ptr llama_memory_kvmem::init_batch(
     if (historical_capture_) {
         auto & slots = historical_slot_workspace_;
         auto & micro = historical_ubatch_workspace_;
+        if (!historical_batch_context_storage_ || historical_batch_context_in_use_) {
+            historical_capture_->fail();
+            LLAMA_LOG_ERROR("historical capture: prepared decode context is unavailable\n");
+            return {};
+        }
         if (slots.slots.empty() || micro.ubatches.capacity() < micro.max_ubatches ||
             n_ubatch != slots.n_ubatch || n_ubatch != micro.n_ubatch ||
             balloc.get_n_tokens() > slots.max_tokens || balloc.get_n_tokens() > micro.max_tokens) {
             historical_capture_->fail();
             LLAMA_LOG_ERROR("historical capture: decode exceeds prepared microbatch bound\n");
-            return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+            return {};
         }
         auto ubatches = std::move(micro.ubatches);
         ubatches.clear(); // release the previous context's shared data owners
@@ -2994,14 +3015,16 @@ llama_memory_context_ptr llama_memory_kvmem::init_batch(
             sinfos = std::move(slots.slots);
             if (!prepare_ubatches(ubatches, balloc.get_n_tokens(), sinfos))
                 throw std::runtime_error("historical microbatch preparation failed");
-            return std::unique_ptr<HistoricalBatchContext>(new HistoricalBatchContext(
-                    *this, kv_, std::move(sinfos), std::move(ubatches)));
+            auto * context = ::new (historical_batch_context_storage_)
+                HistoricalBatchContext(*this, kv_, std::move(sinfos), std::move(ubatches));
+            historical_batch_context_in_use_ = true;
+            return llama_memory_context_ptr(context);
         } catch (const std::exception & e) {
             historical_capture_->fail();
             if (slots.slots.empty()) slots.slots = std::move(sinfos);
             if (micro.ubatches.empty()) micro.ubatches = std::move(ubatches);
             LLAMA_LOG_ERROR("historical capture microbatch: %s\n", e.what());
-            return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+            return {};
         }
     }
 
