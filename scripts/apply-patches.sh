@@ -12,6 +12,7 @@ QWEN3MOE_CAPTURE="$ROOT/patches/0006-qwen3moe-capture.patch"
 HISTORICAL_ACTIVE="$ROOT/patches/0007-historical-active-hook.patch"
 HISTORICAL_CELLS="$ROOT/patches/0008-historical-cell-index-reservation.patch"
 HISTORICAL_SLOTS="$ROOT/patches/0009-historical-slot-info-return.patch"
+HISTORICAL_MICROBATCH="$ROOT/patches/0010-historical-microbatch-pool.patch"
 BUDGET_UPGRADE="$ROOT/patches/reasoning-budget-upgrade.patch"
 REPLAY_UPGRADE="$ROOT/patches/replayssm-upgrade.patch"
 UPGRADE="$ROOT/patches/multimodal-upgrade.patch"
@@ -120,4 +121,12 @@ else
     git apply --check "$HISTORICAL_SLOTS"
     git apply "$HISTORICAL_SLOTS"
     echo "applied historical slot info return"
+fi
+
+if git apply --reverse --check "$HISTORICAL_MICROBATCH" 2>/dev/null; then
+    echo "historical microbatch pool already applied"
+else
+    git apply --check "$HISTORICAL_MICROBATCH"
+    git apply "$HISTORICAL_MICROBATCH"
+    echo "applied historical microbatch pool"
 fi

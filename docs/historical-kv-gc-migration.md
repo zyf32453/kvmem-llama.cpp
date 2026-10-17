@@ -447,6 +447,18 @@ ActiveSet 增加 `prepare`、`try_acquire` 和 `release`。复用的是对象和
 
 这一步只消除了已接纳 historical 请求中 `slot_info` 列表的反复分配。上游 `llama_batch_allocr`、完整 `llama_ubatch::data_t`、每次创建的执行上下文对象、rollback 快照及 backend 计算图仍可能分配；统一资源预算、完整 active 入口和长期有界复用也未完成。因此 P3 仍在推进，P4–P6 的原定交付范围不变。
 
+### 预备微批次数据并保留图缓存依赖（2026-10-17）
+
+继续检查上游 `llama_batch_allocr` 后发现：`split_simple` 每次创建索引向量，`ubatch_add` 为每个微批次 `make_shared<data_t>` 并增长 token、position、序列和输出向量；适配器自己的 `ubatches` 外层向量也每次重新增长。受限 historical 请求现在按最多一个 batch 的微批次数量，在接纳前实际取得这些 `data_t`、其内部向量、索引暂存区和外层向量。上游补丁 `0010-historical-microbatch-pool.patch` 只在单序列、单位置轴、纯文本 simple split 下从此池取对象，其他路径沿用原实现；执行上下文析构时把外层列表归还请求。
+
+第一次模型回归暴露了复用对象的序列列表没有清空，第二次暴露了图缓存仍持有旧 `data_t`。最终设计在每次填充前原地重建序列列表，并且只取引用计数证明空闲的数据对象，不覆盖图持有者。当前固定上游的 `llama_context` 至多保留 8 个宽度专用解码图结果和 2 个普通图结果，因此入口准备“本次最多微批次数 + 10”个数据对象；图缓存容量发生变化时必须同步审查此上界。容量不够或旧引用未释放时明确失败，不以运行中临时分配补位。
+
+最终真实模型 **35/35** 个顶层场景通过。新增检查覆盖请求准备失败后不发布微批次容量、每次解码归还原外层和内部缓冲区、连续三次禁止 C++ 新分配地复用同一个上游 `data_t`，以及模拟 10 个图结果全部持有旧对象后，在禁止 C++ 新分配时完成一次 4 个微批次的完整拆分。模型请求 `n_batch=64, n_ubatch=16` 入口准备 **14** 个数据对象，内部向量与外层容器合计容量 **21,656 字节**；recency CLI `n_batch=128, n_ubatch=16` 准备 **18** 个、**28,168 字节**。这些只统计向量容量，不含 `data_t`/shared_ptr 对象、控制块、分配器开销和其它执行资源。
+
+最终 recency CLI delete 正常完成 356-token 输入、8-token 生成和退出，`proposed=committed=reclaimed=6`、policy/worker failure 为 0；未启用 historical GC 的普通 retrieval CLI 也正常完成，执行 4 个驻留块布局移动和 64-token replay。模型及两条 CLI 的退出码均为 0。Linux 补丁连续应用两次通过，第二次识别为已应用；PowerShell 构建脚本语法检查通过，本轮未执行 Windows CUDA/HIP 全构建。源码、测试及补丁的本地与远程副本 SHA256 相同；原始日志以 `historical-ubatch-` 开头，保存在远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU` 和本地 `build-local/capture-session-validation/`。
+
+这项准备只覆盖 simple split 的索引、`data_t` 及外层列表。`llama_batch_allocr::init` 的输入规范化、`used` / `out_ids`、每次执行上下文对象、后端计算图和 rollback 等真实资源还没有全部纳入同一入口预算；不能据此声称 P3 严格请求预约完成。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

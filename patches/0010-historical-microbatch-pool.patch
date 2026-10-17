@@ -1,0 +1,162 @@
+diff --git a/src/llama-batch.h b/src/llama-batch.h
+index dcba8c1..f68d286 100644
+--- a/src/llama-batch.h
++++ b/src/llama-batch.h
+@@ -103,6 +103,15 @@ public:
+     // call once before splitting the batch to reset the internal state
+     void split_reset();
+ 
++#if defined(LLAMA_KVMEM)
++    // Restricted single-sequence text path: the caller owns all data and
++    // scratch storage before splitting, and retains it through decode.
++    bool use_prepared_simple_pool(
++            std::vector<std::shared_ptr<llama_ubatch::data_t>> * data,
++            std::vector<int32_t> * indices) noexcept;
++    void clear_prepared_simple_pool() noexcept;
++#endif
++
+     // simple split, unknown number of sequence sets of unequal lengths
+     llama_ubatch split_simple(uint32_t n_ubatch);
+ 
+@@ -174,5 +183,11 @@ private:
+     // used[i] indicates if token i has already been used in a previous ubatch
+     std::vector<bool> used;
+ 
++#if defined(LLAMA_KVMEM)
++    std::vector<std::shared_ptr<llama_ubatch::data_t>> * prepared_simple_data = nullptr;
++    std::vector<int32_t> * prepared_simple_indices = nullptr;
++    size_t prepared_simple_next = 0;
++#endif
++
+     int debug;
+ };
+diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
+index 106ce11..a3eee30 100644
+--- a/src/llama-batch.cpp
++++ b/src/llama-batch.cpp
+@@ -8,6 +8,7 @@
+ #include <cstring>
+ #include <algorithm>
+ #include <sstream>
++#include <stdexcept>
+ 
+ llama_batch_allocr::llama_batch_allocr(uint32_t n_pos_per_embd) : n_pos_per_embd(n_pos_per_embd) {
+     const char * LLAMA_BATCH_DEBUG = getenv("LLAMA_BATCH_DEBUG");
+@@ -469,10 +470,36 @@ void llama_batch_allocr::split_reset() {
+ 
+     n_used = 0;
+ 
++#if defined(LLAMA_KVMEM)
++    prepared_simple_next = 0;
++#endif
++
+     used.clear();
+     used.resize(get_n_tokens(), false);
+ }
+ 
++#if defined(LLAMA_KVMEM)
++bool llama_batch_allocr::use_prepared_simple_pool(
++        std::vector<std::shared_ptr<llama_ubatch::data_t>> * data,
++        std::vector<int32_t> * indices) noexcept {
++    if (!data || !indices || data->empty() || n_pos_per_embd != 1 ||
++        batch.n_tokens <= 0 || !batch.token || batch.embd || batch.embd_nextn) return false;
++    for (int32_t i = 0; i < batch.n_tokens; ++i) {
++        if (batch.n_seq_id[i] != 1 || batch.seq_id[i][0] != 0) return false;
++    }
++    prepared_simple_data = data;
++    prepared_simple_indices = indices;
++    prepared_simple_next = 0;
++    return true;
++}
++
++void llama_batch_allocr::clear_prepared_simple_pool() noexcept {
++    prepared_simple_data = nullptr;
++    prepared_simple_indices = nullptr;
++    prepared_simple_next = 0;
++}
++#endif
++
+ llama_ubatch llama_batch_allocr::split_simple(uint32_t n_ubatch) {
+     // find the first unused token
+     uint32_t cur_idx = 0;
+@@ -485,7 +512,17 @@ llama_ubatch llama_batch_allocr::split_simple(uint32_t n_ubatch) {
+         return {};
+     }
+ 
+-    std::vector<int32_t> idxs;
++    std::vector<int32_t> local_idxs;
++#if defined(LLAMA_KVMEM)
++    auto & idxs = prepared_simple_indices ? *prepared_simple_indices : local_idxs;
++    if (prepared_simple_indices) {
++        idxs.clear();
++        if (idxs.capacity() < std::min<size_t>(n_ubatch, used.size() - cur_idx))
++            throw std::length_error("prepared simple split index capacity exceeded");
++    }
++#else
++    auto & idxs = local_idxs;
++#endif
+ 
+     while (true) {
+         idxs.push_back(cur_idx);
+@@ -751,7 +788,30 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
+ 
+     assert(n_tokens%n_seqs == 0);
+ 
+-    auto udata = std::make_shared<llama_ubatch::data_t>();
++    std::shared_ptr<llama_ubatch::data_t> udata;
++#if defined(LLAMA_KVMEM)
++    if (prepared_simple_data) {
++        // A cached graph can retain an older ubatch after its decode context
++        // is gone. Never overwrite storage while any other owner holds it.
++        while (prepared_simple_next < prepared_simple_data->size() &&
++               (*prepared_simple_data)[prepared_simple_next].use_count() != 1)
++            ++prepared_simple_next;
++        if (prepared_simple_next >= prepared_simple_data->size())
++            throw std::length_error("prepared microbatch pool has no free data");
++        auto & entry = (*prepared_simple_data)[prepared_simple_next++];
++        if (!entry) throw std::logic_error("prepared microbatch data is missing");
++        if (entry->token.capacity() < n_tokens || entry->logical_pos.capacity() < n_tokens ||
++            entry->pos.capacity() < n_tokens || entry->n_seq_id.capacity() < n_tokens ||
++            entry->seq_id.capacity() < n_tokens || entry->seq_id_unq.capacity() < 1 ||
++            entry->seq_idx.capacity() < LLAMA_MAX_SEQ || entry->output.capacity() < n_tokens ||
++            entry->seq_id_data.capacity() < n_tokens)
++            throw std::length_error("prepared microbatch data capacity exceeded");
++        udata = entry;
++    } else
++#endif
++    {
++        udata = std::make_shared<llama_ubatch::data_t>();
++    }
+ 
+     const int64_t n_embd_all = batch.embd ? (int64_t) n_tokens*n_embd : 0;
+     const int64_t n_pos_all  =              (int64_t) n_tokens*n_pos_per_embd;
+@@ -767,6 +827,14 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
+     udata->seq_idx   .resize(LLAMA_MAX_SEQ, -1);
+     udata->output    .resize(n_tokens);
+ 
++#if defined(LLAMA_KVMEM)
++    if (prepared_simple_data) {
++        // Unlike a new data_t, this object still contains the previous
++        // microbatch's sequence entries. Rebuild both lists in place.
++        udata->seq_id_data.clear();
++        std::fill(udata->seq_idx.begin(), udata->seq_idx.end(), -1);
++    }
++#endif
+     udata->seq_id_data.reserve(n_tokens);
+ 
+     seq_set_t seq_set_unq;
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index 15fe89f..bb3985c 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -399,6 +399,10 @@ public:
+     llama_memory_status  get_status() const override;
+     const llama_ubatch & get_ubatch() const override;
+ 
++#if defined(LLAMA_KVMEM)
++    std::vector<llama_ubatch> take_ubatches() noexcept { return std::move(ubatches); }
++#endif
++
+     //
+     // llama_kv_cache_context specific API
+     //

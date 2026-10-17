@@ -79,6 +79,84 @@ struct kvmem_transfer_test_access {
         return kvmem_fill_slot_info(mem.runtime().store(), mem.block_tokens(),
                 mem.get_kv()->get_size(), ubatch, slots[0]);
     }
+    struct MicrobatchStatus {
+        size_t bytes = 0;
+        size_t objects = 0, graph_held = 0, max_ubatches = 0;
+        std::vector<const void *> buffers;
+        std::vector<size_t> capacities;
+    };
+    static MicrobatchStatus microbatch_workspace(const llama_memory_kvmem & mem) {
+        const auto & ws = mem.historical_ubatch_workspace_;
+        MicrobatchStatus status;
+        status.bytes = ws.vector_bytes();
+        status.objects = ws.data.size();
+        status.max_ubatches = ws.max_ubatches;
+        status.buffers = {ws.data.data(), ws.ubatches.data(), ws.indices.data()};
+        status.capacities = {ws.data.capacity(), ws.ubatches.capacity(), ws.indices.capacity()};
+        for (const auto & item : ws.data) {
+            const bool returned = std::any_of(ws.ubatches.begin(), ws.ubatches.end(),
+                [&](const llama_ubatch & ubatch) { return ubatch.data.get() == item.get(); });
+            if (item.use_count() > 1 + size_t(returned)) ++status.graph_held;
+            status.buffers.insert(status.buffers.end(), {
+                item.get(), item->token.data(), item->logical_pos.data(), item->pos.data(),
+                item->n_seq_id.data(), item->seq_id.data(), item->seq_id_unq.data(),
+                item->seq_idx.data(), item->output.data(), item->seq_id_data.data()});
+            status.capacities.insert(status.capacities.end(), {
+                item->token.capacity(), item->logical_pos.capacity(), item->pos.capacity(),
+                item->n_seq_id.capacity(), item->seq_id.capacity(), item->seq_id_unq.capacity(),
+                item->seq_idx.capacity(), item->output.capacity(), item->seq_id_data.capacity()});
+        }
+        return status;
+    }
+    static bool microbatch_split_without_cpp_allocation(llama_memory_kvmem & mem,
+            const llama_vocab & vocab, llama_token * tokens) {
+        auto & ws = mem.historical_ubatch_workspace_;
+        llama_batch_allocr probe(1);
+        auto batch = llama_batch_get_one(tokens, 16);
+        if (!probe.init(batch, vocab, nullptr, 0, 1, false)) return false;
+        probe.get_out_ids().reserve(16);
+        if (!probe.use_prepared_simple_pool(&ws.data, &ws.indices)) return false;
+        bool valid = true;
+        for (int round = 0; round < 3; ++round) {
+            llama_ubatch ubatch{};
+            {
+                DenyCppAllocation guard;
+                probe.split_reset();
+                ubatch = probe.split_simple(16);
+            }
+            valid = valid && ubatch.n_tokens == 16 && ubatch.data.get() == ws.data[0].get() &&
+                    ubatch.seq_id[0] == ubatch.data->seq_id_data.data() &&
+                    ubatch.data->seq_id_data.size() == 16;
+        }
+        probe.clear_prepared_simple_pool();
+        return valid;
+    }
+    static bool microbatch_graph_bound_without_cpp_allocation(llama_memory_kvmem & mem,
+            const llama_vocab & vocab, llama_token * tokens) {
+        auto & ws = mem.historical_ubatch_workspace_;
+        if (ws.data.size() != ws.max_ubatches + ws.graph_retained_max) return false;
+        std::vector<std::shared_ptr<llama_ubatch::data_t>> held;
+        held.reserve(ws.graph_retained_max);
+        for (size_t i = 0; i < ws.graph_retained_max; ++i) held.push_back(ws.data[i]);
+        llama_batch_allocr probe(1);
+        auto batch = llama_batch_get_one(tokens, 64);
+        if (!probe.init(batch, vocab, nullptr, 0, 1, false)) return false;
+        probe.get_out_ids().reserve(64);
+        if (!probe.use_prepared_simple_pool(&ws.data, &ws.indices)) return false;
+        std::vector<llama_ubatch> ubatches;
+        ubatches.reserve(ws.max_ubatches);
+        {
+            DenyCppAllocation guard;
+            probe.split_reset();
+            for (size_t i = 0; i < ws.max_ubatches; ++i)
+                ubatches.push_back(probe.split_simple(16));
+        }
+        probe.clear_prepared_simple_pool();
+        for (size_t i = 0; i < ws.max_ubatches; ++i)
+            if (ubatches[i].n_tokens != 16 ||
+                ubatches[i].data.get() != ws.data[ws.graph_retained_max + i].get()) return false;
+        return true;
+    }
     static std::array<const void *, 16> execution_buffers(const llama_memory_kvmem & mem) {
         const auto & a = mem.historical_active_workspace_;
         const auto & c = mem.cell_workspace_;
@@ -1493,6 +1571,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 !mem.get_kv()->get_cells(0).index_status().reserved &&
                 kvmem_transfer_test_access::capture_arena_unpublished(mem) &&
                 !kvmem_transfer_test_access::slot_workspace(mem).bytes &&
+                !kvmem_transfer_test_access::microbatch_workspace(mem).bytes &&
                 kvmem_transfer_test_access::execution_storage_empty(mem),
                 "real request preparation failure published an owner or retained workspace");
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
@@ -1502,6 +1581,17 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     const auto execution_buffers = kvmem_transfer_test_access::execution_buffers(mem);
     const auto execution_bytes = kvmem_transfer_test_access::execution_bytes(mem);
     const auto slot_workspace = kvmem_transfer_test_access::slot_workspace(mem);
+    const auto microbatch_workspace = kvmem_transfer_test_access::microbatch_workspace(mem);
+    require(microbatch_workspace.objects == 14 && microbatch_workspace.max_ubatches == 4 &&
+            microbatch_workspace.capacities.size() == 3 + 9 * microbatch_workspace.objects &&
+            microbatch_workspace.capacities[0] >= 14 &&
+            microbatch_workspace.capacities[1] >= 4 &&
+            microbatch_workspace.capacities[2] >= 16 && microbatch_workspace.bytes,
+            "real request did not acquire four microbatch data objects and scratch");
+    require(kvmem_transfer_test_access::microbatch_split_without_cpp_allocation(mem, *vocab, tokens.data()),
+            "prepared upstream simple split allocated C++ storage");
+    require(kvmem_transfer_test_access::microbatch_graph_bound_without_cpp_allocation(mem, *vocab, tokens.data()),
+            "prepared microbatch pool could not serve a full batch with ten graph-held owners");
     require(slot_workspace.capacities.size() == 13 && slot_workspace.capacities[0] >= 4 &&
             slot_workspace.capacities[3] >= 16 && slot_workspace.bytes,
             "real request did not acquire four microbatch slot buffers before admission");
@@ -1545,6 +1635,12 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 returned_slots.buffers == slot_workspace.buffers &&
                 returned_slots.capacities == slot_workspace.capacities,
                 "real decode did not return the same prepared slot buffers");
+        const auto returned_microbatches = kvmem_transfer_test_access::microbatch_workspace(mem);
+        require(returned_microbatches.bytes == microbatch_workspace.bytes &&
+                returned_microbatches.buffers == microbatch_workspace.buffers &&
+                returned_microbatches.capacities == microbatch_workspace.capacities &&
+                returned_microbatches.graph_held <= 10,
+                "real decode did not return the same prepared microbatch buffers");
         const auto & cells = mem.get_kv()->get_cells(0);
         const auto index = cells.index_status();
         require(index.reserved && index.nodes == cell_nodes &&

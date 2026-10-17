@@ -352,6 +352,56 @@ private:
             return result;
         }
     } historical_slot_workspace_;
+    struct HistoricalUbatchWorkspace {
+        // Pinned upstream has eight width-specific decode graph results and
+        // two ordinary graph results. Each may retain one older data_t.
+        static constexpr size_t graph_retained_max = 10;
+        std::vector<std::shared_ptr<llama_ubatch::data_t>> data;
+        std::vector<llama_ubatch> ubatches;
+        std::vector<int32_t> indices;
+        uint32_t max_tokens = 0, n_ubatch = 0;
+        size_t max_ubatches = 0;
+        void prepare(uint32_t batch, uint32_t ubatch, uint64_t request_tokens) {
+            if (!batch || !ubatch || !request_tokens)
+                throw std::length_error("invalid historical microbatch bound");
+            max_tokens = static_cast<uint32_t>(std::min<uint64_t>(batch, request_tokens));
+            n_ubatch = ubatch;
+            max_ubatches = (size_t(max_tokens) + ubatch - 1) / ubatch;
+            if (max_ubatches > SIZE_MAX - graph_retained_max)
+                throw std::length_error("historical microbatch pool count overflow");
+            data.reserve(max_ubatches + graph_retained_max);
+            ubatches.reserve(max_ubatches);
+            indices.reserve(std::min<uint32_t>(max_tokens, ubatch));
+            for (size_t i = 0; i < max_ubatches + graph_retained_max; ++i) {
+                const size_t n = std::min<uint32_t>(max_tokens, ubatch);
+                auto item = std::make_shared<llama_ubatch::data_t>();
+                item->token.reserve(n);
+                item->logical_pos.reserve(n);
+                item->pos.reserve(n);
+                item->n_seq_id.reserve(n);
+                item->seq_id.reserve(n);
+                item->seq_id_unq.reserve(1);
+                item->seq_idx.resize(LLAMA_MAX_SEQ, -1);
+                item->output.reserve(n);
+                item->seq_id_data.reserve(n);
+                data.push_back(std::move(item));
+            }
+        }
+        size_t vector_bytes() const noexcept {
+            size_t bytes = data.capacity() * sizeof(data[0]) +
+                ubatches.capacity() * sizeof(llama_ubatch) + indices.capacity() * sizeof(int32_t);
+            for (const auto & item : data) {
+                bytes += item->token.capacity() * sizeof(llama_token) +
+                    (item->logical_pos.capacity() + item->pos.capacity()) * sizeof(llama_pos) +
+                    item->n_seq_id.capacity() * sizeof(int32_t) +
+                    item->seq_id.capacity() * sizeof(llama_seq_id *) +
+                    item->seq_id_unq.capacity() * sizeof(llama_seq_id) +
+                    item->seq_idx.capacity() * sizeof(int32_t) + item->output.capacity() +
+                    item->seq_id_data.capacity() * sizeof(llama_seq_id);
+            }
+            return bytes;
+        }
+    } historical_ubatch_workspace_;
     class HistoricalBatchContext;
     uint32_t context_n_batch_ = 0, context_n_ubatch_ = 0;
     bool gpu_kv_already_resident(uint32_t block_id) const;

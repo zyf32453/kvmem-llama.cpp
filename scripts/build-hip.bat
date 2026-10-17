@@ -66,7 +66,7 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
-for %%P in (0007-historical-active-hook.patch 0008-historical-cell-index-reservation.patch 0009-historical-slot-info-return.patch) do (
+for %%P in (0007-historical-active-hook.patch 0008-historical-cell-index-reservation.patch 0009-historical-slot-info-return.patch 0010-historical-microbatch-pool.patch) do (
     git -C "%LLAMA_DIR%" apply --reverse --check "%ROOT%\patches\%%P" >nul 2>&1
     if errorlevel 1 (
         git -C "%LLAMA_DIR%" apply --check "%ROOT%\patches\%%P"

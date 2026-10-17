@@ -1042,7 +1042,9 @@ public:
     ~HistoricalBatchContext() override {
         // The request has only one live decode context. An unexpected second
         // owner means reusing these buffers would invalidate an active decode.
-        if (!owner_.historical_slot_workspace_.slots.empty()) std::terminate();
+        if (!owner_.historical_slot_workspace_.slots.empty() ||
+            !owner_.historical_ubatch_workspace_.ubatches.empty()) std::terminate();
+        owner_.historical_ubatch_workspace_.ubatches = take_ubatches();
         owner_.historical_slot_workspace_.slots = take_slot_infos();
     }
 
@@ -1180,6 +1182,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         const size_t max_capture_tokens = static_cast<size_t>(input_tokens + max_output_tokens);
         HistoricalSlotWorkspace slot_workspace;
         slot_workspace.prepare(context_n_batch_, context_n_ubatch_, max_capture_tokens);
+        HistoricalUbatchWorkspace ubatch_workspace;
+        ubatch_workspace.prepare(context_n_batch_, context_n_ubatch_, max_capture_tokens);
         // Each token has at most one original position and one capture range.
         // One extra copy can be held by a D2H slot. Four allocations per
         // one-token batch cover alignment padding in the fixed arena.
@@ -1238,6 +1242,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         historical_active_workspace_ = std::move(active_workspace);
         cell_workspace_ = std::move(cells);
         historical_slot_workspace_ = std::move(slot_workspace);
+        historical_ubatch_workspace_ = std::move(ubatch_workspace);
         pos_queue_.swap(queued_captures);
         capture_arena_.swap(capture_arena);
         capture_max_tokens_ = max_capture_tokens;
@@ -1252,6 +1257,9 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         LLAMA_LOG_INFO("KVMEM_SLOT_INFO slots=%zu bytes=%zu max_batch=%u ubatch=%u\n",
             historical_slot_workspace_.slots.size(), historical_slot_workspace_.capacity_bytes(),
             historical_slot_workspace_.max_tokens, historical_slot_workspace_.n_ubatch);
+        LLAMA_LOG_INFO("KVMEM_UBATCH_POOL blocks=%zu vector_bytes=%zu max_batch=%u ubatch=%u\n",
+            historical_ubatch_workspace_.data.size(), historical_ubatch_workspace_.vector_bytes(),
+            historical_ubatch_workspace_.max_tokens, historical_ubatch_workspace_.n_ubatch);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_ARENA bytes=%zu queue_capacity=%zu max_tokens=%zu\n",
             capture_arena_->capacity_bytes(), pos_queue_.capacity(), max_capture_tokens);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu layout_bytes=%zu layout_slots=%u layout_host_bytes=%zu\n",
@@ -2951,6 +2959,51 @@ llama_memory_context_ptr llama_memory_kvmem::init_batch(
         bool embd_all) {
     GGML_UNUSED(embd_all);
 
+    if (historical_capture_) {
+        auto & slots = historical_slot_workspace_;
+        auto & micro = historical_ubatch_workspace_;
+        if (slots.slots.empty() || micro.ubatches.capacity() < micro.max_ubatches ||
+            n_ubatch != slots.n_ubatch || n_ubatch != micro.n_ubatch ||
+            balloc.get_n_tokens() > slots.max_tokens || balloc.get_n_tokens() > micro.max_tokens) {
+            historical_capture_->fail();
+            LLAMA_LOG_ERROR("historical capture: decode exceeds prepared microbatch bound\n");
+            return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
+        auto ubatches = std::move(micro.ubatches);
+        ubatches.clear(); // release the previous context's shared data owners
+        llama_kv_cache::slot_info_vec_t sinfos;
+        try {
+            if (!balloc.use_prepared_simple_pool(&micro.data, &micro.indices))
+                throw std::runtime_error("historical capture requires one text sequence and one position axis");
+            struct ClearPreparedPool {
+                llama_batch_allocr & balloc;
+                ~ClearPreparedPool() { balloc.clear_prepared_simple_pool(); }
+            } clear_pool{balloc};
+            balloc.split_reset();
+            while (true) {
+                auto ubatch = balloc.split_simple(n_ubatch);
+                if (!ubatch.n_tokens) break;
+                if (ubatches.size() >= micro.max_ubatches)
+                    throw std::length_error("historical microbatch count exceeded reservation");
+                ubatches.push_back(std::move(ubatch));
+            }
+            if (ubatches.empty() || balloc.get_n_used() != balloc.get_n_tokens() ||
+                ubatches.size() > slots.slots.size())
+                throw std::length_error("historical microbatch split exceeded reservation");
+            sinfos = std::move(slots.slots);
+            if (!prepare_ubatches(ubatches, balloc.get_n_tokens(), sinfos))
+                throw std::runtime_error("historical microbatch preparation failed");
+            return std::unique_ptr<HistoricalBatchContext>(new HistoricalBatchContext(
+                    *this, kv_, std::move(sinfos), std::move(ubatches)));
+        } catch (const std::exception & e) {
+            historical_capture_->fail();
+            if (slots.slots.empty()) slots.slots = std::move(sinfos);
+            if (micro.ubatches.empty()) micro.ubatches = std::move(ubatches);
+            LLAMA_LOG_ERROR("historical capture microbatch: %s\n", e.what());
+            return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
+    }
+
     do {
         balloc.split_reset();
 
@@ -2968,32 +3021,10 @@ llama_memory_context_ptr llama_memory_kvmem::init_batch(
         }
 
         llama_kv_cache::slot_info_vec_t sinfos;
-        if (historical_capture_) {
-            auto & ws = historical_slot_workspace_;
-            if (ws.slots.empty() || ubatches.empty() ||
-                n_ubatch != ws.n_ubatch || balloc.get_n_tokens() > ws.max_tokens ||
-                ubatches.size() > ws.slots.size()) {
-                historical_capture_->fail();
-                LLAMA_LOG_ERROR("historical capture: decode exceeds prepared slot bound\n");
-                break;
-            }
-            sinfos = std::move(ws.slots);
-        }
         if (!prepare_ubatches(ubatches, balloc.get_n_tokens(), sinfos)) {
-            if (historical_capture_) {
-                historical_capture_->fail();
-                historical_slot_workspace_.slots = std::move(sinfos);
-            }
             break;
         }
 
-        if (historical_capture_) {
-            // Allocate the context object before transferring the reusable
-            // vectors. A failed allocation leaves them with the request.
-            auto context = std::unique_ptr<HistoricalBatchContext>(new HistoricalBatchContext(
-                    *this, kv_, std::move(sinfos), std::move(ubatches)));
-            return context;
-        }
         return std::make_unique<llama_kv_cache_context>(
                 kv_, std::move(sinfos), std::move(ubatches));
     } while (false);
