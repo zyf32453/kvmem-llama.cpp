@@ -48,10 +48,24 @@ bool kvmem_stagein_flush(int64_t * copy_us, int64_t * rope_us,
 // the 32 MiB GPU slab, then one D2H. Two host pins; no extra VRAM slab.
 bool kvmem_stageout_enqueue(const void * gpu_src, size_t nbytes);
 size_t kvmem_stageout_used();
+// -1 permits a synchronous fallback: no submitted operation from that batch
+// remains and its raw-pointer queue has been discarded. An unconfirmed drain
+// throws, retaining queue/buffer ownership; the request must be closed.
 int kvmem_stageout_submit(int64_t * copy_us);
+// false also guarantees the failed batch's device work has drained. It does
+// not discard the NEXT, as-yet-unsubmitted queue. An unconfirmed drain throws.
 bool kvmem_stageout_wait(int slot, int64_t * copy_us);
 const uint8_t * kvmem_stageout_slot_base(int slot);
+// May throw if in-flight work cannot be proven complete. Never clears an
+// unresolved batch or grants permission to reuse its buffers/source slots.
 void kvmem_stageout_clear();
+
+// Internal deterministic fault seam, scoped to the current execution domain.
+// Empty in production. A true result skips the named CUDA call. The hook
+// must not throw or change domains; install/remove it on the GPU owner thread.
+enum class KvmemStageoutPoint { OpsCopy, GatherLaunch, PackedCopy, ItemCopy, EventRecord, EventWait, Drain };
+using KvmemStageoutFault = bool (*)(void *, KvmemStageoutPoint, size_t) noexcept;
+void kvmem_stageout_test_fault(KvmemStageoutFault fault, void * context);
 
 // Batched device copies (layout gather/scatter). One kernel; false → caller D2D.
 bool kvmem_d2d_batched(const void * const * src, void * const * dst,

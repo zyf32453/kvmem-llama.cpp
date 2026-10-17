@@ -67,6 +67,13 @@ struct Stage {
     size_t      used      = 0;
     int         out_cur   = 0;
     cudaEvent_t out_ev[2] = {nullptr, nullptr};
+    bool        out_hazard = false;
+    bool        out_failed = false;
+    bool        out_recorded = false;
+    bool        out_ready[2] = {false, false};
+    int         out_slot = -1;
+    KvmemStageoutFault out_fault = nullptr;
+    void *      out_fault_context = nullptr;
     std::vector<Item> items;
     struct OutItem {
         size_t          off      = 0;
@@ -100,6 +107,30 @@ bool cuda_ok(cudaError_t e, const char * what) {
 
 cudaStream_t stream() {
     return execution_stream();
+}
+
+bool stageout_fault(KvmemStageoutPoint point, size_t index = 0) {
+    return stage().out_fault && stage().out_fault(stage().out_fault_context, point, index);
+}
+
+void stageout_drain() {
+    if (!stage().out_hazard) return;
+    // A failed API/event is not evidence that earlier queued operations have
+    // stopped. Keep all source and destination ownership until a checked sync.
+    stage().out_failed = true;
+    if (stageout_fault(KvmemStageoutPoint::Drain) ||
+            !cuda_ok(cudaStreamSynchronize(stream()), "stageout failure drain"))
+        throw std::runtime_error("KVMem stageout completion is unconfirmed; retain GPU sources and staging buffers");
+    stage().out_hazard = false;
+    stage().out_failed = false;
+    stage().out_recorded = false;
+    stage().out_slot = -1;
+    stage().out_ready[0] = stage().out_ready[1] = false;
+}
+
+void stageout_discard_queue() {
+    stage().outs.clear();
+    if (stage().items.empty()) stage().used = 0;
 }
 
 template <int N>
@@ -354,6 +385,8 @@ void kvmem_gpu_state_free(kvmem_gpu_state * state) {
 }
 
 bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed) {
+    if (stage().out_failed)
+        throw std::runtime_error("KVMem staging domain has an unresolved stageout failure");
     if (n_f32 == 0) {
         return false;
     }
@@ -430,6 +463,8 @@ bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed) {
 }
 
 void kvmem_stagein_gpu_free() {
+    // In particular, do not free pinned memory after a partial failed submit.
+    stageout_drain();
     if (stage().dev_f32) {
         cudaFree(stage().dev_f32);
         stage().dev_f32 = nullptr;
@@ -453,6 +488,7 @@ void kvmem_stagein_gpu_free() {
     stage().pin_n = 0;
     stage().used = 0;
     stage().out_cur = 0;
+    stage().out_ready[0] = stage().out_ready[1] = false;
     stage().items.clear();
     stage().outs.clear();
     if (stage().dev_ops) {
@@ -884,6 +920,8 @@ bool kvmem_stagein_enqueue_v(const void * packed, size_t nbytes, uint8_t * dst,
 }
 
 bool kvmem_stageout_enqueue(const void * gpu_src, size_t nbytes) {
+    if (stage().out_failed)
+        throw std::runtime_error("KVMem stageout admission is closed until failed work drains");
     if (!gpu_src || nbytes == 0 || !stage().items.empty()) {
         return false;
     }
@@ -907,7 +945,16 @@ size_t kvmem_stageout_used() {
     return stage().used;
 }
 
-int kvmem_stageout_submit(int64_t * copy_us) {
+int kvmem_stageout_submit(int64_t * copy_us) try {
+    if (stage().out_failed) {
+        // Retrying only settles the original batch. It cannot silently submit
+        // those raw pointers again or reopen the failed request.
+        stageout_drain();
+        stageout_discard_queue();
+        return -1;
+    }
+    if (stage().out_hazard)
+        throw std::logic_error("KVMem stageout submit must first settle the preceding batch");
     if (stage().outs.empty()) {
         return -1;
     }
@@ -915,8 +962,17 @@ int kvmem_stageout_submit(int64_t * copy_us) {
     uint8_t * dst = (slot == 0 || slot == 1) ? stage().pin[slot] : nullptr;
     if (!dst || !stage().dev_q || stage().used == 0 || stage().used > stage().n_q ||
         stage().used > stage().pin_n || !stage().out_ev[slot]) {
+        stageout_discard_queue();
         return -1;
     }
+    const auto fallback = [&]() {
+        stageout_drain();
+        stageout_discard_queue();
+        return -1;
+    };
+    stage().out_ready[slot] = false;
+    stage().out_recorded = false;
+    stage().out_slot = slot;
     const int64_t t0 = ggml_time_us();
     bool packed = false;
     const int nitem = (int) stage().outs.size();
@@ -934,13 +990,16 @@ int kvmem_stageout_submit(int64_t * copy_us) {
             stage().host_ops[i].nbytes = (uint32_t) stage().outs[i].nbytes;
             stage().host_ops[i].pad = 0;
         }
-        if (ops_ok &&
+        stage().out_hazard = true;
+        if (ops_ok && !stageout_fault(KvmemStageoutPoint::OpsCopy) &&
             cuda_ok(kvmem_copy_async(stage().dev_ops, stage().host_ops.data(),
                                     (size_t) nitem * sizeof(CopyOp),
                                     cudaMemcpyHostToDevice, stream()),
                     "gather ops H2D")) {
-            copy_bytes<<<nitem, 256, 0, stream()>>>(stage().dev_ops, nitem);
-            packed = cuda_ok(cudaGetLastError(), "gather kernel");
+            if (!stageout_fault(KvmemStageoutPoint::GatherLaunch)) {
+                copy_bytes<<<nitem, 256, 0, stream()>>>(stage().dev_ops, nitem);
+                packed = cuda_ok(cudaGetLastError(), "gather kernel");
+            }
             if (packed) {
                 uint64_t bytes = 0;
                 for (const auto & item : stage().outs) bytes += item.nbytes;
@@ -949,23 +1008,32 @@ int kvmem_stageout_submit(int64_t * copy_us) {
         }
     }
     if (packed) {
-        packed = cuda_ok(kvmem_copy_async(dst, stage().dev_q, stage().used,
+        packed = !stageout_fault(KvmemStageoutPoint::PackedCopy) &&
+                 cuda_ok(kvmem_copy_async(dst, stage().dev_q, stage().used,
                                          cudaMemcpyDeviceToHost, stream()),
                          "stageout D2H");
     }
     if (!packed) {
-        cudaStreamSynchronize(stream());
+        stageout_drain();
+        // The checked gather drain ended the previous attempt. Direct copies
+        // now form a new attempt, with the same still-owned source batch.
+        stage().out_hazard = true;
+        stage().out_slot = slot;
+        size_t index = 0;
         for (const Stage::OutItem & o : stage().outs) {
-            if (!cuda_ok(kvmem_copy_async(dst + o.off, o.gpu_src, o.nbytes,
+            if (stageout_fault(KvmemStageoutPoint::ItemCopy, index++) ||
+                !cuda_ok(kvmem_copy_async(dst + o.off, o.gpu_src, o.nbytes,
                                          cudaMemcpyDeviceToHost, stream()),
                          "stageout D2H item")) {
-                return -1;
+                return fallback();
             }
         }
     }
-    if (!cuda_ok(cudaEventRecord(stage().out_ev[slot], stream()), "stageout record")) {
-        return -1;
+    if (stageout_fault(KvmemStageoutPoint::EventRecord) ||
+            !cuda_ok(cudaEventRecord(stage().out_ev[slot], stream()), "stageout record")) {
+        return fallback();
     }
+    stage().out_recorded = true;
     if (copy_us) {
         *copy_us += ggml_time_us() - t0;
     }
@@ -973,19 +1041,31 @@ int kvmem_stageout_submit(int64_t * copy_us) {
     stage().used = 0;
     stage().out_cur = 1 - slot;
     return slot;
+} catch (...) {
+    if (stage().out_hazard) stage().out_failed = true;
+    throw;
 }
 
 bool kvmem_stageout_wait(int slot, int64_t * copy_us) {
-    if (slot < 0) {
+    if (slot < 0 && !stage().out_hazard) {
         return true;
     }
-    if (slot > 1 || !stage().out_ev[slot]) {
+    if (slot < 0 || slot > 1 || !stage().out_ev[slot] || stage().out_failed ||
+            (stage().out_hazard && (slot != stage().out_slot || !stage().out_recorded))) {
+        stageout_drain();
         return false;
     }
+    if (!stage().out_hazard) return stage().out_ready[slot];
     const int64_t t0 = ggml_time_us();
-    if (!cuda_ok(cudaEventSynchronize(stage().out_ev[slot]), "stageout wait")) {
+    if (stageout_fault(KvmemStageoutPoint::EventWait) ||
+            !cuda_ok(cudaEventSynchronize(stage().out_ev[slot]), "stageout wait")) {
+        stageout_drain();
         return false;
     }
+    stage().out_hazard = false;
+    stage().out_recorded = false;
+    stage().out_slot = -1;
+    stage().out_ready[slot] = true;
     if (copy_us) {
         *copy_us += ggml_time_us() - t0;
     }
@@ -993,17 +1073,20 @@ bool kvmem_stageout_wait(int slot, int64_t * copy_us) {
 }
 
 const uint8_t * kvmem_stageout_slot_base(int slot) {
-    if (slot < 0 || slot > 1) {
+    if (slot < 0 || slot > 1 || !stage().out_ready[slot] || stage().out_failed) {
         return nullptr;
     }
     return stage().pin[slot];
 }
 
 void kvmem_stageout_clear() {
-    stage().outs.clear();
-    if (stage().items.empty()) {
-        stage().used = 0;
-    }
+    stageout_drain();
+    stageout_discard_queue();
+}
+
+void kvmem_stageout_test_fault(KvmemStageoutFault fault, void * context) {
+    stage().out_fault = fault;
+    stage().out_fault_context = context;
 }
 
 bool kvmem_d2d_batched(const void * const * src, void * const * dst,

@@ -240,6 +240,26 @@ shadow 不退休块、不释放 payload；相同配置结束为 `committed=0, re
 
 目前仍是单请求、单 GPU、recency、RAM 的阶段实现。设备提交/完成失败时的取消与源数据保护尚需专门验收；server、多请求、所有 active 入口、GPU/metadata/backend/rollback 的完整预约、长期有界和实际 agent 效果均未完成。
 
+### Packed K/V 搬运失败的完成证明与资源保护（2026-10-17）
+
+发现并修复 reverse slab 的两个错误路径：原先部分 `cudaMemcpyAsync` 或 event record 失败会直接返回 `-1`，没有检查先前已提交工作是否排空，并可能把原始 GPU 指针留在 `outs` 队列；event wait 失败则可能立即转同步读取并归还源槽。API 报错本身不能证明先前工作已经结束，这不满足导师文档第 5 节“已提交任务必须真实完成或确证取消”的要求。
+
+现在 stageout 记录未确认的设备工作、对应事件和可读结果。提交失败时，只有检查 stream 排空成功并移除该批原始指针后，才返回可安全回退的 `-1`。等待旧事件失败时，同样先确认排空，再允许同步回退，但保留下一批尚未提交的队列。等待成功前不能取得输出 pin 地址。清空队列、释放 staging buffers 或继续申请 staging 也不能绕过未解决的失败。
+
+无法确认排空时抛出错误并保留原始任务、writer、CPU 存储及 GPU 源槽引用；适配器将当前请求关闭，后续追加被拒绝。随后即使能够确认旧任务完成，也只结算已获准的工作，不重新开放失败请求，不把 Retired 代发布成 Live。物理 CPU 回收仍须等待 writer 等真实依赖退出。持续无法排空的上下文析构选择显式终止进程，阻止 C++ 成员展开提前销毁 GPU 源或把 CPU owner 移交后台；这不是任意设备故障的服务恢复方案。
+
+新增按 execution domain 安装的内部故障钩子，生产默认空，不使用全局环境变量改变错误行为。`kvmem-stageout-failure-test` 使用实际 CUDA 缓冲区和搬运，共检查 8 个场景：descriptor copy、gather launch、packed copy、第二次直接 copy、event record，event wait 的可排空/不可确认两种结果，以及提交后始终无法确认排空。验证失败后新批次读到新数据、旧等待不丢下一批队列，以及未确认期间 enqueue/clear/free/resize 均被拒绝。故障点为确定性注入，不代表实际诱发或恢复硬件损坏。
+
+实际模型由 10 个增加到 **13 个顶层场景**。新增加的 record/wait 可恢复场景均完成 160-token 输入和 3-token 输出，**432 个 layer span** 的 CPU/GPU 字节比较通过。不可确认场景在实际图采集后关闭请求，直接检查每个未完成 job 的原 CPU payload、GPU 源槽和 reader 引用仍存在；对该 Writing 代退休后 `try_reclaim` 返回 Deferred。解除故障后原任务收尾，退休不复活，失败请求不被算作成功，最终上下文退出后 CPU owner 的弱引用过期。此处不依赖总 payload bytes 的瞬时相等，因为未用私有预约可同时在后台归还。
+
+最终 CUDA 故障测试 **1/1（8 个内部场景）**、全部 **13 个模型场景**、Windows 相关宿主 **12/12**、Linux 全部宿主 **24/24** 通过。六个变更源码/构建文件的本地/远程 SHA256 一致。原始记录为 `historical-stageout-native-final.log`、`historical-stageout-final-gpu-test.log`、`historical-stageout-{windows,host}-test.log`，保存在本地 `build-local/capture-session-validation/` 和既定远程隔离目录。此前宿主 ASan/TSan 结果不能作为本轮 CUDA 代码的 sanitizer 证明。
+
+额外运行 CUDA compute-sanitizer **未取得有效检查结论**：该 WSL/WDDM 环境报告 debugger interface 初始化失败、设备不受支持，工具以 2 errors 退出，该次进程也报告数据比较失败；原生 CUDA 故障测试随后独立重跑通过。完整失败日志保存在 `historical-stageout-cuda-memcheck.log`。不能把该项记为通过或宣称显存错误已被 sanitizer 排除，需在可用的 CUDA 调试环境补测。
+
+普通 CLI delete 的最终回归同样正常完成生成与退出：既定模型、356-token 输入、8-token 输出、容量/水位 32/14/16，观测 `committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 为 0。日志和输出为 `historical-stageout-cli-delete.log/.tokens`；完成时 payload 仍可能包含后台尚未归还的私有预约。
+
+本轮只处理 packed K/V reverse slab。Mean-K/Q capture worker、其它设备提交/完成路径及更完整的取消协议仍需核对与验收；随后还须补齐整请求资源预约、全部 active 入口、server、多请求和长期有界等原始交付项。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

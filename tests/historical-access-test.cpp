@@ -3,6 +3,7 @@
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-batch.h"
 #include "llama-kvmem-hooks.h"
+#include "llama-kvmem-stagein.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
@@ -21,6 +22,33 @@
 #include <future>
 
 struct kvmem_transfer_test_access {
+    static bool capture_failed(const llama_memory_kvmem & mem) { return mem.historical_capture_->failed(); }
+    static bool append_after_failure(llama_memory_kvmem & mem) { return mem.prepare_working_set(1); }
+    static uint64_t source_readers(const llama_memory_kvmem & mem) {
+        uint64_t total = 0;
+        for (auto count : mem.historical_gpu_readers_) total += count;
+        return total;
+    }
+    static kvmem::HistoricalKvHandle pending_writer(const llama_memory_kvmem & mem) {
+        for (const auto * jobs : {&mem.harvest_v_jobs_, &mem.harvest_v_pending_.jobs})
+            for (const auto & job : *jobs)
+                if (job.writer && !job.committed) return job.writer->handle();
+        throw std::runtime_error("failed batch retained no captured writer");
+    }
+    static bool pending_resources_held(const llama_memory_kvmem & mem) {
+        bool observed = false;
+        for (const auto * jobs : {&mem.harvest_v_jobs_, &mem.harvest_v_pending_.jobs}) {
+            for (const auto & job : *jobs) {
+                if (!job.writer || job.committed) continue;
+                observed = true;
+                if (job.historical_gpu_slot < 0 || !mem.historical_gpu_readers_[job.historical_gpu_slot] ||
+                        std::find(mem.free_slots_.begin(), mem.free_slots_.end(), job.historical_gpu_slot) != mem.free_slots_.end() ||
+                        !job.writer->storage()->write_progress(job.writer->writer(), job.writer->handle(), job.il))
+                    return false;
+            }
+        }
+        return observed;
+    }
     static void install_gc_policy(llama_memory_kvmem & mem,
                                   std::unique_ptr<kvmem::HistoricalKvPolicy> policy) {
         const auto repository = mem.historical_capture_->repository();
@@ -820,7 +848,23 @@ private:
     std::shared_ptr<HistoricalPolicyGate> gate_;
 };
 
-enum class RetirementPoint { None, BetweenCalls, AfterSubmission, WritingAfterSubmission, PausedWorker };
+enum class RetirementPoint {
+    None, BetweenCalls, AfterSubmission, WritingAfterSubmission, PausedWorker,
+    StageoutRecord, StageoutWait, StageoutUnconfirmed
+};
+struct ModelStageoutFault {
+    KvmemStageoutPoint point = KvmemStageoutPoint::EventRecord;
+    bool fired = false, unconfirmed = false;
+    unsigned drains = 0;
+    static bool inject(void * context, KvmemStageoutPoint point, size_t) noexcept {
+        auto & fault = *static_cast<ModelStageoutFault *>(context);
+        if (point == KvmemStageoutPoint::Drain) { ++fault.drains; return fault.unconfirmed && fault.fired; }
+        if (point == fault.point && !fault.fired) { fault.fired = true; return true; }
+        return false;
+    }
+    void clear() { kvmem_stageout_test_fault(nullptr, nullptr); }
+    ~ModelStageoutFault() { clear(); }
+};
 static void check_request_capture(llama_context * ctx, llama_model * model,
                                   llama_memory_kvmem & mem,
                                   RetirementPoint retirement = RetirementPoint::None) {
@@ -878,6 +922,41 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     uint32_t position = 0;
     execute(tokens.data(), 48);
     position += 48;
+    const bool stageout_fault = retirement == RetirementPoint::StageoutRecord ||
+        retirement == RetirementPoint::StageoutWait || retirement == RetirementPoint::StageoutUnconfirmed;
+    ModelStageoutFault fault;
+    if (stageout_fault) {
+        fault.point = retirement == RetirementPoint::StageoutWait ?
+            KvmemStageoutPoint::EventWait : KvmemStageoutPoint::EventRecord;
+        fault.unconfirmed = retirement == RetirementPoint::StageoutUnconfirmed;
+        kvmem_stageout_test_fault(ModelStageoutFault::inject, &fault);
+    }
+    if (fault.unconfirmed) {
+        bool rejected = false;
+        try { execute(tokens.data() + position, 32); } catch (const std::exception &) { rejected = true; }
+        auto repository = kvmem_transfer_test_access::capture_repository(mem);
+        require(rejected && fault.fired && fault.drains && repository->closed() &&
+                kvmem_transfer_test_access::capture_failed(mem) &&
+                kvmem_transfer_test_access::source_readers(mem) &&
+                kvmem_transfer_test_access::pending(mem) && kvmem_stageout_used(),
+                "unconfirmed real-model DMA did not close admission and retain source/writer ownership");
+        const auto handle = kvmem_transfer_test_access::pending_writer(mem);
+        require(repository->retire(handle) == kvmem::HistoricalKvRepository::RetireResult::Committed &&
+                repository->try_reclaim(handle) == kvmem::HistoricalKvRepository::ReclaimResult::Deferred &&
+                kvmem_transfer_test_access::pending_resources_held(mem),
+                "CPU GC freed a failed DMA's captured writer generation");
+        const auto rows = mem.store_n_tokens();
+        require(!kvmem_transfer_test_access::append_after_failure(mem) && mem.store_n_tokens() == rows,
+                "failed model request admitted a new append");
+        fault.clear();
+        kvmem_transfer_test_access::commit(mem);
+        require(!kvmem_transfer_test_access::source_readers(mem) &&
+                repository->completion_state(handle) == kvmem::HistoricalKvRepository::CompletionState::Retired &&
+                !llama_kvmem_historical_capture_finish(),
+                "settling old DMA reopened or falsely completed a failed request");
+        std::puts("PASS real model unconfirmed DMA: request closed, writer/source retained, retirement deferred, checked cleanup did not revive history");
+        return;
+    }
     std::shared_ptr<HistoricalPolicyGate> paused;
     // Open the barrier before the context's GC destructor can join, including
     // on any failed model assertion below.
@@ -1086,6 +1165,12 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         cold |= mem.store().blocks()[expected.id].gpu_slot < 0;
     }
     require(cold && mem.store_n_tokens() == 163, "real capture did not exercise GPU eviction");
+    if (stageout_fault) {
+        require(fault.fired && fault.drains, "model did not execute the selected stageout failure path");
+        std::printf("PASS real model stageout recovery: point=%s, %zu layer spans byte-equal, full request completed\n",
+                    retirement == RetirementPoint::StageoutRecord ? "event-record" : "event-wait", saved.size());
+        return;
+    }
     if (paused) {
         std::printf("PASS real model with paused GC worker: 160 input + full 3-token output bound, request finish returned before worker resumed\n");
         return;
@@ -1228,7 +1313,7 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u}) {
+        for (unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u}) {
             if (scenario >= 3) {
                 kp.method = 0;
                 kp.budget = 96;
@@ -1247,7 +1332,10 @@ int main(int argc, char ** argv) {
                 scenario == 5 ? RetirementPoint::BetweenCalls :
                 scenario == 6 ? RetirementPoint::AfterSubmission :
                 scenario == 7 ? RetirementPoint::WritingAfterSubmission :
-                scenario == 8 ? RetirementPoint::PausedWorker : RetirementPoint::None);
+                scenario == 8 ? RetirementPoint::PausedWorker :
+                scenario == 10 ? RetirementPoint::StageoutRecord :
+                scenario == 11 ? RetirementPoint::StageoutWait :
+                scenario == 12 ? RetirementPoint::StageoutUnconfirmed : RetirementPoint::None);
             else if (scenario == 2) check_partial_rollover(*mem);
             else if (scenario == 1) check_managed_async_harvest(*mem);
             else {
@@ -1255,6 +1343,15 @@ int main(int argc, char ** argv) {
                 check_access(*mem);
             }
             if (scenario == 9) check_context_close_with_paused_worker(ctx, *mem);
+            if (scenario == 12) {
+                std::weak_ptr<kvmem::HistoricalKvRawStore> storage = kvmem_transfer_test_access::capture_storage(*mem);
+                ctx.reset();
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                while (!storage.expired() && std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                require(storage.expired(), "failed real-model domain leaked captured history after checked teardown");
+                std::puts("PASS failed real-model teardown: captured CPU owner released after device cleanup");
+            }
         }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FAIL historical adapter access: %s\n", e.what());

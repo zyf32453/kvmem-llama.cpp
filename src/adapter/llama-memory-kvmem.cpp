@@ -1033,16 +1033,25 @@ struct llama_memory_kvmem::HistoricalCpuCleanup final : kvmem::HistoricalKvClean
 llama_memory_kvmem::~llama_memory_kvmem() {
     if (historical_capture_) historical_capture_->repository()->close();
     if (historical_gc_) historical_gc_->request_stop();
-    decode_mean_flush();
-    decode_mean_discard();
-    decode_mean_print_sum();
-    harvest_flush();
-    if (historical_capture_) harvest_gpu_v_commit();
-    harvest_worker_stop();
-    harvest_perf_print_sum();
-    d2h_free();
-    multi_d2h_free();
-    if (!multi_gpu_) kvmem_stagein_gpu_free();
+    try {
+        decode_mean_flush();
+        decode_mean_discard();
+        decode_mean_print_sum();
+        harvest_flush();
+        if (historical_capture_) harvest_gpu_v_commit();
+        harvest_worker_stop();
+        harvest_perf_print_sum();
+        d2h_free();
+        multi_d2h_free();
+        if (!multi_gpu_) kvmem_stagein_gpu_free();
+    } catch (const std::exception & e) {
+        // A persistent device failure cannot grant reuse/free permission.
+        // Abort before member unwinding can destroy still-used GPU sources
+        // or publish their CPU owners to the background cleanup service.
+        GGML_ABORT("KVMem teardown could not safely finish device work: %s", e.what());
+    } catch (...) {
+        GGML_ABORT("KVMem teardown could not safely finish device work");
+    }
     if (mtp_) {
         mtp_->detach_target();
         mtp_ = nullptr;
@@ -4054,7 +4063,7 @@ void llama_memory_kvmem::commit_harvest_packed(const HarvestVJob & job, const ui
     else raw_->write_layer_v_gpu(job.pos0, job.n, job.il, bytes);
 }
 
-void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) {
+void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) try {
     if (job.historical_gpu_slot >= 0 &&
             (size_t(job.historical_gpu_slot) >= historical_gpu_readers_.size() ||
              historical_gpu_retired_[job.historical_gpu_slot] ||
@@ -4087,6 +4096,9 @@ void llama_memory_kvmem::enqueue_harvest_packed(HarvestVJob job) {
     std::vector<uint8_t> packed(job.nbytes);
     kvmem_tensor_get(job.vt, packed.data(), job.tensor_off, job.nbytes);
     commit_harvest_packed(job, packed.data());
+} catch (...) {
+    if (historical_capture_) historical_capture_->fail();
+    throw;
 }
 
 void llama_memory_kvmem::harvest_captured_packed(const CaptureBatch & batch, uint32_t n_keep) {
@@ -4211,7 +4223,7 @@ void llama_memory_kvmem::harvest_write_batch() {
     b.slot = -1;
 }
 
-void llama_memory_kvmem::harvest_gpu_v_flush_slab() {
+void llama_memory_kvmem::harvest_gpu_v_flush_slab() try {
     if (harvest_v_jobs_.empty()) {
         return;
     }
@@ -4234,9 +4246,12 @@ void llama_memory_kvmem::harvest_gpu_v_flush_slab() {
     if (harvest_v_pending_.slot < 0) {
         harvest_write_batch();
     }
+} catch (...) {
+    if (historical_capture_) historical_capture_->fail();
+    throw;
 }
 
-void llama_memory_kvmem::harvest_gpu_v_commit() {
+void llama_memory_kvmem::harvest_gpu_v_commit() try {
     harvest_gpu_v_flush_slab();
     int64_t * gpu_us = retr_.enabled ? &retr_.stage_out_gpu_us : nullptr;
     if (harvest_v_pending_.slot >= 0) {
@@ -4249,6 +4264,9 @@ void llama_memory_kvmem::harvest_gpu_v_commit() {
     }
     kvmem_stageout_clear();
     harvest_gpu_queued_.clear();
+} catch (...) {
+    if (historical_capture_) historical_capture_->fail();
+    throw;
 }
 
 void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
