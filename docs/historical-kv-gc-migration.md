@@ -396,6 +396,31 @@ ActiveSet 增加 `prepare`、`try_acquire` 和 `release`。复用的是对象和
 
 本轮检查还明确了下一处实际分配：上游 `llama_kv_cells` 的 `used` 和 `seq_pos` 是节点容器，`apply_ubatch` 的插入、移除仍会分配/释放节点。完整 `llama_ubatch::data_t`、slot_info 列表、memory context、采集范围及 rollback 快照也没有全部准备。不能把外层 cell 临时数组复用或 active 接纳零分配解释为完整 ubatch/模型请求零动态分配。下一步须继续处理这些真实节点及上下文所有权，覆盖 prepare、apply、取消与恢复路径，再推进其它 active 入口、server、多请求及完整 P4 长轨迹。P0–P6 总目标保持不变。
 
+### 上游 cell 索引的真实节点预约与复用（2026-10-17）
+
+上一轮只准备了重建单块 cell 所需的外层数组，上游 `llama_kv_cells::used` 和 `seq_pos` 的 `std::set` 仍会在插入时分配节点、删除时释放节点。本轮增加 `ReservedNodeSet`，在请求准备阶段实际分配并提取标准容器节点，执行时在“备用池”和“有序索引”之间转移节点。删除、清空和恢复均复用原节点，容量不足明确失败；未启用预约的实例保留普通有序集合行为。复制整个索引仍会分配，不能把它当成已预约的快照接口。
+
+维护补丁 `0008-historical-cell-index-reservation.patch` 将这一机制接入真正的上游 cell 类。当前受限历史请求只允许一个序列，按实际 cell 数 N 准备 used 和该序列的位置索引各 N 个节点，其他序列的预约容量为零。插入、删除、位置变更、连续/非连续恢复及同尺寸 reset/resize 都使用该池；不同尺寸增长及未预约序列的写入/恢复在改动原状态前拒绝。新请求只接受无在用 cell、无旧预约、无待处理 position shift 的缓存。重复位置仍以 `(position, cell index)` 区分，查询顺序保持原行为。
+
+准备分为 `prepare → install → accept`：节点先由私有 token 持有，在已有 RAM/元数据 session 接纳之前安装；如果 runtime 已变化导致接纳失败，token 析构撤销安装并归还全部节点。安装与接受之间由同一个前台 owner 串行处理，不允许应用 cell。准备失败不会发布 historical owner，也不等待 GC 提供资源。接受后节点池归 cell 缓存持有。日志 `KVMEM_CELL_INDEX` 报告真实节点数量；模型测试为 **448 个**，本轮 CLI 为 **1536 个**。节点数量不是 allocator 字节数、RSS 或完整请求内存预算。
+
+补丁同时将 `LLAMA_KVMEM` 及所需头文件路径作为 libllama 的公共构建属性，确保使用内部 cell 头文件的调用方与库采用相同结构布局。Linux、Windows PowerShell 和 Windows HIP 构建脚本均纳入补丁；后两者同时补齐先前未自动应用的 `0007` active hook。Linux 重复应用检查及三文件的撤销/重放/逐文件比较通过，PowerShell 脚本语法检查通过；本轮未执行 Windows CUDA 或 HIP 完整构建。
+
+新增测试及结果：
+
+- 节点容器在准备阶段逐项注入 C++ 分配失败；安装后禁止 `new`，执行 **512 次**插入、删除、清空及有序查询，对照标准集合并检查没有节点分配/释放、节点数量守恒。另验证容量耗尽、零容量、复制后的备用容量及移动所有权。
+- 实际上游 cell 测试完成 **128 轮**插入、移除、位置调整、清空和两种恢复。测试在这些操作期间禁止 C++ 分配并统计释放；还覆盖 RAM 接纳失败后的节点回滚、准备后缓存变化、待处理 shift、普通多序列共享 cell，以及预约非零序列的恢复。
+- 真实模型布局测试在调用真正的 `occupy_block_cells` / `apply_ubatch` 时禁止 C++ 分配；每批推理检查节点总数固定、已用及备用节点数量守恒。全部 **35 个模型场景**通过，保留 CPU payload 退休/释放、旧任务保护与设备失败回归。
+- Windows 相关宿主 **13/13**、Linux 全部宿主 **26/26**、专项 CTest **5/5**（1 个实际 cell 宿主测试、4 个 CUDA 测试）、宿主 ASan/UBSan **4/4**、独立 TSan **4/4** 均通过。后两组覆盖节点池、实际 cell、capture-session 和 GC，不是 CUDA sanitizer 证据。
+
+同版 recency CLI delete 完成 356-token 输入、8-token 生成和退出。容量/低高水位为 32/14/16，`proposed=committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 均为 0；结束时 `payload_bytes=26738688` 仍可能包含后台尚未归还的私有预留。本轮不改变回收对象：GC 回收 CPU historical payload，GPU 源槽继续由前台确认设备完成后归还。
+
+普通 retrieval（未开启 historical GC）也正常生成 8 token 并退出：`layout_writeback move=4 raw=0 d2d=1`，输入 356 token 加 64-token replay，prompt eval 共 420 token，解码 Mean-K 为 `n_gpu=384, n_host=0, n_miss=0`。退出时仍有此前已记录的 compute buffer 实际 15.9652 MiB、预估 12.2700 MiB 差异，后续 backend 统一预算须处理，不能当作严格资源承诺已经完成。模型测试、delete CLI、retrieval CLI 的退出码均为 0。
+
+原始日志使用 `historical-cell-nodes-` 前缀，保存在本地 `build-local/capture-session-validation/` 和远程隔离目录 `/tmp/kvmem-gc-99bef27.3CD9MU`。13 个源码/构建文件的本地与远程 SHA256 一致；节点补丁重放后的三个上游文件与实际测试版本逐文件一致。仅新增节点预约及复用的功能证据，没有前后性能对照；CUDA sanitizer 的既有环境限制保留。
+
+下一处明确缺口仍在 `init_batch` / `prepare_ubatches`：完整 `llama_ubatch::data_t`、slot_info 列表、memory context、采集位置/范围和 rollback 快照仍会动态分配。必须继续准备这些真实存储及其所有权，并纳入 backend、冷块恢复及 GPU 资源的统一计费。本轮 cell 恢复测试只证明已经存在的快照可复用索引节点，不代表快照创建、整个模型请求或完整生产 GC 已达到零动态分配和长期有界；P3 仍进行中，P4–P6 交付范围不变。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

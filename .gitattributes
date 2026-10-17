@@ -3,4 +3,5 @@ scripts/rocm/*.sh text eol=lf
 patches/cuda-graph-reactivation.patch text eol=lf
 # Blank context lines in a unified diff contain a required single space.
 patches/0006-qwen3moe-capture.patch text eol=lf whitespace=-blank-at-eol
+patches/0008-historical-cell-index-reservation.patch text eol=lf whitespace=-blank-at-eol
 scripts/apply-patches.sh text eol=lf

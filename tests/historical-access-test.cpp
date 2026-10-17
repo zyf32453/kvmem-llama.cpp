@@ -88,7 +88,10 @@ struct kvmem_transfer_test_access {
         mem.get_kv()->seq_rm_logical(0, second.orig_pos_start, second.orig_pos_end());
         store.set_block_gpu_slot(a, second.gpu_slot);
         store.set_block_gpu_slot(b, first.gpu_slot);
-        mem.occupy_block_cells(a); mem.occupy_block_cells(b);
+        {
+            DenyCppAllocation guard;
+            mem.occupy_block_cells(a); mem.occupy_block_cells(b);
+        }
 #ifdef KVMEM_TEST_CUDA
         if (cudaDeviceSynchronize() != cudaSuccess) throw std::runtime_error("layout fixture source completion");
 #endif
@@ -1426,6 +1429,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 !failed.pinned_bytes && !failed.events && !failed.host_bytes && cleanup.occupied() == 1 &&
                 mem.runtime().store().allocated_bytes() == table_bytes &&
                 !mem.runtime().historical_shadow_directory().size() &&
+                !mem.get_kv()->get_cells(0).index_status().reserved &&
                 kvmem_transfer_test_access::execution_storage_empty(mem),
                 "real request preparation failure published an owner or retained workspace");
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
@@ -1434,6 +1438,10 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     const auto table_bytes = mem.runtime().store().allocated_bytes();
     const auto execution_buffers = kvmem_transfer_test_access::execution_buffers(mem);
     const auto execution_bytes = kvmem_transfer_test_access::execution_bytes(mem);
+    const auto cell_nodes = mem.get_kv()->get_cells(0).index_status().nodes;
+    require(mem.get_kv()->get_cells(0).index_status().reserved &&
+            cell_nodes == size_t(mem.get_kv()->get_cells(0).size()) * 2,
+            "real request did not reserve both cell indexes");
     const auto packed_workspace = kvmem_transfer_test_access::packed_workspace(mem);
     require(packed_workspace.capacity >= 2 * KVMEM_CAPTURE_MAX_JOBS && packed_workspace.fallback_bytes,
             "real request did not prepare both queues and fallback");
@@ -1461,6 +1469,11 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         require(kvmem_transfer_test_access::execution_buffers(mem) == execution_buffers &&
                 kvmem_transfer_test_access::execution_bytes(mem) == execution_bytes,
                 "real capture changed prepared active or cell scratch storage");
+        const auto & cells = mem.get_kv()->get_cells(0);
+        const auto index = cells.index_status();
+        require(index.reserved && index.nodes == cell_nodes &&
+                index.available + size_t(cells.get_used()) * 2 == cell_nodes,
+                "real capture lost cell node credits or grew indexes");
         for (uint32_t id = first; id < mem.store().block_count(); ++id) {
             if (id == retired_during_request) continue;
             const auto & block = mem.store().blocks()[id];
@@ -1571,7 +1584,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 }
             }
         }
-        std::puts("PASS real model layout: reordered two resident blocks across all attention layers with prepared scratch");
+        std::puts("PASS real model layout: reordered two resident blocks, rebuilt real cells without C++ allocation, prepared scratch and fixed indexes");
     }
     const bool stageout_fault = retirement == RetirementPoint::StageoutRecord ||
         retirement == RetirementPoint::StageoutWait || retirement == RetirementPoint::StageoutUnconfirmed;

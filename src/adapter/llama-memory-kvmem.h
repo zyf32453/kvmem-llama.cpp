@@ -290,8 +290,8 @@ private:
                 (requested_ids.capacity() + remove_ids.capacity()) * sizeof(uint32_t) + seen.capacity();
         }
     } historical_active_workspace_;
-    // Scratch for rebuilding the cells of one GPU block. apply_ubatch's
-    // upstream index nodes and full graph ubatches need separate reservation.
+    // Scratch for rebuilding the cells of one GPU block. Historical requests
+    // also reserve upstream index nodes; full graph ubatches remain separate.
     struct CellWorkspace {
         llama_kv_cache::slot_info slots;
         std::vector<llama_pos> positions, logical;

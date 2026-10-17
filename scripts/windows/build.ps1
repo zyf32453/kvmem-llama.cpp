@@ -73,6 +73,8 @@ if (!$HostOnly) {
     $gdnOutput = Join-Path $SourceDir 'patches/gdn-output-fusion.patch'
     $graphReactivation = Join-Path $SourceDir 'patches/cuda-graph-reactivation.patch'
     $qwen3MoeCapture = Join-Path $SourceDir 'patches/0006-qwen3moe-capture.patch'
+    $historicalActive = Join-Path $SourceDir 'patches/0007-historical-active-hook.patch'
+    $historicalCells = Join-Path $SourceDir 'patches/0008-historical-cell-index-reservation.patch'
     function Test-PatchApplied([string]$PatchPath) {
         $savedPreference = $ErrorActionPreference
         try {
@@ -102,6 +104,12 @@ if (!$HostOnly) {
     if (!(Test-PatchApplied $qwen3MoeCapture)) {
         Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', '--check', $qwen3MoeCapture)
         Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', $qwen3MoeCapture)
+    }
+    foreach ($historicalPatch in @($historicalActive, $historicalCells)) {
+        if (!(Test-PatchApplied $historicalPatch)) {
+            Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalPatch)
+            Invoke-Checked git @('-C', $llama, 'apply', $historicalPatch)
+        }
     }
 }
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',

@@ -1,0 +1,212 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -94,7 +94,10 @@
+         ${LLAMA_KVMEM_ROOT}/src/adapter
+         ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src
+     )
+-    target_compile_definitions(llama PRIVATE LLAMA_KVMEM=1)
++    # Internal cell layout is conditional on this feature. Consumers of the
++    # internal headers must see the same layout as libllama.
++    target_compile_definitions(llama PUBLIC LLAMA_KVMEM=1)
++    target_include_directories(llama PUBLIC ${LLAMA_KVMEM_ROOT}/kvmem/include)
+     if (NOT TARGET kvmem)
+         add_subdirectory(${LLAMA_KVMEM_ROOT}/kvmem ${CMAKE_BINARY_DIR}/kvmem-from-llama)
+     endif()
+diff --git a/src/llama-kv-cells.h b/src/llama-kv-cells.h
+--- a/src/llama-kv-cells.h
++++ b/src/llama-kv-cells.h
+@@ -10,6 +10,15 @@
+ #include <set>
+ #include <vector>
+ 
++#if defined(LLAMA_KVMEM)
++#include "kvmem/reserved_node_set.hpp"
++#include <memory>
++#include <stdexcept>
++template <typename T> using llama_kv_cell_index = kvmem::ReservedNodeSet<T>;
++#else
++template <typename T> using llama_kv_cell_index = std::set<T>;
++#endif
++
+ struct llama_kv_cell_ext {
+     // 2D spatial positions, typically used for M-RoPE
+     llama_pos x = 0;
+@@ -37,6 +46,45 @@
+ class llama_kv_cells {
+ public:
+     using seq_set_t = std::bitset<LLAMA_MAX_SEQ>;
++
++#if defined(LLAMA_KVMEM)
++    // Private preparation for a fresh single-sequence cache. Until accept(),
++    // destruction rolls installation back; no cell operation may run between
++    // install() and accept(). The cache owner serializes this transaction.
++    class IndexReservation {
++        friend class llama_kv_cells;
++        llama_kv_cells * owner = nullptr;
++        uint32_t count = 0;
++        llama_seq_id sequence = 0;
++        llama_kv_cell_index<uint32_t>::Pool used;
++        llama_kv_cell_index<std::pair<llama_pos, uint32_t>>::Pool positions;
++        bool installed = false;
++        IndexReservation() = default;
++    public:
++        ~IndexReservation() { if (owner && installed) owner->rollback_index_nodes(*this); }
++        bool install() noexcept { return owner && owner->install_index_nodes(*this); }
++        void accept() noexcept {
++            if (!owner || !installed) std::terminate();
++            owner = nullptr;
++        }
++    };
++    std::unique_ptr<IndexReservation> prepare_index_nodes(llama_seq_id sequence) {
++        if (sequence < 0 || sequence >= LLAMA_MAX_SEQ || !can_reserve_indices()) return {};
++        auto result = std::unique_ptr<IndexReservation>(new IndexReservation);
++        result->owner = this; result->count = size(); result->sequence = sequence;
++        result->used = decltype(used)::prepare_pool(size());
++        result->positions = llama_kv_cell_index<std::pair<llama_pos, uint32_t>>::prepare_pool(size());
++        return result;
++    }
++    struct IndexStatus { bool reserved; size_t nodes, available; };
++    IndexStatus index_status() const noexcept {
++        IndexStatus result{used.reserved(), used.capacity(), used.available()};
++        for (const auto & index : seq_pos) {
++            result.nodes += index.capacity(); result.available += index.available();
++        }
++        return result;
++    }
++#endif
+ 
+     void reset() {
+         for (uint32_t i = 0; i < pos.size(); ++i) {
+@@ -68,6 +116,9 @@
+     }
+ 
+     void resize(uint32_t n) {
++#if defined(LLAMA_KVMEM)
++        if (used.reserved() && n != size()) throw std::logic_error("reserved cell cache cannot resize");
++#endif
+         pos.resize(n);
+         ext.resize(n);
+         shift.resize(n);
+@@ -166,6 +217,9 @@
+     // set the state of cells [i, i + other.pos.size()) (used for save/restore the state of the cells)
+     void set(uint32_t i, const llama_kv_cells & other) {
+         assert(i + other.pos.size() <= pos.size());
++#if defined(LLAMA_KVMEM)
++        validate_reserved_restore(other);
++#endif
+ 
+         for (uint32_t j = 0; j < other.pos.size(); ++j) {
+             const auto idx = i + j;
+@@ -197,6 +251,9 @@
+     // set the state of cells [idxs[0], idxs[1], ..., idxs[idxs.size() - 1])
+     void set(const std::vector<uint32_t> & idxs, const llama_kv_cells & other) {
+         assert(idxs.size() == other.pos.size());
++#if defined(LLAMA_KVMEM)
++        validate_reserved_restore(other);
++#endif
+ 
+         for (uint32_t j = 0; j < other.pos.size(); ++j) {
+             const auto idx = idxs[j];
+@@ -343,8 +400,12 @@
+         assert(pos[i] != -1);
+         assert(!seq[i].test(seq_id));
+ 
++#if defined(LLAMA_KVMEM)
++        if (used.reserved() && seq_id != reserved_sequence)
++            throw std::logic_error("sequence has no reserved cell index nodes");
++#endif
++        seq_pos_inc(seq_id, i);
+         seq[i].set(seq_id);
+-        seq_pos_inc(seq_id, i);
+     }
+ 
+     // return the sequence id of this cell
+@@ -425,9 +486,8 @@
+         assert(pos[i] == -1);
+         assert(seq[i].none());
+ 
++        used.insert(i);
+         pos[i] = p;
+-
+-        used.insert(i);
+     }
+ 
+     void ext_set(uint32_t i, llama_kv_cell_ext p) {
+@@ -487,7 +547,7 @@
+     bool has_shift = false;
+ 
+     // set of indices of used cells (i.e. pos[i] != -1, allowed to not have any seq_id)
+-    std::set<uint32_t> used;
++    llama_kv_cell_index<uint32_t> used;
+ 
+     std::vector<llama_pos> pos;
+ 
+@@ -522,7 +582,50 @@
+     //  - during performing a cache reuse via (rm + add)
+     //  - some vision models have input embeddings with repeating positions
+     //
+-    std::set<std::pair<llama_pos, uint32_t>> seq_pos[LLAMA_MAX_SEQ];
++    llama_kv_cell_index<std::pair<llama_pos, uint32_t>> seq_pos[LLAMA_MAX_SEQ];
++
++#if defined(LLAMA_KVMEM)
++    llama_seq_id reserved_sequence = -1;
++    bool can_reserve_indices() const noexcept {
++        if (has_shift || !used.can_install()) return false;
++        for (const auto & index : seq_pos) if (!index.can_install()) return false;
++        for (uint32_t i = 0; i < size(); ++i)
++            if (pos[i] != -1 || seq[i].any() || shift[i]) return false;
++        return true;
++    }
++    bool install_index_nodes(IndexReservation & prepared) noexcept {
++        if (prepared.owner != this || prepared.installed || prepared.count != size() ||
++            !can_reserve_indices()) return false;
++        if (!used.install(prepared.used) || !seq_pos[prepared.sequence].install(prepared.positions))
++            std::terminate(); // All empty indexes were validated under this owner.
++        for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
++            if (s == prepared.sequence) continue;
++            llama_kv_cell_index<std::pair<llama_pos, uint32_t>>::Pool empty;
++            if (!seq_pos[s].install(empty)) std::terminate();
++        }
++        reserved_sequence = prepared.sequence;
++        prepared.installed = true;
++        return true;
++    }
++    void rollback_index_nodes(IndexReservation & prepared) noexcept {
++        if (!used.uninstall(prepared.used) || !seq_pos[prepared.sequence].uninstall(prepared.positions))
++            std::terminate(); // Applying cells before accept() violates preparation ownership.
++        for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
++            if (s == prepared.sequence) continue;
++            llama_kv_cell_index<std::pair<llama_pos, uint32_t>>::Pool empty;
++            if (!seq_pos[s].uninstall(empty)) std::terminate();
++        }
++        reserved_sequence = -1;
++        prepared.installed = false;
++    }
++    void validate_reserved_restore(const llama_kv_cells & other) const {
++        if (!used.reserved()) return;
++        for (auto membership : other.seq) {
++            membership.reset(reserved_sequence);
++            if (membership.any()) throw std::logic_error("restore exceeds reserved cell sequences");
++        }
++    }
++#endif
+ 
+     // helper functions for updating `seq_pos`, once cell at a time:
+ 
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -168,6 +168,12 @@
+     ggml_tensor * get_v_storage(int32_t il) const;
+ 
+     const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
++#if defined(LLAMA_KVMEM)
++    std::unique_ptr<llama_kv_cells::IndexReservation> prepare_cell_index_nodes(llama_seq_id seq_id) {
++        if (seq_id < 0 || size_t(seq_id) >= seq_to_stream.size()) return {};
++        return v_cells[seq_to_stream[seq_id]].prepare_index_nodes(seq_id);
++    }
++#endif
+     bool seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
+ 
+     // state_read, plus the cells the restored tokens were placed in

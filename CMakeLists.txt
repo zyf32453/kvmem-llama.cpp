@@ -68,6 +68,19 @@ else()
 endif()
 
 option(KVMEM_BUILD_LLAMA "Build llama.cpp with the KVMem adapter" ON)
+# Exercise the actual patched cell implementation even in a CPU-only build.
+# A host checkout without the upstream submodule still tests the node pool.
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/src/llama-kv-cells.h")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/src/llama-kv-cells.h" KVMEM_CELL_HEADER)
+    if (KVMEM_CELL_HEADER MATCHES "prepare_index_nodes")
+        add_executable(kvmem-cell-index-test tests/cell-index-test.cpp)
+        target_include_directories(kvmem-cell-index-test PRIVATE
+            llama.cpp/src llama.cpp/include llama.cpp/ggml/include)
+        target_compile_definitions(kvmem-cell-index-test PRIVATE LLAMA_KVMEM=1)
+        target_link_libraries(kvmem-cell-index-test PRIVATE kvmem)
+        add_test(NAME kvmem-cell-index-test COMMAND kvmem-cell-index-test)
+    endif()
+endif()
 option(KVMEM_BUILD_SERVER_TESTS "Build model-free server compatibility tests" ${KVMEM_BUILD_LLAMA})
 option(KVMEM_ROCM "Build KVMem with the HIP/ROCm backend" OFF)
 if (KVMEM_ROCM)

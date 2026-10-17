@@ -10,6 +10,7 @@ GRAPH_REACTIVATION="$ROOT/patches/cuda-graph-reactivation.patch"
 RDNA2_FATTN="$ROOT/patches/0005-hip-rdna2-quantized-kv-fa-vec.patch"
 QWEN3MOE_CAPTURE="$ROOT/patches/0006-qwen3moe-capture.patch"
 HISTORICAL_ACTIVE="$ROOT/patches/0007-historical-active-hook.patch"
+HISTORICAL_CELLS="$ROOT/patches/0008-historical-cell-index-reservation.patch"
 BUDGET_UPGRADE="$ROOT/patches/reasoning-budget-upgrade.patch"
 REPLAY_UPGRADE="$ROOT/patches/replayssm-upgrade.patch"
 UPGRADE="$ROOT/patches/multimodal-upgrade.patch"
@@ -102,4 +103,12 @@ else
     git apply --check "$HISTORICAL_ACTIVE"
     git apply "$HISTORICAL_ACTIVE"
     echo "applied historical active admission hook"
+fi
+
+if git apply --reverse --check "$HISTORICAL_CELLS" 2>/dev/null; then
+    echo "historical cell index reservation already applied"
+else
+    git apply --check "$HISTORICAL_CELLS"
+    git apply "$HISTORICAL_CELLS"
+    echo "applied historical cell index reservation"
 fi

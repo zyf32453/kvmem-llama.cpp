@@ -1139,9 +1139,13 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM or CPU cleanup capacity\n");
             return false;
         }
+        auto cell_indices = kv_->prepare_cell_index_nodes(0);
+        if (!cell_indices) {
+            LLAMA_LOG_ERROR("historical capture: cell indexes are not fresh before admission\n");
+            return false;
+        }
         // Prepare both sides of the pipeline before publishing this owner.
-        // Full ubatch contexts, upstream cell index nodes and backend
-        // allocations still need admission.
+        // Full ubatch contexts and backend allocations still need admission.
         auto active = kvmem::HistoricalKvActiveSet::prepare(session->repository(), n_slots_);
         HistoricalActiveWorkspace active_workspace;
         active_workspace.reserve(n_slots_);
@@ -1175,11 +1179,14 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         // All request resources prepared so far are still private. If the
         // runtime changed before commit, release GPU resources here; the
         // unadmitted session then returns RAM/metadata without a GC worker.
-        if (!session->admit()) {
+        // Installation is reversible until the RAM/metadata commit succeeds.
+        // This owner performs no cell writes in that preparation interval.
+        if (!cell_indices->install() || !session->admit()) {
             kvmem_stagein_gpu_free();
             LLAMA_LOG_ERROR("historical capture: runtime changed before admission commit\n");
             return false;
         }
+        cell_indices->accept();
         // Only nonthrowing ownership transfers follow successful admission.
         row_positions_.swap(positions);
         historical_gpu_readers_.swap(readers);
@@ -1196,6 +1203,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         historical_cleanup_ = std::move(cleanup);
         historical_capture_ = std::move(session);
         const auto workspace = kvmem_capture_workspace_status();
+        const auto cell_nodes = kv_->get_cells(0).index_status();
+        LLAMA_LOG_INFO("KVMEM_CELL_INDEX nodes=%zu available=%zu\n", cell_nodes.nodes, cell_nodes.available);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu layout_bytes=%zu layout_slots=%u layout_host_bytes=%zu\n",
             harvest_v_job_limit_, workspace.device_bytes, workspace.pinned_bytes,
             workspace.host_bytes + (harvest_v_jobs_.capacity() + harvest_v_pending_.jobs.capacity()) * sizeof(HarvestVJob),
