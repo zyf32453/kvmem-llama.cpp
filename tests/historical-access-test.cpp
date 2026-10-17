@@ -1354,6 +1354,28 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     require(!llama_kvmem_historical_capture_begin(1, 160, 3, 7) && mem.store_n_tokens() == 0,
             "insufficient capture reservation changed runtime");
     if (saturated_queue) {
+        auto & cleanup = kvmem::HistoricalKvCleanup::process();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (cleanup.occupied() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        require(!cleanup.occupied(), "earlier context cleanup did not finish before rollback fixture");
+        std::promise<void> entered, resume;
+        auto entered_signal = entered.get_future();
+        struct Stall final : kvmem::HistoricalKvCleanup::Task {
+            std::promise<void> & entered;
+            std::shared_future<void> resume;
+            Stall(std::promise<void> & e, std::shared_future<void> r) : entered(e), resume(std::move(r)) {}
+            ~Stall() override { entered.set_value(); resume.wait(); }
+        };
+        struct Unblock {
+            std::promise<void> & resume;
+            ~Unblock() { resume.set_value(); }
+        } unblock{resume};
+        auto ticket = cleanup.try_reserve();
+        require(bool(ticket), "rollback fixture could not reserve cleanup barrier");
+        ticket->submit(std::make_unique<Stall>(entered, resume.get_future().share()));
+        require(entered_signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+                "rollback fixture did not pause the CPU cleanup worker");
+        const auto table_bytes = mem.runtime().store().allocated_bytes();
         const auto inject = [](void *, KvmemCaptureReservePoint point) noexcept {
             return point == KvmemCaptureReservePoint::Pin1;
         };
@@ -1362,10 +1384,14 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         kvmem_capture_reserve_test_fault(nullptr, nullptr);
         const auto failed = kvmem_capture_workspace_status();
         require(!admitted && mem.store_n_tokens() == 0 && !failed.reserved && !failed.device_bytes &&
-                !failed.pinned_bytes && !failed.events && !failed.host_bytes,
+                !failed.pinned_bytes && !failed.events && !failed.host_bytes && cleanup.occupied() == 1 &&
+                mem.runtime().store().allocated_bytes() == table_bytes &&
+                !mem.runtime().historical_shadow_directory().size(),
                 "real request preparation failure published an owner or retained workspace");
+        std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
     }
     require(llama_kvmem_historical_capture_begin(12, 160, 3, 7), "real request capture admission failed");
+    const auto table_bytes = mem.runtime().store().allocated_bytes();
     const auto packed_workspace = kvmem_transfer_test_access::packed_workspace(mem);
     require(packed_workspace.capacity >= 2 * KVMEM_CAPTURE_MAX_JOBS && packed_workspace.fallback_bytes,
             "real request did not prepare both queues and fallback");
@@ -1388,6 +1414,8 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         kvmem_transfer_test_access::commit(mem);
         require(kvmem_transfer_test_access::packed_workspace_unchanged(mem, packed_workspace),
                 "real capture reallocated a prepared queue or fallback buffer");
+        require(mem.runtime().store().allocated_bytes() == table_bytes,
+                "real capture grew the prepared dense block table");
         for (uint32_t id = first; id < mem.store().block_count(); ++id) {
             if (id == retired_during_request) continue;
             const auto & block = mem.store().blocks()[id];
@@ -1918,6 +1946,7 @@ int main(int argc, char ** argv) {
                 require(storage.expired(), "failed real-model domain leaked captured history after checked teardown");
                 std::puts("PASS failed real-model teardown: captured CPU owner released after device cleanup");
             }
+            std::printf("PASS historical model scenario %u/35\n", scenario + 1);
         }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FAIL historical adapter access: %s\n", e.what());

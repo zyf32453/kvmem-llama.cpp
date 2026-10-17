@@ -349,6 +349,31 @@ shadow 不退休块、不释放 payload；相同配置结束为 `committed=0, re
 
 当前已预约的是主模型单 GPU、非转置 K/V 的布局 scratch 和搬运记录。`occupy_in` 的 cell/ubatch 元数据、冷块 restore、完整目录/producer、backend、GPU 工作集统一计费及 rollback 仍未全部纳入请求事务；MTP 自身的布局、多 GPU/转置 V 的 Host 回退和其它 stage-in 错误也须继续验收。不能把所测复制区间零 C++ 分配推导为整个布局函数或整个请求零动态分配。下一步优先接入目录、producer 和 cell 元数据的实际预约，并统一入口失败回滚；完整 P0–P6 范围继续保留。CUDA sanitizer 环境限制未改变，本轮没有新的 sanitizer 通过结论。
 
+### 历史目录与 producer 实际预留、请求准备/接纳分离（2026-10-17）
+
+本轮继续落实导师方案中“接纳前取得真实资源”的要求。之前 RAM payload 已提前分配，但每次追加仍会建立目录 map 节点、producer 对象和 shared_ptr 控制块，并可能扩大 dense block 表；另外，RAM session 在外层 GPU 工作区准备完成之前就被标记为已接纳。GPU 准备失败时，未用 RAM 会进入后台 cleanup，连续重试可能占着清理队列名额。
+
+现在按同一请求碎片上界提前分配真实目录节点、producer 对象及控制块、dense block 表容量和批量校验临时数组。`AppendReservation` 持有这些私有资源；提交后通过 C++17 map node handle 迁移节点，直接交接已经存在的 producer，不再在成功追加路径创建这些对象。先校验整个批次，再消费 writer 并提交行记录；后面的 span 错误不会让前面的 span 部分登记。预留额度固定，不能通过 legacy append/bind 绕过。目录仍只持 producer 的弱引用，任务取得的 writer 独立存活；销毁未用预留不取消已交接任务，也不把退休块重新发布成 Live。
+
+请求入口拆为 `try_prepare()` 和 `admit()`。前者只准备私有 RAM/元数据及 cleanup 名额，不改变公开目录或块表容量，不允许追加或执行；外层继续准备队列、布局及 GPU/pinned 工作区，全部成功后才提交接纳。提交前再次检查 runtime 仍为空且没有待执行计划。未接纳请求失败或取消时同步退还私有资源及清理名额，不依赖 GC 或 CPU cleanup worker；接纳后的完成/取消继续使用此前的后台清理规则，避免把未用 RAM 的释放搬到请求完成的前台路径。
+
+新增宿主验证包括：
+
+- 对入口逐个注入 C++ 分配失败，检查公开目录/块表及清理名额不变；准备后修改 runtime，接纳会拒绝且保留新数据。零 token 请求仍可正常接纳和结束。
+- 禁止 C++ 动态分配时完成接纳与一次 9-token、3-span 追加，检查没有前台释放、块表容量不变且元数据额度精确消耗。
+- 对批量 span 间隙、错误 runtime、输出数组容量不足及额度耗尽分别拒绝；修正后可在禁止分配时成功登记。已经退休的 writer 可继续原写入，不能重新发布；实际任务退出后可以回收，证明预留池没有额外长期持有 producer。
+- 暂停独立 CPU cleanup worker，反复准备后销毁或显式取消请求，检查 payload 归零、repository 所有者消失、块表不变及名额立即返还。另保留“已接纳请求完成时后台清理暂停”的原有测试，确保两种生命周期没有混淆。
+
+实际模型的既有饱和队列场景扩展为：先暂停 CPU cleanup，再让第二个 pinned 分配失败，检查 GPU/pinned/event/Host 工作区、目录及两个请求清理名额均退回，随后重试并完成真实推理。每批执行额外检查 dense block 表容量保持入口准备的值；逐场景完成记录便于核对全部 35 个顶层场景。
+
+Windows 相关宿主 **12/12**、Linux 全部宿主 **24/24**、独立 CUDA **4/4**、宿主 ASan/UBSan **5/5**、独立 TSan **5/5** 通过。TSan 首次因默认地址随机布局在启动时触发 `unexpected memory mapping`；仅对子进程使用 `setarch x86_64 -R` 后全部通过，未修改主机全局配置。保留首次启动失败日志。这些 sanitizer 结果只覆盖宿主组件，CUDA sanitizer 的既有环境限制仍在。
+
+最终模型验证 **35/35** 通过，进程退出码为 0，包含暂停 cleanup 的 GPU 准备失败与重试、每批 dense block 表容量不增长，以及既有 F16/Q8_0、退休、异步写入、设备错误和布局场景。首次模型运行的外层脚本在记录退出码时引号错误，不能据此认定进程正常退出；保留初次日志，修正脚本后完整复测，最终证据为 `historical-metadata-final-gpu-test.log/.exit`。八个源码/测试文件本地与远程 SHA256 一致；摘要、各项构建/测试及首次 TSan 启动失败日志均保存在本地 `build-local/capture-session-validation/`，远程仍只使用 `/tmp/kvmem-gc-99bef27.3CD9MU` 隔离目录。
+
+同版 recency CLI delete 完成 356-token 输入、8-token 输出并正常退出；入口实际准备 **22 个元数据位置**，容量/低高水位仍为 32/14/16，`proposed=committed=reclaimed=6`、`live_observed=14`、`task_references=0`、`gpu_deferred=gpu_returned=6`，policy/worker failure 均为 0。结束时 `payload_bytes=26738688` 仍可能包含未用私有预留，不能当作 Live 历史的最终占用。原始记录为 `historical-metadata-cli-delete.log/.tokens/.exit`；没有前后性能对照，不宣称提速。
+
+**本轮仍是有限单请求的资源准备。** 预留节点数随该请求的最大追加需求增长；这没有完成多请求累计追加时的目录/墓碑复用，也不是所有资源的 byte 计费或长期内存有界证明。cell/ubatch、ActiveSet、backend、冷块恢复、GPU 工作集和 rollback 等仍有执行中分配，后续继续逐项纳入入口事务。旧动态目录 API 保留给未启用这一请求模式的路径。当前仍处于 P3，完整 P0–P6 交付范围不变。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：

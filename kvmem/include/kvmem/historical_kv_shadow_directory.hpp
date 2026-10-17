@@ -51,6 +51,35 @@ public:
     // alive thereafter. The directory never owns a producer reference.
     using Producer = std::shared_ptr<WriterContext>;
 
+    // Finite request metadata: real map nodes, producer control blocks and
+    // dense-table capacity are allocated before admission. The runtime must
+    // outlive this token. Unused records may be destroyed by CPU cleanup;
+    // installed nodes and captured producers have independent ownership.
+    class AppendReservation {
+    public:
+        ~AppendReservation();
+        AppendReservation(const AppendReservation &) = delete;
+        AppendReservation & operator=(const AppendReservation &) = delete;
+        uint32_t capacity() const noexcept;
+        uint32_t remaining() const noexcept;
+    private:
+        friend class HistoricalKvShadowDirectory;
+        struct Impl;
+        explicit AppendReservation(std::unique_ptr<Impl> impl);
+        std::unique_ptr<Impl> impl_;
+    };
+    std::unique_ptr<AppendReservation> prepare_append_reservation(
+        KvMemStore & store, std::shared_ptr<HistoricalKvRepository> repository,
+        std::shared_ptr<HistoricalKvRawStore> storage, uint32_t capacity);
+    // Only swaps privately prepared storage into an unchanged, empty runtime.
+    // No allocation or publication of block identities occurs here.
+    bool install_append_reservation(KvMemStore & store, AppendReservation & reservation) noexcept;
+    bool append_reserved_blocks(KvMemStore & store, AppendReservation & reservation,
+        std::shared_ptr<HistoricalKvRepository> repository,
+        std::shared_ptr<HistoricalKvRawStore> storage,
+        std::vector<HistoricalKvRepository::Lease> & writers,
+        std::vector<Producer> & producers);
+
     struct Binding {
         uint32_t block_id = 0;
         HistoricalKvHandle handle;
@@ -171,6 +200,8 @@ private:
     // the greatest original span. Mutation guards inspect only that tail.
     std::map<uint32_t, Entry> entries_;
     uint64_t repository_id_ = 0;
+    uint32_t reserved_append_capacity_ = 0;
+    bool reserved_append_mode_ = false;
 };
 
 } // namespace kvmem

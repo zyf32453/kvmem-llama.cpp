@@ -26,6 +26,122 @@ bool same_span(const HistoricalKvShadowDirectory::Binding & entry,
 
 } // namespace
 
+struct HistoricalKvShadowDirectory::AppendReservation::Impl {
+    HistoricalKvShadowDirectory * owner;
+    KvMemStore * store;
+    std::shared_ptr<HistoricalKvRepository> repository;
+    std::shared_ptr<HistoricalKvRawStore> storage;
+    uint32_t limit = 0, used = 0, block_tokens = 0;
+    bool installed = false;
+    std::map<uint32_t, Entry> nodes;
+    std::vector<Producer> contexts;
+    std::vector<KvMemBlock> table, pending;
+};
+
+HistoricalKvShadowDirectory::AppendReservation::AppendReservation(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+HistoricalKvShadowDirectory::AppendReservation::~AppendReservation() = default;
+uint32_t HistoricalKvShadowDirectory::AppendReservation::capacity() const noexcept { return impl_->limit; }
+uint32_t HistoricalKvShadowDirectory::AppendReservation::remaining() const noexcept { return impl_->limit - impl_->used; }
+
+std::unique_ptr<HistoricalKvShadowDirectory::AppendReservation>
+HistoricalKvShadowDirectory::prepare_append_reservation(
+        KvMemStore & store, std::shared_ptr<HistoricalKvRepository> repository,
+        std::shared_ptr<HistoricalKvRawStore> storage, uint32_t capacity) {
+    if (capacity > INT32_MAX || !repository || repository->closed() ||
+        !storage || capacity > repository->capacity() || capacity > storage->capacity() ||
+        store.block_count() || store.total_tokens() ||
+        store.gc_ || store.historical_shadow_directory_ != this || repository_id_ ||
+        reserved_append_mode_ || !entries_.empty() ||
+        storage->config().max_tokens_per_slot != store.config().block_tokens) return {};
+    auto r = std::make_unique<AppendReservation::Impl>();
+    r->owner = this; r->store = &store;
+    r->repository = repository; r->storage = storage;
+    r->limit = capacity; r->block_tokens = store.config().block_tokens;
+    r->table.reserve(capacity);
+    r->pending.reserve(capacity);
+    r->contexts.reserve(capacity);
+    for (uint32_t id = 0; id < capacity; ++id) {
+        auto context = std::shared_ptr<WriterContext>(new WriterContext(repository, storage));
+        Entry entry;
+        entry.repository = repository;
+        entry.repository_id = repository->repository_id();
+        entry.storage = storage;
+        entry.producer = context;
+        r->nodes.emplace(id, std::move(entry));
+        r->contexts.push_back(std::move(context));
+    }
+    return std::unique_ptr<AppendReservation>(new AppendReservation(std::move(r)));
+}
+
+bool HistoricalKvShadowDirectory::install_append_reservation(
+        KvMemStore & store, AppendReservation & reservation) noexcept {
+    auto & r = *reservation.impl_;
+    if (r.installed || r.owner != this || r.store != &store || r.repository->closed() ||
+        store.block_count() || store.total_tokens() || store.gc_ ||
+        store.historical_shadow_directory_ != this || repository_id_ || !entries_.empty() ||
+        reserved_append_mode_ || store.config().block_tokens != r.block_tokens) return false;
+    store.blocks_.swap(r.table);
+    repository_id_ = r.repository->repository_id();
+    reserved_append_capacity_ = r.limit;
+    reserved_append_mode_ = true;
+    r.installed = true;
+    return true;
+}
+
+bool HistoricalKvShadowDirectory::append_reserved_blocks(
+        KvMemStore & store, AppendReservation & reservation,
+        std::shared_ptr<HistoricalKvRepository> repository,
+        std::shared_ptr<HistoricalKvRawStore> storage,
+        std::vector<HistoricalKvRepository::Lease> & writers, std::vector<Producer> & producers) {
+    static_assert(std::is_trivially_copyable<KvMemBlock>::value, "nonthrowing metadata commit");
+    auto & r = *reservation.impl_;
+    if (!r.installed || r.owner != this || r.store != &store || r.repository != repository ||
+        r.storage != storage || !repository || repository->closed() || !producers.empty() ||
+        repository_id_ != repository->repository_id() || !reserved_append_mode_ || reserved_append_capacity_ != r.limit ||
+        store.block_count() != r.used || store.gc_ || store.historical_shadow_directory_ != this ||
+        store.config().block_tokens != r.block_tokens || !tail_span_matches(store) ||
+        store.append_tail_room() || writers.size() > r.limit - r.used ||
+        writers.size() > producers.capacity() || store.blocks_.capacity() < r.limit) return false;
+    r.pending.clear();
+    uint64_t position = store.total_tokens();
+    for (size_t i = 0; i < writers.size(); ++i) {
+        const uint32_t id = r.used + uint32_t(i);
+        const auto & writer = writers[i];
+        const auto meta = writer.metadata();
+        const auto node = r.nodes.find(id);
+        const auto & context = r.contexts[id];
+        if (node == r.nodes.end() || entries_.count(id) || !context || context->writer_ ||
+            !repository->owns_writer(writer) || !meta ||
+            (meta->life != HistoricalKvLife::Writing && meta->life != HistoricalKvLife::Retired) ||
+            meta->logical_id != id || meta->original_begin != position || !meta->valid_tokens ||
+            meta->valid_tokens > r.block_tokens || position + meta->valid_tokens > UINT32_MAX) return false;
+        const auto payload = storage->inspect(*repository, writer.handle());
+        if (!payload || payload->original_begin != position || payload->valid_tokens != meta->valid_tokens)
+            return false;
+        node->second.binding = {id, writer.handle(), position, meta->valid_tokens, {}};
+        KvMemBlock block;
+        block.block_id = id; block.orig_pos_start = uint32_t(position);
+        block.n_tokens = meta->valid_tokens; block.baked_pos = int64_t(position);
+        r.pending.push_back(block);
+        position += meta->valid_tokens;
+    }
+    // Validation above changes only private records. Below, integer-key map
+    // node transfers use the same allocator; all vector capacities are held.
+    for (size_t i = 0; i < writers.size(); ++i) {
+        const uint32_t id = r.used + uint32_t(i);
+        auto & context = r.contexts[id];
+        context->writer_ = std::move(writers[i]);
+        const auto inserted = entries_.insert(r.nodes.extract(id));
+        if (!inserted.inserted) std::terminate(); // impossible after owner-serialized validation
+        producers.push_back(std::move(context));
+    }
+    store.blocks_.insert(store.blocks_.end(), r.pending.begin(), r.pending.end());
+    store.total_tokens_ = uint32_t(position);
+    r.used += uint32_t(writers.size());
+    return true;
+}
+
 bool HistoricalKvShadowDirectory::bind_full_block(
         const KvMemStore & store, uint32_t block_id,
         std::shared_ptr<HistoricalKvRepository> repository,
@@ -45,7 +161,7 @@ bool HistoricalKvShadowDirectory::bind_block(
         HistoricalKvRepository::Lease & writer,
         Producer & producer,
         std::shared_ptr<HistoricalKvRawStore> storage) {
-    if (producer || !repository || repository->closed() || !writer ||
+    if (reserved_append_mode_ || producer || !repository || repository->closed() || !writer ||
         !repository->owns_writer(writer) ||
         !same_handle(handle, writer.handle()) ||
         writer.repository_id() != repository->repository_id() ||
@@ -100,7 +216,7 @@ bool HistoricalKvShadowDirectory::append_blocks(
         std::vector<Producer> & producers) {
     static_assert(std::is_trivially_copyable<KvMemBlock>::value,
                   "historical append commit requires nonthrowing block copies");
-    if (!producers.empty() || !repository || repository->closed() || !storage ||
+    if (reserved_append_mode_ || !producers.empty() || !repository || repository->closed() || !storage ||
         store.historical_shadow_directory_ != this || store.gc_ ||
         (repository_id_ && repository_id_ != repository->repository_id()) ||
         !tail_span_matches(store) || store.append_tail_room() != 0 ||
@@ -255,7 +371,8 @@ bool HistoricalKvShadowDirectory::tail_span_matches(const KvMemStore & store) co
 
 void HistoricalKvShadowDirectory::validate_append(
         const KvMemStore & store, uint32_t n_tokens) const {
-    (void) n_tokens;
+    if (reserved_append_mode_ && n_tokens)
+        throw std::logic_error("admitted historical appends require their reserved metadata");
     if (!tail_span_matches(store))
         throw std::logic_error("historical shadow directory has a stale block span");
 }

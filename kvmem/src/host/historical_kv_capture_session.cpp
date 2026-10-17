@@ -8,11 +8,20 @@ namespace kvmem {
 
 struct HistoricalKvCaptureSession::ReservationCleanup final : HistoricalKvCleanup::Task {
     std::optional<HistoricalKvRamReservation> ram;
+    std::unique_ptr<HistoricalKvShadowDirectory::AppendReservation> metadata;
 };
 
 HistoricalKvCaptureSession::HistoricalKvCaptureSession(KvMemRuntime & runtime) : runtime_(runtime) {}
 
 std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_create(
+        KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
+        uint32_t capacity, const HistoricalKvRamDemand & demand, HistoricalKvCleanup * cleanup) {
+    auto result = try_prepare(runtime, std::move(config), capacity, demand, cleanup);
+    if (!result || !result->admit()) return {};
+    return result;
+}
+
+std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prepare(
         KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
         uint32_t capacity, const HistoricalKvRamDemand & demand, HistoricalKvCleanup * cleanup) {
     if (!capacity || runtime.store().total_tokens() || runtime.store().block_count() ||
@@ -38,6 +47,9 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_crea
         auto ram = HistoricalKvRamReservation::try_reserve(result->repository_, result->storage_, demand);
         if (!ram) return {};
         result->reservation_->ram = std::move(ram);
+        result->reservation_->metadata = runtime.prepare_historical_metadata(
+            result->repository_, result->storage_, static_cast<uint32_t>(required));
+        if (!result->reservation_->metadata) return {};
         result->reserved_blocks_ = static_cast<uint32_t>(required);
         // Birth sequences are the admitted slot ordinal + 1. Every actual
         // model submission must sort after those stable initial LRU values.
@@ -47,6 +59,7 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_crea
         result->appends_remaining_ = demand.max_append_boundaries;
         result->handles_.reserve(static_cast<size_t>(required));
         result->writers_.reserve(static_cast<size_t>(required));
+        result->producers_.reserve(static_cast<size_t>(required));
         result->callbacks_.reserve(static_cast<size_t>(required));
         // Prepare callable allocations before publishing the session. Weak
         // repository capture avoids a repository -> callback -> owner cycle.
@@ -62,13 +75,23 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_crea
                        released == HistoricalKvRawStore::ReleaseCode::Absent;
             });
         }
-        result->admitted_ = true;
         return result;
     } catch (const std::bad_alloc &) {
         return {};
     } catch (const std::length_error &) {
         return {};
     }
+}
+
+bool HistoricalKvCaptureSession::admit() noexcept {
+    if (admitted_ || failed_ || finished_ || !reservation_ || !reservation_->metadata ||
+        runtime_.pending() || !runtime_.install_historical_metadata(*reservation_->metadata)) return false;
+    admitted_ = true;
+    return true;
+}
+
+uint32_t HistoricalKvCaptureSession::metadata_remaining() const noexcept {
+    return reservation_ && reservation_->metadata ? reservation_->metadata->remaining() : 0;
 }
 
 HistoricalKvCaptureSession::~HistoricalKvCaptureSession() {
@@ -79,7 +102,12 @@ HistoricalKvCaptureSession::~HistoricalKvCaptureSession() {
 }
 
 void HistoricalKvCaptureSession::release_unused() noexcept {
-    if (reservation_) cleanup_ticket_.submit(std::move(reservation_));
+    if (!reservation_) return;
+    if (admitted_) cleanup_ticket_.submit(std::move(reservation_));
+    else {
+        reservation_.reset();
+        cleanup_ticket_ = {};
+    }
 }
 
 void HistoricalKvCaptureSession::fail() noexcept {
@@ -92,7 +120,7 @@ void HistoricalKvCaptureSession::fail() noexcept {
 
 bool HistoricalKvCaptureSession::append(uint32_t tokens) {
     auto & remaining = input_ ? input_remaining_ : output_remaining_;
-    if (failed_ || finished_ || !reservation_ || !producers_.empty() ||
+    if (!admitted_ || failed_ || finished_ || !reservation_ || !producers_.empty() ||
         tokens > remaining || (tokens && !appends_remaining_) ||
         runtime_.store().total_tokens() != expected_rows_ ||
         runtime_.store().block_count() != expected_blocks_) return false;
@@ -119,7 +147,7 @@ bool HistoricalKvCaptureSession::append(uint32_t tokens) {
             position += n;
             left -= n;
         }
-        if (!runtime_.register_historical_append(repository_, storage_, writers_, producers_))
+        if (!runtime_.register_historical_append(repository_, storage_, writers_, producers_, reservation_->metadata.get()))
             throw std::runtime_error("capture span registration failed");
         writers_.clear();
         expected_rows_ = position;
@@ -134,13 +162,13 @@ bool HistoricalKvCaptureSession::append(uint32_t tokens) {
 }
 
 bool HistoricalKvCaptureSession::end_input() noexcept {
-    if (failed_ || finished_ || input_remaining_ || !producers_.empty()) return false;
+    if (!admitted_ || failed_ || finished_ || input_remaining_ || !producers_.empty()) return false;
     input_ = false;
     return true;
 }
 
 bool HistoricalKvCaptureSession::finish() {
-    if (failed_ || finished_ || input_ || !producers_.empty() ||
+    if (!admitted_ || failed_ || finished_ || input_ || !producers_.empty() ||
         repository_->outstanding_operations()) return false;
     uint32_t live = 0;
     for (const auto handle : handles_) {

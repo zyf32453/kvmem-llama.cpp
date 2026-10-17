@@ -228,34 +228,166 @@ static void cancelled_owner_keeps_tasks() {
 
 static void failures_are_atomic() {
     KvMemRuntime runtime(runtime_config());
+    const auto original_bytes = runtime.store().allocated_bytes();
     check(!HistoricalKvCaptureSession::try_create(runtime, storage_config(), 1, demand(3, 1, 2)),
           "insufficient capacity accepted");
     bool reached_success = false;
     for (int64_t budget = 0; budget < 500; ++budget) {
         allocation_budget = budget;
-        auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, demand(9, 0, 1));
+        auto session = HistoricalKvCaptureSession::try_prepare(runtime, storage_config(), 3, demand(9, 0, 1));
         allocation_budget = -1;
-        check(!runtime.store().block_count(), "admission changed runtime");
+        check(!runtime.store().block_count() && runtime.store().allocated_bytes() == original_bytes &&
+              !runtime.historical_shadow_directory().size(), "private preparation changed runtime");
         if (session) { reached_success = true; break; }
+        check(!HistoricalKvCleanup::process().occupied(), "failed preparation queued private cleanup");
     }
     check(reached_success, "admission fault sweep never succeeded");
-    wait_cleanup();
-    reached_success = false;
-    unsigned failures = 0;
-    for (int64_t budget = 0; budget < 100; ++budget) {
-        KvMemRuntime rt(runtime_config());
-        auto session = HistoricalKvCaptureSession::try_create(rt, storage_config(), 3, demand(9, 0, 1));
-        bool appended = false;
-        allocation_budget = budget;
-        try { appended = session->append(9); }
-        catch (const std::bad_alloc &) { ++failures; }
-        allocation_budget = -1;
-        if (appended) { reached_success = true; break; }
-        check(session->failed() && !session->append(9) && !rt.store().block_count(),
-              "failed registration changed runtime or admitted a retry");
-        wait_cleanup();
+    auto session = HistoricalKvCaptureSession::try_prepare(runtime, storage_config(), 3, demand(9, 0, 1));
+    check(session && !session->admitted() && session->metadata_remaining() == 3 &&
+          !session->append(9) && !session->end_input() && !session->finish(),
+          "private preparation admitted model work");
+    allocation_budget = 0;
+    const bool admitted = session->admit();
+    const auto table_bytes = runtime.store().allocated_bytes();
+    const auto frees_before = foreground_frees;
+    const bool appended = session->append(9);
+    allocation_budget = -1;
+    check(admitted && appended && foreground_frees == frees_before &&
+          session->metadata_remaining() == 0 && !session->admit() &&
+          runtime.store().block_count() == 3 && runtime.store().total_tokens() == 9 &&
+          runtime.store().allocated_bytes() == table_bytes,
+          "reserved metadata append allocated, freed, or changed capacity");
+    for (uint32_t id = 0; id < 3; ++id) {
+        auto task = runtime.historical_shadow_directory().find(id)->writer_context;
+        complete(task, id == 2 ? 1 : 4);
     }
-    check(reached_success && failures, "metadata fault sweep did not cover failure and success");
+    session->producers_captured();
+    check(session->end_input() && session->finish(), "reserved metadata request did not finish");
+    wait_cleanup();
+
+    KvMemRuntime empty(runtime_config());
+    auto zero = HistoricalKvCaptureSession::try_prepare(empty, storage_config(), 1, demand(0, 0, 0));
+    check(zero && zero->admit() && zero->append(0) && zero->end_input() && zero->finish(),
+          "zero-token request failed metadata admission");
+    wait_cleanup();
+
+    KvMemRuntime changed(runtime_config());
+    auto stale = HistoricalKvCaptureSession::try_prepare(changed, storage_config(), 3, demand(9, 0, 1));
+    changed.register_append(1);
+    check(stale && !stale->admit() && changed.store().total_tokens() == 1,
+          "stale preparation replaced newer runtime data");
+    auto storage = stale->storage();
+    stale.reset();
+    check(!storage->allocated_payload_bytes() && !HistoricalKvCleanup::process().occupied(),
+          "rejected admission did not synchronously return private RAM");
+}
+
+static void reserved_metadata_batch_is_atomic() {
+    KvMemRuntime runtime(runtime_config()), other(runtime_config());
+    auto repo = std::make_shared<HistoricalKvRepository>(4);
+    auto storage = std::make_shared<HistoricalKvRawStore>(storage_config(), 4);
+    auto reservation = runtime.prepare_historical_metadata(repo, storage, 2);
+    check(reservation && !other.install_historical_metadata(*reservation) &&
+          runtime.install_historical_metadata(*reservation), "metadata ownership validation failed");
+    const auto table_bytes = runtime.store().allocated_bytes();
+    auto write = [&](uint32_t id, uint32_t begin, uint32_t count) {
+        auto writer = repo->begin_write(id, begin, count, id + 1, 0,
+            [weak = std::weak_ptr<HistoricalKvRepository>(repo), storage](HistoricalKvHandle handle) {
+                auto owner = weak.lock();
+                return owner && storage->release(*owner, handle).code == HistoricalKvRawStore::ReleaseCode::Released;
+            });
+        check(writer && storage->reserve(*writer, writer->handle(), begin, count), "writer fixture failed");
+        return std::move(*writer);
+    };
+    std::vector<HistoricalKvRepository::Lease> writers;
+    std::vector<HistoricalKvShadowDirectory::Producer> producers;
+    writers.push_back(write(0, 0, 3));
+    writers.push_back(write(1, 4, 2)); // Reject the late gap without consuming the first writer.
+    producers.reserve(2);
+    allocation_budget = 0;
+    const bool gap = runtime.register_historical_append(repo, storage, writers, producers, reservation.get());
+    allocation_budget = -1;
+    check(!gap && writers[0] && writers[1] && producers.empty() && reservation->remaining() == 2 &&
+          !runtime.store().block_count() && !runtime.historical_shadow_directory().size(),
+          "malformed batch partially committed reserved metadata");
+    const auto bad = writers[1].handle();
+    check(repo->retire(bad) == HistoricalKvRepository::RetireResult::Committed, "bad writer retirement failed");
+    writers[1].reset();
+    check(repo->try_reclaim(bad) == HistoricalKvRepository::ReclaimResult::Complete, "bad writer cleanup failed");
+    writers[1] = write(1, 3, 2);
+    std::vector<HistoricalKvShadowDirectory::Producer> no_room;
+    check(!runtime.register_historical_append(repo, storage, writers, no_room, reservation.get()) &&
+          !other.register_historical_append(repo, storage, writers, producers, reservation.get()) &&
+          writers[0] && writers[1], "reserved append ignored output capacity or owner");
+    const auto retired = writers[1].handle();
+    check(repo->retire(retired) == HistoricalKvRepository::RetireResult::Committed, "Writing retirement failed");
+    allocation_budget = 0;
+    const bool appended = runtime.register_historical_append(repo, storage, writers, producers, reservation.get());
+    allocation_budget = -1;
+    check(appended && !writers[0] && !writers[1] && !reservation->remaining() &&
+          runtime.store().total_tokens() == 5 && runtime.store().allocated_bytes() == table_bytes,
+          "reserved retry failed or grew metadata");
+    auto late = producers[1];
+    complete(producers[0], 3);
+    producers.clear();
+    writers.clear();
+    writers.push_back(write(2, 5, 1));
+    allocation_budget = 0;
+    const bool overflow = runtime.register_historical_append(repo, storage, writers, producers, reservation.get());
+    const bool bypass = runtime.register_historical_append(repo, storage, writers, producers);
+    allocation_budget = -1;
+    check(!overflow && !bypass && writers[0] && runtime.store().total_tokens() == 5,
+          "metadata quota bypassed by unreserved append");
+    bool legacy_rejected = false;
+    try { runtime.register_append(1); } catch (const std::logic_error &) { legacy_rejected = true; }
+    check(legacy_rejected, "legacy append bypassed the metadata reservation");
+    reservation.reset();
+    check(storage->write_layer(late->writer(), retired, 0, {1, 2, 3, 4}, {5, 6, 7, 8, 9, 10}, {}, 0) &&
+          !storage->publish_complete(*repo, late->writer(), retired),
+          "reservation cleanup lost or resurrected an admitted retired writer");
+    check(repo->try_reclaim(retired) == HistoricalKvRepository::ReclaimResult::Deferred,
+          "retired task lost its writer protection");
+    late.reset();
+    check(repo->try_reclaim(retired) == HistoricalKvRepository::ReclaimResult::Complete,
+          "metadata reservation retained a permanent producer reference");
+}
+
+static void unadmitted_rollback_with_stalled_cleanup() {
+    std::promise<void> entered, resume;
+    auto entered_signal = entered.get_future();
+    auto resume_signal = resume.get_future().share();
+    HistoricalKvCleanup cleanup(2);
+    struct Stall final : HistoricalKvCleanup::Task {
+        std::promise<void> & entered;
+        std::shared_future<void> resume;
+        Stall(std::promise<void> & e, std::shared_future<void> r) : entered(e), resume(std::move(r)) {}
+        ~Stall() override { entered.set_value(); resume.wait(); }
+    };
+    struct Unblock {
+        std::promise<void> & resume;
+        ~Unblock() { resume.set_value(); }
+    } unblock{resume};
+    auto ticket = cleanup.try_reserve();
+    ticket->submit(std::make_unique<Stall>(entered, resume_signal));
+    check(entered_signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+          "private rollback stall was not reached");
+    KvMemRuntime runtime(runtime_config());
+    const auto bytes = runtime.store().allocated_bytes();
+    auto d = demand(9, 0, 1);
+    d.private_scratch_bytes = 4096;
+    for (unsigned i = 0; i < 3; ++i) {
+        auto session = HistoricalKvCaptureSession::try_prepare(runtime, storage_config(), 3, d, &cleanup);
+        check(session && cleanup.occupied() == 2, "private rollback did not return admission credit");
+        auto storage = session->storage();
+        std::weak_ptr<HistoricalKvRepository> repository = session->repository();
+        allocation_budget = 0;
+        if (i == 1) session->fail(); // Explicit cancellation uses the same immediate rollback.
+        session.reset();
+        allocation_budget = -1;
+        check(!storage->allocated_payload_bytes() && repository.expired() && cleanup.occupied() == 1 &&
+              !runtime.store().block_count() && runtime.store().allocated_bytes() == bytes,
+              "unadmitted rollback waited for cleanup or retained private allocations");
+    }
 }
 
 static void unused_reservation_handoff_with_stalled_cleanup() {
@@ -319,8 +451,10 @@ int main() {
         cancelled_owner_keeps_tasks();
         failures_are_atomic();
         wait_cleanup();
+        reserved_metadata_batch_is_atomic();
+        unadmitted_rollback_with_stalled_cleanup();
         unused_reservation_handoff_with_stalled_cleanup();
-        std::puts("PASS historical capture session: bounded quotas, producer handoff, publication, terminal cancellation, allocation faults");
+        std::puts("PASS historical capture session: private prepare/admit, immediate rollback, reserved metadata, bounded quotas, publication, cancellation, allocation faults");
     } catch (const std::exception & e) {
         allocation_budget = -1;
         std::fprintf(stderr, "FAIL historical capture session: %s\n", e.what());

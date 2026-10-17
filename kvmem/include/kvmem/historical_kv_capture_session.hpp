@@ -9,11 +9,21 @@ namespace kvmem {
 // A finite, single-request capture owner. The caller may attach one GC
 // manager to its repository after admission. It connects actual appends to
 // the RAM reservation and producer handoff. This is NOT
-// full production request admission: directory/GPU/backend allocations are
-// still fallible, and a failed session must be discarded after draining its
+// full production request admission: cell/active/backend allocations and
+// additional GPU routes remain fallible; failed sessions drain their
 // tasks. No reset, continuation or streaming is supported.
 class HistoricalKvCaptureSession {
 public:
+    // Prepare private RAM and append metadata without changing the runtime.
+    // Destruction before admit() rolls back synchronously, independent of GC
+    // or the cleanup worker. The caller prepares its other resources first.
+    static std::unique_ptr<HistoricalKvCaptureSession> try_prepare(
+        KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
+        uint32_t capacity, const HistoricalKvRamDemand & demand,
+        HistoricalKvCleanup * cleanup = nullptr);
+    bool admit() noexcept;
+    bool admitted() const noexcept { return admitted_; }
+    // Convenience for host-only callers with no external preparation phase.
     static std::unique_ptr<HistoricalKvCaptureSession> try_create(
         KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
         uint32_t capacity, const HistoricalKvRamDemand & demand,
@@ -22,8 +32,9 @@ public:
     HistoricalKvCaptureSession(const HistoricalKvCaptureSession &) = delete;
     HistoricalKvCaptureSession & operator=(const HistoricalKvCaptureSession &) = delete;
 
-    // Append immutable spans using only this request's reserved RAM credits.
-    // Quota/state rejection does not change the runtime. Allocation/installation
+    // Append immutable spans using reserved RAM, directory nodes, producers
+    // and dense block descriptors; the successful path does not allocate.
+    // Quota/state rejection does not change the runtime. Internal installation
     // failure closes the session, retaining installed data until domain teardown.
     bool append(uint32_t tokens);
     // Call only after EVERY ubatch for the append has captured its producer.
@@ -42,6 +53,7 @@ public:
     uint32_t created_blocks() const noexcept { return static_cast<uint32_t>(handles_.size()); }
     uint32_t live_blocks_at_finish() const noexcept { return live_blocks_at_finish_; }
     uint32_t reserved_blocks() const noexcept { return reserved_blocks_; }
+    uint32_t metadata_remaining() const noexcept;
     uint64_t payload_bytes() const noexcept { return storage_->allocated_payload_bytes(); }
     // The request owner may attach one GC manager to this exact repository.
     // Keeping these owners alive also keeps late release callbacks' target alive.

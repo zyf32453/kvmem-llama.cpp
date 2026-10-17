@@ -1130,13 +1130,13 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             return false;
         }
         auto cleanup = std::make_unique<HistoricalCpuCleanup>();
-        auto session = kvmem::HistoricalKvCaptureSession::try_create(*runtime_, cfg, capacity, demand);
+        auto session = kvmem::HistoricalKvCaptureSession::try_prepare(*runtime_, cfg, capacity, demand);
         if (!session) {
             LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM or CPU cleanup capacity\n");
             return false;
         }
         // Prepare both sides of the pipeline before publishing this owner.
-        // Directory, cell metadata and backend allocations still need admission.
+        // Cell/active metadata and backend allocations still need admission.
         std::vector<RowPosition> positions;
         positions.reserve(static_cast<size_t>(input_tokens + max_output_tokens));
         std::vector<uint32_t> readers(n_slots_, 0);
@@ -1162,7 +1162,15 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             LLAMA_LOG_ERROR("historical capture: packed workspace unavailable before admission\n");
             return false;
         }
-        // Only nonthrowing ownership transfers follow GPU preparation.
+        // All request resources prepared so far are still private. If the
+        // runtime changed before commit, release GPU resources here; the
+        // unadmitted session then returns RAM/metadata without a GC worker.
+        if (!session->admit()) {
+            kvmem_stagein_gpu_free();
+            LLAMA_LOG_ERROR("historical capture: runtime changed before admission commit\n");
+            return false;
+        }
+        // Only nonthrowing ownership transfers follow successful admission.
         row_positions_.swap(positions);
         historical_gpu_readers_.swap(readers);
         historical_gpu_retired_.swap(retired);
@@ -1179,11 +1187,11 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             harvest_v_job_limit_, workspace.device_bytes, workspace.pinned_bytes,
             workspace.host_bytes + (harvest_v_jobs_.capacity() + harvest_v_pending_.jobs.capacity()) * sizeof(HarvestVJob),
             harvest_v_fallback_.size(), workspace.layout_bytes, n_slots_, layout_workspace_.capacity_bytes());
-        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu\n",
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu metadata_slots=%u\n",
             capacity, historical_capture_->reserved_blocks(),
             (unsigned long long) historical_capture_->payload_bytes(),
             (unsigned long long) input_tokens, (unsigned long long) max_output_tokens,
-            (unsigned long long) max_appends);
+            (unsigned long long) max_appends, historical_capture_->metadata_remaining());
         return true;
     } catch (const std::exception & e) {
         LLAMA_LOG_ERROR("historical capture begin: %s\n", e.what());

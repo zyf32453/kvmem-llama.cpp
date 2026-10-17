@@ -70,9 +70,21 @@ public:
         std::shared_ptr<HistoricalKvRepository> repository,
         std::shared_ptr<HistoricalKvRawStore> storage,
         std::vector<HistoricalKvRepository::Lease> & writers,
-        std::vector<HistoricalKvShadowDirectory::Producer> & producers) {
+        std::vector<HistoricalKvShadowDirectory::Producer> & producers,
+        HistoricalKvShadowDirectory::AppendReservation * reservation = nullptr) {
+        if (reservation) return historical_shadow_directory_.append_reserved_blocks(
+            store_, *reservation, std::move(repository), std::move(storage), writers, producers);
         return historical_shadow_directory_.append_blocks(
             store_, std::move(repository), std::move(storage), writers, producers);
+    }
+    std::unique_ptr<HistoricalKvShadowDirectory::AppendReservation> prepare_historical_metadata(
+        std::shared_ptr<HistoricalKvRepository> repository,
+        std::shared_ptr<HistoricalKvRawStore> storage, uint32_t capacity) {
+        return historical_shadow_directory_.prepare_append_reservation(
+            store_, std::move(repository), std::move(storage), capacity);
+    }
+    bool install_historical_metadata(HistoricalKvShadowDirectory::AppendReservation & reservation) noexcept {
+        return historical_shadow_directory_.install_append_reservation(store_, reservation);
     }
     bool confirm_reclaimed_historical_block(uint32_t block_id) {
         return historical_shadow_directory_.confirm_reclaimed(block_id);
