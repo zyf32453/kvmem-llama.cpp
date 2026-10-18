@@ -655,14 +655,30 @@ server 现可显式使用 `--kvmem-historical-capture N` 和 `--kvmem-historical
 
 受限 server 的 delete HTTP 回归 **33/33** 通过，证据在 `/tmp/kvmem-mean-split-http-delete/`。四次压力请求各 `committed=14`、完成边界 `reclaimed=13`，policy/worker failure 为零；prefill 取消时剩余 321/385 个输入 token，生成取消时输入已完成。普通 HTTP 用例没有触发组件单独释放，`partial_resource_releases=0`，不据此声明实际请求内存峰值或速度改善。命令、响应、构建与 sanitizer 日志备份到本地 `build-local/historical-mean-split-validation/`。
 
-**本轮边界：** 写入 producer 及其任务仍持完整 Host writer，避免遗漏未来写入依赖；还未拆成每个生产分量独立的 writer 权利。K 与 V 在 packed K/V 内仍共同释放。NVMe、pinned cache、MTP 也未因此获得支持。虽然 scorer/stage-in 的接口已使用窄许可，自动 historical capture 的公开入口仍限制为 recency/RAM，不能把接口测试报告为完整 retrieval 生产接入或吞吐改善。
+**当时的边界：** 写入 producer 及其任务仍持完整 Host writer；后续分量结算见下节。K 与 V 在 packed K/V 内仍共同释放。NVMe、pinned cache、MTP 也未因此获得支持。虽然 scorer/stage-in 的接口已使用窄许可，自动 historical capture 的公开入口仍限制为 recency/RAM，不能把接口测试报告为完整 retrieval 生产接入或吞吐改善。
+
+### 生产 writer 按已完成分量归还 Host 权利（2026-10-18）
+
+多个异步任务仍共享同一个 producer，但分资源 writer 现在在建立时分别取得 packed K/V 权利、Mean-K 权利和独立身份引用。`HistoricalKvRawStore::publish_complete` 在内容锁内检查整个固定跨度、全部必需注意力层的进度：某分量全部写满后，就不可逆地关闭该分量的后续 writer 访问，再归还其资源引用。完成位幂等，重复结算不会重复扣引用；原来的整块 writer/legacy bridge 继续保留原语义。现有 packed、异步/同步 Mean-K 和 decode 提交流程本来就调用该接口，因此这一结算已接到实际生产任务。
+
+完整块尚未发布、或已被策略退休，都不妨碍已完成分量归还权利。后续任务继续使用捕获的原身份，`write_progress` 保留逐层进度，便于已经获准的重试识别已写内容；它不授予 payload 访问。写接口在内容锁内检查对应权利，已关闭的分量拒绝迟到写入。读取接口也在拿到内容锁后再次检查动态 writer 权利，避免初次权限检查与实际读取之间发生分量关闭；普通 reader/transfer 许可仍保持其原有、不可缩减的资源依赖。
+
+某分量没有写满时不会提前归还权利。如果请求取消或任务失败，最后一个 producer 退出时归还尚未结算的权利，退休资源仍能最终释放，不会因短尾或未完成写入永久滞留。即使两份 Host payload 都已释放，producer 的身份引用仍保护进度、发布状态和存储记录；最后一个任务退出后，metadata 才可释放并返还 Ready。GC 不修改 GPU 工作集，也不会把旧完成回调转向新 incarnation。
+
+新增宿主并发测试使用两个必需层和一个非注意力层，分别让 packed K/V、Mean-K 先完成；真实回收线程持续运行，另一分量继续写入，并发查询 writer 权利及读取均值。测试检查单层完成不能释放整个分量、保留数据与进度正确、关闭后拒绝读写、禁止普通 C++ 分配时回收、重复结算、identity-only writer 的移动，以及最后一个任务退出后的 Ready 守恒。宿主 **27/27**、相关 ASan/UBSan **8/8**、TSan **8/8** 已通过。
+
+真实 CUDA capture 用例验证：48 层 packed K/V 已全部提交、Mean-K capture 尚未结清时，后台释放 **3,145,728 bytes** K/V，仅保留 **98,304 bytes** Mean-K 和原身份；之后迟到的 Mean-K 任务继续完成，退休状态不会恢复成 Live。首次新增断言把 decode fixture 的 8/32 个已接受行误当作完整 K/V，导致测试失败；修正后明确要求该未完成分量继续受保护，直到任务退出。本轮没有为了通过测试而放开未完成写入的资源。
+
+最终源码的完整真实模型回归 **35/35**、reset/cancel、36 次和 48 次连续请求及 backend guard 全部通过；两条长轨迹分别回收 **69/190** 块，日志 `/tmp/kvmem-writer-split-model-checked.log`。delete HTTP 回归 **33/33** 通过，四次压力请求均 `committed=14`、完成边界 `reclaimed=13`，policy/worker failure 为零；本轮这些请求的 `partial_resource_releases` 分别为 **10/12/12/12**，说明普通请求中也实际发生了分量先释放。该计数不是释放字节数，也不能单独证明峰值内存或吞吐改善。prefill 取消时已接收 64 行、剩余 321 个输入 token，生成取消时输入已完成。先前记录的偶发 CUDA 非法访问本轮未重现，根因仍未确认。构建、sanitizer、模型和 HTTP 原始日志以及命令备份在本地 `build-local/historical-writer-split-validation/`；最终源码与隔离受测副本逐文件核对 SHA-256。
+
+本轮仍以 packed K/V 为一个资源组，并保留完成检查和存储内容同步；这不是每条 DMA job 都各自分配新 writer，也不是完整前台无等待或全资源预算证明。NVMe、pinned cache、其它 active 入口、检查点/多会话及策略效果验收仍需继续完成。
 
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。server 已接入单 lane 的有限预约、精确前缀延续、新会话与健康取消；仍需扩展缓存分支、设备故障恢复和其它生产路径。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
-2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 读取/回收也已独立。还需细化各生产分量的 writer、NVMe 等资源依赖及 pinned cache 槽位失效，并扩展到其余入口。
+2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 的读取、已完成 writer 分量及回收已独立结算。还需完成 NVMe 等资源依赖及 pinned cache 槽位失效，并扩展到其余入口，验证内容同步不会引入前台 GC 等待。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 仍拒绝分段 streaming 预约；server 的 SSE 按有限输出整请求预约。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI/server 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到其余生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。

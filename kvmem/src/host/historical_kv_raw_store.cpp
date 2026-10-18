@@ -77,6 +77,15 @@ bool HistoricalKvRawStore::required_layer(uint32_t layer) const noexcept {
 
 void HistoricalKvRawStore::mark_layer_complete(Block & block,
                                                 Layer & layer) const noexcept {
+    if (!layer.packed_complete && layer.k_written_tokens == block.valid_tokens &&
+        layer.v_written_tokens == block.valid_tokens) {
+        layer.packed_complete = true;
+        ++block.packed_complete_layers;
+    }
+    if (!layer.mean_complete && (!config_.mean_k_elements || layer.mean_written_tokens == block.valid_tokens)) {
+        layer.mean_complete = true;
+        ++block.mean_complete_layers;
+    }
     if (layer.written || layer.k_written_tokens != block.valid_tokens ||
         layer.v_written_tokens != block.valid_tokens ||
         (config_.mean_k_elements &&
@@ -228,6 +237,7 @@ bool HistoricalKvRawStore::write_layer(
     std::lock_guard<std::mutex> lock(slot.mu);
     // The same slot lock protects publish_complete. A published layer is
     // immutable; a retired old writer may still finish admitted writes.
+    if (!writer.has_packed_kv_access() || (config_.mean_k_elements && !writer.has_mean_k_access())) return false;
     const auto meta = writer.metadata();
     if (!meta || (meta->life != HistoricalKvLife::Writing &&
                   meta->life != HistoricalKvLife::Retired)) return false;
@@ -268,6 +278,7 @@ bool HistoricalKvRawStore::write_slice(
         !required_layer(layer) || !token_count) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
+    if (!writer.has_packed_kv_access() || (config_.mean_k_elements && !writer.has_mean_k_access())) return false;
     const auto meta = writer.metadata();
     if (!meta || (meta->life != HistoricalKvLife::Writing &&
                   meta->life != HistoricalKvLife::Retired)) return false;
@@ -324,6 +335,7 @@ bool HistoricalKvRawStore::write_packed_k_slice(
         !required_layer(layer) || !token_count || !packed_k) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
+    if (!writer.has_packed_kv_access()) return false;
     const auto meta = writer.metadata();
     if (!meta || (meta->life != HistoricalKvLife::Writing &&
                   meta->life != HistoricalKvLife::Retired)) return false;
@@ -361,6 +373,7 @@ bool HistoricalKvRawStore::write_packed_v_slice(
         !required_layer(layer) || !token_count || !packed_v) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
+    if (!writer.has_packed_kv_access()) return false;
     const auto meta = writer.metadata();
     if (!meta || (meta->life != HistoricalKvLife::Writing &&
                   meta->life != HistoricalKvLife::Retired)) return false;
@@ -391,6 +404,7 @@ bool HistoricalKvRawStore::write_mean_k_slice(
         !token_count) return false;
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
+    if (!writer.has_mean_k_access()) return false;
     const auto meta = writer.metadata();
     if (!meta || (meta->life != HistoricalKvLife::Writing &&
                   meta->life != HistoricalKvLife::Retired)) return false;
@@ -436,10 +450,15 @@ bool HistoricalKvRawStore::publish_complete(
     Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const Block * block = slot.block.get();
-    if (!block || block->repository_id != repository.repository_id() ||
-        !same(block->handle, handle) ||
-        block->written_layers != (config_.attention_layers.empty()
-            ? config_.n_layer : config_.attention_layers.size())) return false;
+    if (!block || block->repository_id != repository.repository_id() || !same(block->handle, handle)) return false;
+    const auto required = config_.attention_layers.empty() ? config_.n_layer : config_.attention_layers.size();
+    if (writer.has_resource_writer()) {
+        if (block->packed_complete_layers == required)
+            repository.release_writer_resource(writer, HistoricalKvRepository::HostResource::PackedKv);
+        if (!config_.mean_k_elements || block->mean_complete_layers == required)
+            repository.release_writer_resource(writer, HistoricalKvRepository::HostResource::MeanK);
+    }
+    if (block->written_layers != required) return false;
     return repository.publish_write(writer);
 }
 
@@ -453,6 +472,9 @@ HistoricalKvRawStore::read_layer(
         !required_layer(layer)) return std::nullopt;
     const Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
+    // A producer's resource rights can close between the initial permission
+    // check and this content lock. Ordinary reader leases remain immutable.
+    if (!reader.has_host_access()) return std::nullopt;
     const Block * block = slot.block.get();
     if (!block || block->repository_id != reader.repository_id() ||
         !same(block->handle, handle) || block->packed_kv_released || block->mean_k_released) return std::nullopt;
@@ -469,6 +491,7 @@ HistoricalKvRawStore::read_packed_kv(const HistoricalKvRepository::Lease & reade
         handle.slot >= slots_.size() || !required_layer(layer)) return std::nullopt;
     const auto & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
+    if (!reader.has_packed_kv_access()) return std::nullopt;
     const auto * block = slot.block.get();
     if (!block || block->repository_id != reader.repository_id() ||
         !same(block->handle, handle) || block->packed_kv_released) return std::nullopt;
@@ -500,6 +523,7 @@ bool HistoricalKvRawStore::copy_mean_k(
         !config_.mean_k_elements || elements != config_.mean_k_elements) return false;
     const Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
+    if (!reader.has_mean_k_access()) return false;
     const Block * block = slot.block.get();
     if (!block || block->repository_id != reader.repository_id() ||
         !same(block->handle, handle) || block->mean_k_released) return false;

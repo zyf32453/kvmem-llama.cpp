@@ -159,6 +159,9 @@ public:
     // Publish only when every layer has its full reserved span. The slot lock
     // serializes this transition with write_slice/write_layer in this store.
     // A strategy may still retire the writer; then publication fails.
+    // For resource writers, also closes each fully completed component before
+    // the other component finishes. Progress metadata remains under the writer
+    // identity so admitted retries can observe completion without payload access.
     bool publish_complete(HistoricalKvRepository & repository,
                           const HistoricalKvRepository::Lease & writer,
                           HistoricalKvHandle handle);
@@ -209,6 +212,8 @@ private:
         uint32_t v_written_tokens = 0;
         uint32_t mean_written_tokens = 0;
         bool written = false;
+        bool packed_complete = false;
+        bool mean_complete = false;
     };
     struct Block {
         ~Block();
@@ -217,6 +222,8 @@ private:
         uint64_t original_begin = 0;
         uint32_t valid_tokens = 0;
         uint32_t written_layers = 0;
+        uint32_t packed_complete_layers = 0;
+        uint32_t mean_complete_layers = 0;
         uint64_t payload_bytes = 0;
         uint64_t packed_kv_bytes = 0;
         uint64_t mean_k_bytes = 0;

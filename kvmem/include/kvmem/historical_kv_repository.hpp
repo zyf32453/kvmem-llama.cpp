@@ -65,20 +65,18 @@ public:
         bool is_writer() const { return kind_ == LeaseKind::Writer; }
         // GPU-only permission cannot be used to read/copy Host payload, even
         // before retirement. Future Host dependencies must be admitted up front.
-        bool has_host_access() const noexcept { return shared_ && access_ == HostAccess::All; }
-        bool has_packed_kv_access() const noexcept {
-            return has_host_access() || (shared_ && access_ == HostAccess::PackedKv);
-        }
-        bool has_mean_k_access() const noexcept {
-            return has_host_access() || (shared_ && access_ == HostAccess::MeanK);
-        }
+        bool has_host_access() const noexcept;
+        bool has_packed_kv_access() const noexcept;
+        bool has_mean_k_access() const noexcept;
+        bool has_resource_writer() const noexcept { return shared_ && split_writer_; }
         uint64_t repository_id() const noexcept;
         std::optional<HistoricalKvBlockMeta> metadata() const;
         void reset() noexcept;
 
     private:
         friend class HistoricalKvRepository;
-        Lease(std::shared_ptr<Shared>, HistoricalKvHandle, LeaseKind, HostAccess access = HostAccess::None);
+        Lease(std::shared_ptr<Shared>, HistoricalKvHandle, LeaseKind, HostAccess access = HostAccess::None,
+              bool split_writer = false);
         void disarm() noexcept;
         void count_operation() noexcept;
         std::shared_ptr<Shared> shared_;
@@ -87,6 +85,7 @@ public:
         bool counted_exec_ = false;
         bool counted_operation_ = false;
         HostAccess access_ = HostAccess::None;
+        bool split_writer_ = false;
     };
 
     // Request-private, real physical slots. Reserved slots are neither Ready
@@ -147,6 +146,11 @@ public:
     // becomes Live. Retirement is sticky and refcount churn cannot postpone
     // the last producer's completion publication.
     bool publish_write(const Lease & writer);
+    // Storage calls this only after the resource's entire admitted span and
+    // every required layer are complete, under its content synchronization.
+    // Irreversibly closes future writer use of that component. The producer
+    // retains identity/progress/publication rights until its last task exits.
+    bool release_writer_resource(const Lease & writer, HostResource resource) noexcept;
     // A retired block never grants a new lease, even if old leases remain.
     // acquire_new conservatively retains Host payload for the whole execution,
     // including future reads/transfers not yet submitted at this boundary.

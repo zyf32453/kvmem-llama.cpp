@@ -2,6 +2,7 @@
 #include "kvmem/historical_kv_repository.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -822,7 +823,95 @@ static void test_mean_and_kv_release_independently() {
     }
 }
 
+static void test_completed_writer_components_release_before_producer_exit() {
+    using Repo = HistoricalKvRepository;
+    using Resource = Repo::HostResource;
+    for (bool kv_first : {true, false}) {
+        HistoricalKvRawStore store({3, 4, 2, 3, 1, {0, 2}}, 1);
+        Repo repo(1);
+        auto prepared = store.prepare_payload(4);
+        auto writer = repo.begin_write(0, 0, 4, 1, prepared.payload_bytes(), Repo::ResourceRelease{
+            [&](const HistoricalKvHandle & h, Resource resource) {
+                return callback_succeeded(store.release_resource(repo, h, resource).code);
+            }, prepared.packed_kv_bytes(), prepared.mean_k_bytes()});
+        const auto handle = writer->handle();
+        check(writer->has_resource_writer() && store.install_payload(*writer, handle, 0, 4, prepared),
+              "component writer fixture installation failed");
+        check(repo.retire(handle) == Repo::RetireResult::Committed, "component writer did not retire");
+        std::atomic<bool> stop{false}, unsafe{false};
+        std::thread worker([&] {
+            DenyPackedAllocations deny;
+            while (!stop.load()) {
+                if (repo.try_reclaim(handle) == Repo::ReclaimResult::Complete) unsafe = true;
+                // These permission queries must be safe while the producer
+                // closes a component concurrently, without mutating its Lease.
+                (void) writer->has_host_access();
+                (void) writer->has_packed_kv_access();
+                (void) writer->has_mean_k_access();
+                float value = 0;
+                if (store.copy_mean_k(*writer, handle, 2, &value, 1) && value != 2.f) unsafe = true;
+                std::this_thread::yield();
+            }
+        });
+        struct StopWorker {
+            std::atomic<bool> & stop;
+            std::thread & worker;
+            ~StopWorker() { stop = true; if (worker.joinable()) worker.join(); }
+        } guard{stop, worker};
+        const auto write = [&](uint32_t layer, bool kv) {
+            if (kv) {
+                check(store.write_packed_k_slice(*writer, handle, layer, 0, 4, std::vector<uint8_t>(8, 7)) &&
+                      store.write_packed_v_slice(*writer, handle, layer, 0, 4, std::vector<uint8_t>(12, 9)),
+                      "old packed writer could not finish after retirement");
+            } else {
+                check(store.write_mean_k_slice(*writer, handle, layer, 0, 4, {8.f}),
+                      "old Mean-K writer could not finish after retirement");
+            }
+            check(!store.publish_complete(repo, *writer, handle), "component completion resurrected retired history");
+        };
+        write(0, kv_first);
+        check(writer->has_host_access() && store.allocated_payload_bytes() == 48,
+              "one completed layer prematurely released the whole resource");
+        write(2, kv_first);
+        const uint64_t remaining = kv_first ? 8 : 40;
+        const auto wait_bytes = [&](uint64_t bytes) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (store.allocated_payload_bytes() != bytes && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::yield();
+            check(store.allocated_payload_bytes() == bytes, "completed writer resource stayed pinned by unrelated tasks");
+        };
+        wait_bytes(remaining);
+        check(writer->has_packed_kv_access() != kv_first && writer->has_mean_k_access() == kv_first &&
+              !writer->has_host_access() && !repo.ready_count() && !unsafe,
+              "writer component closure lost remaining permissions or identity");
+        const auto progress = store.write_progress(*writer, handle, 2);
+        check(progress && progress->packed_k_tokens == (kv_first ? 4u : 0u) &&
+              progress->mean_k_tokens == (kv_first ? 0u : 4u), "partial release lost task progress metadata");
+        write(0, !kv_first);
+        write(2, !kv_first);
+        wait_bytes(0);
+        check(!writer->has_packed_kv_access() && !writer->has_mean_k_access() &&
+              !store.read_layer(*writer, handle, 0) && !repo.ready_count() &&
+              !repo.reclaim_completed(handle, repo.repository_id()) && !unsafe,
+              "finished producer retained payload or freed identity before its last task");
+        check(!store.write_packed_k_slice(*writer, handle, 0, 0, 4, std::vector<uint8_t>(8)) &&
+              !store.write_mean_k_slice(*writer, handle, 0, 0, 4, {8.f}),
+              "closed writer regained payload through a late completion");
+        stop = true;
+        worker.join();
+        check(repo.release_writer_resource(*writer, Resource::PackedKv) &&
+              repo.release_writer_resource(*writer, Resource::MeanK), "duplicate writer close failed");
+        Repo::Lease moved = std::move(*writer);
+        writer.reset();
+        check(repo.outstanding_operations() == 1, "moving the identity-only writer lost task ownership");
+        moved.reset();
+        check(repo.try_reclaim(handle) == Repo::ReclaimResult::Complete && repo.ready_count() == 1 &&
+              !repo.outstanding_operations(), "final writer identity did not release metadata/slot");
+    }
+}
+
 int main() {
+    test_completed_writer_components_release_before_producer_exit();
     test_mean_and_kv_release_independently();
     test_host_payload_releases_before_gpu_identity();
     test_exact_generation_ram_reclamation();

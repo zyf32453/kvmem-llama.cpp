@@ -1235,8 +1235,26 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                     "queued DMA writer failed to retain its allocation");
         }
         kvmem_transfer_test_access::commit(mem);
-        if (retire_in_flight) require(reclaim() == Repository::ReclaimResult::Deferred,
-                "Mean-K task/accumulator lost its writer after packed completion");
+        if (round == 1) {
+            require(reclaim() == Repository::ReclaimResult::ResourceReleased &&
+                    payload->allocated_payload_bytes() == mean_bytes && !repository->ready_count(),
+                    "unfinished Mean-K producer retained completed packed K/V or lost its identity");
+            const auto retained = directory.find(0)->writer_context;
+            require(retained && !retained->writer().has_packed_kv_access() && retained->writer().has_mean_k_access(),
+                    "completed packed writer did not irreversibly close its resource rights");
+            for (auto il : cfg.attention_layers) {
+                const auto progress = payload->write_progress(retained->writer(), handle, il);
+                require(progress && progress->packed_k_tokens == block && progress->packed_v_tokens == block &&
+                        progress->mean_k_tokens < block, "partial producer release lost its per-layer progress");
+            }
+            std::printf("PASS producer resource split: packed KV freed with unfinished CUDA Mean-K capture, Mean-K bytes=%llu identity retained\n",
+                        (unsigned long long) mean_bytes);
+        } else if (retire_in_flight) {
+            // Only 8/32 accepted rows were captured in this decode fixture;
+            // an incomplete component must retain its writer's resource claim.
+            require(reclaim() == Repository::ReclaimResult::Deferred,
+                    "partial decode producer released an unfinished component");
+        }
         if (round < 2) {
             if (round == 1) {
                 kvmem::HistoricalKvGc::Config gc_cfg;

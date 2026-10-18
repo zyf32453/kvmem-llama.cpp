@@ -31,7 +31,10 @@ static_assert((uint64_t(Phase::Writing) | kPublishBit) == uint64_t(Phase::Live) 
               (uint64_t(Phase::Retired) | kPublishBit) == uint64_t(Phase::Retired),
               "publication must preserve every non-Writing writer phase");
 constexpr uint64_t kHostOne = 8;
+constexpr uint64_t kKvOne = uint64_t(1) << 18;
+constexpr uint64_t kMeanOne = uint64_t(1) << 33;
 constexpr uint64_t kOtherOne = uint64_t(1) << 48;
+constexpr uint8_t kWriterKv = 1, kWriterMean = 2, kWriterAll = kWriterKv | kWriterMean;
 constexpr uint64_t kMaxRefs = (uint64_t(1) << 15) - 1;
 constexpr unsigned kCasAttempts = 16;
 enum class HostRelease : uint8_t { Bound, Releasing, Released };
@@ -116,6 +119,9 @@ struct HistoricalKvRepository::Shared {
         std::atomic<HostRelease> host_release{HostRelease::Bound};
         std::atomic<HostRelease> kv_release{HostRelease::Bound};
         std::atomic<HostRelease> mean_release{HostRelease::Bound};
+        // A resource writer owns one identity ref plus one claim per open
+        // component. Closing a claim never invalidates its immutable handle.
+        std::atomic<uint8_t> writer_resources{0};
         uint64_t logical_id = 0;
         uint64_t original_begin = 0;
         uint64_t birth_seq = 0;
@@ -167,7 +173,10 @@ struct HistoricalKvRepository::Shared {
         out.payload_bytes = slot.payload_bytes;
         out.life = public_life(phase_of(control));
         // This observation includes our short-lived metadata guard.
-        const uint64_t refs = refs_of(control);
+        const auto writer_resources = slot.writer_resources.load(std::memory_order_acquire);
+        const uint64_t extra_writer_claims = bool(writer_resources & kWriterKv) + bool(writer_resources & kWriterMean);
+        const uint64_t raw_refs = refs_of(control);
+        const uint64_t refs = raw_refs > extra_writer_claims ? raw_refs - extra_writer_claims : 0;
         out.references = static_cast<uint32_t>(refs > 0 ?
             std::min<uint64_t>(refs - 1, std::numeric_limits<uint32_t>::max()) : 0);
         out.active = slot.exec_refs.load(std::memory_order_acquire) != 0;
@@ -195,19 +204,20 @@ struct HistoricalKvRepository::Shared {
 };
 
 HistoricalKvRepository::Lease::Lease(std::shared_ptr<Shared> shared,
-                                     HistoricalKvHandle handle, LeaseKind kind, HostAccess access)
-    : shared_(std::move(shared)), handle_(handle), kind_(kind), access_(access) {}
+                                     HistoricalKvHandle handle, LeaseKind kind, HostAccess access, bool split_writer)
+    : shared_(std::move(shared)), handle_(handle), kind_(kind), access_(access), split_writer_(split_writer) {}
 
 HistoricalKvRepository::Lease::~Lease() { reset(); }
 
 HistoricalKvRepository::Lease::Lease(Lease && other) noexcept
     : shared_(std::move(other.shared_)), handle_(other.handle_), kind_(other.kind_),
       counted_exec_(other.counted_exec_), counted_operation_(other.counted_operation_),
-      access_(other.access_) {
+      access_(other.access_), split_writer_(other.split_writer_) {
     other.kind_ = LeaseKind::Read;
     other.counted_exec_ = false;
     other.counted_operation_ = false;
     other.access_ = HostAccess::None;
+    other.split_writer_ = false;
 }
 
 HistoricalKvRepository::Lease & HistoricalKvRepository::Lease::operator=(Lease && other) noexcept {
@@ -219,10 +229,12 @@ HistoricalKvRepository::Lease & HistoricalKvRepository::Lease::operator=(Lease &
         counted_exec_ = other.counted_exec_;
         counted_operation_ = other.counted_operation_;
         access_ = other.access_;
+        split_writer_ = other.split_writer_;
         other.kind_ = LeaseKind::Read;
         other.counted_exec_ = false;
         other.counted_operation_ = false;
         other.access_ = HostAccess::None;
+        other.split_writer_ = false;
     }
     return *this;
 }
@@ -239,11 +251,36 @@ uint64_t HistoricalKvRepository::Lease::repository_id() const noexcept {
     return shared_ ? shared_->repository_id : 0;
 }
 
+bool HistoricalKvRepository::Lease::has_host_access() const noexcept {
+    if (!shared_) return false;
+    return split_writer_ ? shared_->slots[handle_.slot].writer_resources.load(std::memory_order_acquire) == kWriterAll
+                         : access_ == HostAccess::All;
+}
+
+bool HistoricalKvRepository::Lease::has_packed_kv_access() const noexcept {
+    if (!shared_) return false;
+    return split_writer_ ? (shared_->slots[handle_.slot].writer_resources.load(std::memory_order_acquire) & kWriterKv) != 0
+                         : access_ == HostAccess::All || access_ == HostAccess::PackedKv;
+}
+
+bool HistoricalKvRepository::Lease::has_mean_k_access() const noexcept {
+    if (!shared_) return false;
+    return split_writer_ ? (shared_->slots[handle_.slot].writer_resources.load(std::memory_order_acquire) & kWriterMean) != 0
+                         : access_ == HostAccess::All || access_ == HostAccess::MeanK;
+}
+
 void HistoricalKvRepository::Lease::reset() noexcept {
     if (shared_) {
         if (counted_exec_)
             shared_->slots[handle_.slot].exec_refs.fetch_sub(1, std::memory_order_acq_rel);
-        shared_->unpin(handle_.slot, access_);
+        if (split_writer_) {
+            auto & slot = shared_->slots[handle_.slot];
+            const auto resources = slot.writer_resources.exchange(0, std::memory_order_acq_rel);
+            slot.control.fetch_sub(kOtherOne + ((resources & kWriterKv) ? kKvOne : 0) +
+                                   ((resources & kWriterMean) ? kMeanOne : 0), std::memory_order_acq_rel);
+        } else {
+            shared_->unpin(handle_.slot, access_);
+        }
         if (counted_operation_) shared_->operations.fetch_sub(1, std::memory_order_acq_rel);
         shared_.reset();
     }
@@ -251,6 +288,7 @@ void HistoricalKvRepository::Lease::reset() noexcept {
     counted_exec_ = false;
     counted_operation_ = false;
     access_ = HostAccess::None;
+    split_writer_ = false;
 }
 
 void HistoricalKvRepository::Lease::count_operation() noexcept {
@@ -268,6 +306,7 @@ void HistoricalKvRepository::Lease::disarm() noexcept {
     counted_exec_ = false;
     counted_operation_ = false;
     access_ = HostAccess::None;
+    split_writer_ = false;
 }
 
 HistoricalKvRepository::HistoricalKvRepository(uint32_t capacity, uint64_t incarnation)
@@ -403,10 +442,13 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reser
     slot.kv_release.store(HostRelease::Bound, std::memory_order_relaxed);
     slot.mean_release.store(HostRelease::Bound, std::memory_order_relaxed);
     slot.resources = std::move(resources);
+    const bool split_writer = bool(slot.resources.callback);
+    slot.writer_resources.store(split_writer ? kWriterAll : 0, std::memory_order_relaxed);
     slot.release = std::move(release);
     ++reservation.consumed_;
-    slot.control.store(code(Phase::Writing, 1), std::memory_order_release);
-    Lease writer(shared, handle, LeaseKind::Writer, HostAccess::All);
+    slot.control.store(split_writer ? code(Phase::Writing, 0, 1) + kKvOne + kMeanOne : code(Phase::Writing, 1),
+                       std::memory_order_release);
+    Lease writer(shared, handle, LeaseKind::Writer, split_writer ? HostAccess::None : HostAccess::All, split_writer);
     writer.count_operation();
     return writer;
 }
@@ -461,10 +503,13 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_write
         slot.kv_release.store(HostRelease::Bound, std::memory_order_relaxed);
         slot.mean_release.store(HostRelease::Bound, std::memory_order_relaxed);
         slot.resources = std::move(resources);
+        const bool split_writer = bool(slot.resources.callback);
+        slot.writer_resources.store(split_writer ? kWriterAll : 0, std::memory_order_relaxed);
         slot.release = std::move(release);
         slot.generation.store(handle.generation, std::memory_order_release);
-        slot.control.store(code(Phase::Writing, 1), std::memory_order_release);
-        Lease writer(shared, handle, LeaseKind::Writer, HostAccess::All);
+        slot.control.store(split_writer ? code(Phase::Writing, 0, 1) + kKvOne + kMeanOne : code(Phase::Writing, 1),
+                           std::memory_order_release);
+        Lease writer(shared, handle, LeaseKind::Writer, split_writer ? HostAccess::None : HostAccess::All, split_writer);
         writer.count_operation();
         // A write admitted before close may complete with its writer lease.
         // Returning nullopt here would orphan a Writing slot if a bounded
@@ -484,6 +529,19 @@ bool HistoricalKvRepository::publish_write(const Lease & writer) {
     // with this bit already set. Reference bits are unaffected. Repeated
     // publication remains false, as does publication after retirement.
     return phase_of(control.fetch_or(kPublishBit, std::memory_order_acq_rel)) == Phase::Writing;
+}
+
+bool HistoricalKvRepository::release_writer_resource(const Lease & writer, HostResource resource) noexcept {
+    if (!owns_writer(writer) || !writer.split_writer_ || resource == HostResource::Metadata) return false;
+    auto & slot = shared_->slots[writer.handle_.slot];
+    const uint8_t bit = resource == HostResource::PackedKv ? kWriterKv : kWriterMean;
+    // Close the producer's future access first, then drop the backing resource
+    // claim. The surviving identity ref keeps metadata/publication usable. A
+    // duplicate completion cannot subtract the same claim twice.
+    const auto previous = slot.writer_resources.fetch_and(static_cast<uint8_t>(~bit), std::memory_order_acq_rel);
+    if (previous & bit) slot.control.fetch_sub(resource == HostResource::PackedKv ? kKvOne : kMeanOne,
+                                               std::memory_order_acq_rel);
+    return true;
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_new(
