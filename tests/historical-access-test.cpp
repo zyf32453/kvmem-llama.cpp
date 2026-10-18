@@ -405,6 +405,12 @@ struct kvmem_transfer_test_access {
     static void restore(llama_memory_kvmem & mem, uint32_t id) {
         mem.write_block_to_gpu(id);
     }
+    static void stagein_hook(llama_memory_kvmem & mem, std::function<void()> hook) {
+        mem.historical_stagein_test_hook_ = std::move(hook);
+    }
+    static bool stagein_engaged(const llama_memory_kvmem & mem) { return mem.historical_stagein_.engaged; }
+    static bool stagein_disk(const llama_memory_kvmem & mem) { return mem.historical_stagein_.source.from_nvme(); }
+    static const void * stagein_buffer(const llama_memory_kvmem & mem) { return mem.historical_stagein_.k.data(); }
     static void capture(llama_memory_kvmem & mem, uint32_t id) { mem.harvest_gpu_v(id); }
     static void capture_current(llama_memory_kvmem & mem) {
         if (mem.pos_queue_.empty()) throw std::runtime_error("fixture has no admitted capture batch");
@@ -1419,6 +1425,136 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem, bool with_nvme
                     round, (unsigned long long) handle.generation, retire_in_flight);
     }
     mem.clear(true);
+}
+
+static void check_historical_stagein(llama_memory_kvmem & mem, unsigned scenario) {
+    using Repo = kvmem::HistoricalKvRepository;
+    using Store = kvmem::HistoricalKvRawStore;
+    const bool disk = scenario != 37, failure = scenario != 36, unconfirmed = scenario == 39;
+    const auto & raw = mem.raw().config();
+    const uint32_t count = 3, block = mem.block_tokens();
+    auto & runtime = mem.runtime();
+    std::vector<llama_pos> positions(count);
+    for (uint32_t i = 0; i < count; ++i) positions[i] = i;
+    llama_ubatch ub{};
+    ub.n_tokens = count;
+    ub.n_pos = 1;
+    ub.pos = ub.logical_pos = positions.data();
+    llama_kv_cache::slot_info_vec_t slots;
+    require(mem.prepare_ubatches({ub}, count, slots), "stage-in fixture slot preparation failed");
+    const uint32_t cell0 = uint32_t(runtime.store().blocks()[0].gpu_slot) * block;
+    kvmem::HistoricalKvRawStoreConfig cfg{raw.n_layer, block, raw.k_gpu_row_bytes,
+        raw.v_gpu_row_bytes, 0, raw.historical_gc_attention_layers};
+    if (disk) {
+        const char * tmp = std::getenv("TMPDIR");
+        cfg.nvme_dir = tmp && *tmp ? tmp : "/tmp";
+        cfg.nvme_bytes = uint64_t(cfg.n_layer) * block * (cfg.packed_k_bytes_per_token + cfg.packed_v_bytes_per_token);
+    }
+    auto repo = std::make_shared<Repo>(1);
+    auto storage = std::make_shared<Store>(cfg, 1);
+    auto payload = storage->prepare_payload(block);
+    auto writer = repo->begin_write(0, 0, count, 1, payload.payload_bytes(),
+        Repo::ResourceRelease{[storage, weak = std::weak_ptr<Repo>(repo)](auto h, auto resource) {
+            auto owner = weak.lock();
+            if (!owner) return false;
+            auto code = storage->release_resource(*owner, h, resource).code;
+            return code == Store::ReleaseCode::Released || code == Store::ReleaseCode::AlreadyReleased;
+        }, payload.packed_kv_bytes(), payload.mean_k_bytes(), payload.nvme_bytes(), payload.writer_resource()});
+    require(bool(writer), "stage-in fixture writer missing");
+    const auto handle = writer->handle();
+    require(storage->install_payload(*writer, handle, 0, count, payload), "stage-in fixture install failed");
+    kvmem::HistoricalKvShadowDirectory::Producer producer;
+    require(runtime.bind_historical_block(0, repo, handle, *writer, producer, storage), "stage-in fixture binding failed");
+    struct Expected { uint32_t layer; std::vector<uint8_t> k, v; };
+    std::vector<Expected> expected;
+    for (auto layer : cfg.attention_layers) {
+        Expected e{layer, pattern(count * cfg.packed_k_bytes_per_token, 100 + layer),
+                         pattern(count * cfg.packed_v_bytes_per_token, 200 + layer)};
+        require(storage->write_layer(producer->writer(), handle, layer, e.k, e.v, {}, 0), "stage-in fixture write failed");
+        for (auto * tensor : {mem.get_kv()->get_k_storage(layer), mem.get_kv()->get_v_storage(layer)}) {
+            std::vector<uint8_t> blank(ggml_nbytes(tensor), 0x5a);
+            ggml_backend_tensor_set(tensor, blank.data(), 0, blank.size());
+        }
+        expected.push_back(std::move(e));
+    }
+    require(storage->publish_complete(*repo, producer->writer(), handle), "stage-in fixture not Live");
+    producer.reset();
+    bool admitted = false;
+    kvmem_transfer_test_access::stagein_hook(mem, [&] {
+        require(kvmem_transfer_test_access::stagein_engaged(mem) &&
+                kvmem_transfer_test_access::stagein_disk(mem) == disk, "stage-in chose the wrong storage source");
+        require(repo->retire(handle) == Repo::RetireResult::Committed, "stage-in source retirement failed");
+        repo->try_reclaim(handle);
+        require(!runtime.historical_shadow_directory().acquire_stage_in(0), "retirement admitted another stage-in");
+        require((storage->allocated_payload_bytes() == 0) == disk && !repo->ready_count(),
+                "stage-in retained the wrong resource or released identity early");
+        admitted = true;
+    });
+    struct Fault {
+        KvmemHistoricalStageInPoint point;
+        bool deny_drain = false, fired = false;
+        unsigned copies = 0;
+        static bool inject(void * context, KvmemHistoricalStageInPoint point) noexcept {
+            auto & f = *static_cast<Fault *>(context);
+            if (point == KvmemHistoricalStageInPoint::CopyResult) ++f.copies;
+            if (point == KvmemHistoricalStageInPoint::Drain) return f.deny_drain;
+            if (!f.fired && point == f.point) { f.fired = true; return true; }
+            return false;
+        }
+    } fault{scenario == 38 ? KvmemHistoricalStageInPoint::CopyResult : KvmemHistoricalStageInPoint::Wait, unconfirmed};
+    // Keep the fault seam alive until all assertions/cleanup have completed.
+    struct ClearHooks {
+        llama_memory_kvmem & mem;
+        ~ClearHooks() { kvmem_historical_stagein_test_fault(nullptr, nullptr); kvmem_transfer_test_access::stagein_hook(mem, {}); }
+    } clear_hooks{mem};
+    if (failure) kvmem_historical_stagein_test_fault(Fault::inject, &fault);
+    bool threw = false;
+    try { kvmem_transfer_test_access::restore(mem, 0); }
+    catch (const std::runtime_error & e) {
+        threw = true;
+        std::fprintf(stderr, "stage-in scenario=%u admitted=%d failed: %s\n", scenario, admitted, e.what());
+    }
+    require(admitted && threw == failure, "stage-in did not reach expected success/failure boundary");
+    if (failure) {
+        require(fault.fired && fault.copies == 1 && kvmem_transfer_test_access::stagein_engaged(mem) &&
+                kvmem_transfer_test_access::capture_domain_failed(mem), "failed stage-in continued copying or dropped owners");
+        const auto * buffer = kvmem_transfer_test_access::stagein_buffer(mem);
+        bool retry_denied = false, clear_denied = false;
+        try { kvmem_transfer_test_access::restore(mem, 0); } catch (const std::runtime_error &) { retry_denied = true; }
+        try { mem.clear(true); } catch (const std::runtime_error &) { clear_denied = true; }
+        require(retry_denied && clear_denied && kvmem_transfer_test_access::stagein_buffer(mem) == buffer && !repo->ready_count(),
+                "failed transfer allowed buffer or GPU destination reuse");
+        if (unconfirmed) {
+            bool blocked = false;
+            try { kvmem_transfer_test_access::capture_shutdown(mem); } catch (const std::runtime_error &) { blocked = true; }
+            require(blocked && kvmem_transfer_test_access::stagein_engaged(mem) && storage->allocated_nvme_bytes(),
+                    "unconfirmed device completion discarded disk source rights");
+        }
+        kvmem_historical_stagein_test_fault(nullptr, nullptr);
+        kvmem_transfer_test_access::capture_shutdown(mem);
+        require(!kvmem_transfer_test_access::stagein_engaged(mem), "checked cancellation retained stage-in source");
+        // No fallback may have copied V or a later layer after the failed K.
+        auto * tensor = mem.get_kv()->get_v_storage(cfg.attention_layers.front());
+        std::vector<uint8_t> actual(count * cfg.packed_v_bytes_per_token);
+        ggml_backend_tensor_get(tensor, actual.data(), cell0 * cfg.packed_v_bytes_per_token, actual.size());
+        require(actual == std::vector<uint8_t>(actual.size(), 0x5a), "failed stage-in replayed a fallback copy");
+    } else {
+        for (const auto & e : expected) {
+            for (auto * tensor : {mem.get_kv()->get_k_storage(e.layer), mem.get_kv()->get_v_storage(e.layer)}) {
+                const auto & bytes = tensor == mem.get_kv()->get_k_storage(e.layer) ? e.k : e.v;
+                const auto row = ggml_row_size(tensor->type, tensor->ne[0]);
+                std::vector<uint8_t> actual(ggml_nbytes(tensor)), full(actual.size(), 0x5a);
+                std::copy(bytes.begin(), bytes.end(), full.begin() + cell0 * row);
+                ggml_backend_tensor_get(tensor, actual.data(), 0, actual.size());
+                require(actual == full, "retired NVMe stage-in changed bytes outside its exact span");
+            }
+        }
+    }
+    require(repo->try_reclaim(handle) == Repo::ReclaimResult::Complete && !storage->allocated_payload_bytes() &&
+            !storage->allocated_nvme_bytes() && runtime.confirm_reclaimed_historical_block(0),
+            "completed/cancelled stage-in did not return its exact resources");
+    std::printf("PASS historical stage-in: scenario=%u source=%s retired_after_admission=1 failure=%d unconfirmed=%d layers=%zu\n",
+                scenario, disk ? "nvme" : "ram", failure, unconfirmed, expected.size());
 }
 
 static void check_partial_rollover(llama_memory_kvmem & mem) {
@@ -2597,7 +2733,7 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
 }
 
 int main(int argc, char ** argv) {
-    constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 36 : 35;
+    constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 40 : 35;
     if (argc != 2 && argc != 3 && argc != 4) {
         std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --scenario 0..%u] (requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
@@ -2661,7 +2797,8 @@ int main(int argc, char ** argv) {
             if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
-            if (scenario == 35) check_managed_async_harvest(*mem, true);
+            if (scenario >= 36) check_historical_stagein(*mem, scenario);
+            else if (scenario == 35) check_managed_async_harvest(*mem, true);
             else if (scenario >= 31) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, false, scenario - 30);
             else if (scenario == 30) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, true);
             else if (scenario == 13) check_capture_start_failure(*mem);

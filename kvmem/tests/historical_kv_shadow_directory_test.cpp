@@ -540,12 +540,20 @@ static void test_binding_captures_exact_payload_owner() {
     auto read = runtime.historical_shadow_directory().acquire_read(0);
     CHECK(read && read.storage == storage &&
           read.storage->read_layer(read.lease, handle, 0)->packed_k == std::vector<uint8_t>({1, 2, 3, 4}));
+    auto stage_in = runtime.historical_shadow_directory().acquire_stage_in(0);
+    CHECK(stage_in && stage_in.managed() && !stage_in.from_nvme());
     CHECK(repo->retire(handle) == HistoricalKvRepository::RetireResult::Committed);
     CHECK(runtime.unbind_retired_historical_block(0));
     producers[0].reset();
     captured.reset();
     CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred);
     read.lease.reset();
+    CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred);
+    std::vector<uint8_t> k(4), v(4);
+    CHECK(stage_in.copy_layer(0, k.data(), k.size(), v.data(), v.size()) &&
+          k == std::vector<uint8_t>({1, 2, 3, 4}) && v == std::vector<uint8_t>({5, 6, 7, 8}));
+    CHECK(!runtime.historical_shadow_directory().acquire_stage_in(0));
+    stage_in = {};
     CHECK(repo->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete);
     CHECK(storage->allocated_payload_bytes() == 0);
     discard_unbound_writer(*foreign_repo, foreign_writer);

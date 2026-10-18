@@ -203,6 +203,10 @@ public:
     std::optional<LayerSnapshot> read_packed_kv(
         const HistoricalKvRepository::Lease & reader,
         HistoricalKvHandle handle, uint32_t layer) const;
+    // Copies into caller-owned, already prepared stage-in buffers.
+    bool copy_packed_kv(const HistoricalKvRepository::Lease & reader,
+                       HistoricalKvHandle handle, uint32_t layer,
+                       uint8_t * k, size_t k_bytes, uint8_t * v, size_t v_bytes) const;
     // Scoring copies only the normalized mean, never the large packed K/V
     // vectors. The admitted reader must cover the entire call.
     bool copy_mean_k(const HistoricalKvRepository::Lease & reader,

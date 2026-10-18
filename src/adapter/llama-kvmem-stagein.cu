@@ -60,6 +60,9 @@ struct Item {
 };
 
 struct Stage {
+    bool historical_in_pending = false, historical_in_failed = false;
+    KvmemHistoricalStageInFault historical_in_fault = nullptr;
+    void * historical_in_fault_context = nullptr;
     uint8_t *   dev_layout = nullptr;
     size_t      n_layout = 0;
     bool        layout_pending = false, layout_failed = false;
@@ -515,7 +518,7 @@ bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice, size
         !max_jobs || max_jobs > KVMEM_CAPTURE_MAX_JOBS || s.capture_job_limit ||
         s.dev_f32 || s.dev_q || s.pin[0] || s.pin[1] || s.out_ev[0] || s.out_ev[1] ||
         s.h2d_ev || s.dev_ops || s.dev_theta || s.dev_layout || s.layout_failed ||
-        s.layout_pending || s.out_hazard || s.out_failed ||
+        s.layout_pending || s.historical_in_pending || s.historical_in_failed || s.out_hazard || s.out_failed ||
         !s.items.empty() || !s.outs.empty()) return false;
     const auto allow = [&](KvmemCaptureReservePoint point) {
         return !s.reserve_fault || !s.reserve_fault(s.reserve_fault_context, point);
@@ -578,6 +581,7 @@ bool kvmem_capture_workspace_reserve(size_t n_f32, size_t max_packed_slice, size
 void kvmem_stagein_gpu_free() {
     // In particular, do not free pinned memory after a partial failed submit.
     stageout_drain();
+    kvmem_historical_stagein_cancel();
     kvmem_layout_cancel();
     kvmem_meank_cancel();
     // Other staging consumers may still have submitted kernels on this stream.
@@ -640,6 +644,7 @@ void kvmem_stagein_gpu_free() {
     }
     stage().capture_job_limit = 0;
     stage().layout_failed = false;
+    stage().historical_in_failed = false;
 }
 
 void kvmem_layout_test_fault(KvmemLayoutFault fault, void * context) {
@@ -911,6 +916,46 @@ bool kvmem_stagein_h2d_bytes(void * gpu_dst, const void * host, size_t n) {
         return false;
     }
     return cuda_ok(cudaStreamSynchronize(st), "H2D bytes wait");
+}
+
+void kvmem_historical_stagein_test_fault(KvmemHistoricalStageInFault fault, void * context) {
+    stage().historical_in_fault = fault;
+    stage().historical_in_fault_context = context;
+}
+
+static bool historical_in_fault(KvmemHistoricalStageInPoint point) {
+    auto & s = stage();
+    return s.historical_in_fault && s.historical_in_fault(s.historical_in_fault_context, point);
+}
+
+void kvmem_historical_stagein_cancel() {
+    if (!stage().historical_in_pending) return;
+    if (historical_in_fault(KvmemHistoricalStageInPoint::Drain) ||
+        !cuda_ok(cudaStreamSynchronize(stream()), "historical H2D cancellation drain"))
+        throw std::runtime_error("historical stage-in completion is unconfirmed; retain host buffers and source rights");
+    stage().historical_in_pending = false;
+}
+
+void kvmem_historical_stagein_copy(void * gpu_dst, const void * host, size_t n) {
+    auto & s = stage();
+    if (s.historical_in_failed || s.historical_in_pending)
+        throw std::runtime_error("historical stage-in admission is closed");
+    if (!gpu_dst || !host || !n) throw std::invalid_argument("invalid historical stage-in copy");
+    try {
+        const auto st = stream();
+        s.historical_in_pending = true;
+        const auto result = kvmem_copy_async(gpu_dst, host, n, cudaMemcpyHostToDevice, st);
+        if (historical_in_fault(KvmemHistoricalStageInPoint::CopyResult) || !cuda_ok(result, "historical H2D copy"))
+            throw std::runtime_error("historical stage-in copy failed after submission");
+        if (historical_in_fault(KvmemHistoricalStageInPoint::Wait) ||
+            !cuda_ok(cudaStreamSynchronize(st), "historical H2D completion"))
+            throw std::runtime_error("historical stage-in wait failed");
+        s.historical_in_pending = false;
+    } catch (...) {
+        s.historical_in_failed = true;
+        kvmem_historical_stagein_cancel();
+        throw;
+    }
 }
 
 void kvmem_stagein_sync() {

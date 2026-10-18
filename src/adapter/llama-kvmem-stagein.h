@@ -61,6 +61,14 @@ bool kvmem_stagein_rope_neox(int64_t n_tokens, int n_head, int n_embd_head, int 
 bool kvmem_stagein_fwht(int64_t n_rows, int64_t n_embd, int nrot);
 bool kvmem_stagein_quantize(ggml_type ty, void * gpu_dst, int64_t n_rows, int64_t n_embd);
 bool kvmem_stagein_h2d_bytes(void * gpu_dst, const void * host, size_t n);
+// Historical stage-in owns its host buffers until return or successful cancel.
+// A submitted failure throws, closes admission and never permits fallback.
+// An unconfirmed drain retains the pending state and caller's buffer ownership.
+void kvmem_historical_stagein_copy(void * gpu_dst, const void * host, size_t n);
+void kvmem_historical_stagein_cancel();
+enum class KvmemHistoricalStageInPoint { CopyResult, Wait, Drain };
+using KvmemHistoricalStageInFault = bool (*)(void *, KvmemHistoricalStageInPoint) noexcept;
+void kvmem_historical_stagein_test_fault(KvmemHistoricalStageInFault fault, void * context);
 void kvmem_stagein_sync();
 
 // 32 MiB packed host+GPU slab. Enqueue (block,layer) rows; flush does one H2D

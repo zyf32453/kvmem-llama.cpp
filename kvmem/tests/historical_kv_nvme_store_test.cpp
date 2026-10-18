@@ -272,10 +272,13 @@ static void capture_handoff(const std::string & dir) {
             check(session->append(3), "disk append allocated or failed");
         }
         HistoricalKvShadowDirectory::Producer task;
+        uint32_t block_id = 0;
         for (uint32_t id = 0; id < runtime.store().block_count(); ++id) {
             const auto entry = runtime.historical_shadow_directory().find(id);
-            if (entry && entry->writer_context && entry->original_begin == start)
+            if (entry && entry->writer_context && entry->original_begin == start) {
                 task = entry->writer_context;
+                block_id = id;
+            }
         }
         check(bool(task), "disk session producer missing");
         session->producers_captured();
@@ -292,8 +295,21 @@ static void capture_handoff(const std::string & dir) {
         auto reader = storage->acquire_nvme_read(task->repository(), handle);
         check(bool(reader), "captured disk read denied"); read(*storage, *reader, 29); reader.reset();
         task.reset();
-        check(session->end_input() && session->finish(), "disk request did not finish");
-        retire(*session->repository(), handle); reclaim(*session->repository(), handle);
+        check(session->end_input(), "disk request input did not finish");
+        auto stage_in = runtime.historical_shadow_directory().acquire_stage_in(block_id);
+        check(stage_in && stage_in.from_nvme() && !stage_in.host.lease, "stage-in pinned an unrelated Host copy");
+        retire(*session->repository(), handle);
+        check(session->repository()->try_reclaim(handle) == Repo::ReclaimResult::HostReleased,
+              "stage-in source retained CPU payload");
+        std::vector<uint8_t> actual_k(6), actual_v(9);
+        {
+            NoAllocations guard;
+            check(stage_in.copy_layer(2, actual_k.data(), actual_k.size(), actual_v.data(), actual_v.size()) &&
+                  actual_k == k && actual_v == v, "old stage-in disk source changed after Host release");
+            check(!runtime.historical_shadow_directory().acquire_stage_in(block_id), "new stage-in resurrected retired source");
+        }
+        stage_in = {}; reclaim(*session->repository(), handle);
+        check(session->finish(), "disk request did not finish after old transfer");
         check(!storage->allocated_nvme_bytes(), "disk request did not recycle extent");
     }
 }

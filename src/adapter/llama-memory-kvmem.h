@@ -621,6 +621,13 @@ private:
     std::unique_ptr<kvmem::HistoricalKvGc> historical_gc_;
     int historical_gc_mode_ = 0;
     std::unique_ptr<kvmem::HistoricalKvActiveSet> historical_active_;
+    struct HistoricalStageIn {
+        kvmem::HistoricalKvShadowDirectory::StageInAccess source;
+        std::vector<uint8_t> k, v;
+        bool engaged = false;
+    } historical_stagein_;
+    // Owner-thread test seam after exact source admission, before any copy.
+    std::function<void()> historical_stagein_test_hook_;
     // Deterministic test seam immediately after graph submission and before
     // harvest synchronization. Empty in production requests.
     std::function<void()> historical_submission_test_hook_;

@@ -711,16 +711,32 @@ Linux NVMe ON 全套 **28/28**、OFF **27/27**、相关 ASan/UBSan **11/11**、T
 
 服务器 delete HTTP 回归 **33/33** 通过；四次压力请求均 `committed=14`、完成边界 `reclaimed=13`、`partial_resource_releases=12`，policy/worker failure 为零。HTTP 仍验证受限 recency/RAM 入口。本轮没有重现此前偶发的 CUDA 非法访问，根因仍未确认。原始构建、sanitizer、模型、HTTP 证据及命令保存在 `build-local/historical-nvme-binding-validation/`；源码与远程隔离受测副本逐文件核对 SHA-256。
 
-**阶段边界：** 目前是完整 RAM payload 的独立磁盘副本，不是按压力将 Live CPU payload 卸载到磁盘。新磁盘读取接口尚未替代实际 stage-in 来源；公开自动 capture 仍限制 recency/RAM。磁盘写入仍在既有 store 内容锁范围内完成，Host 释放也保留内容同步，不能据此宣称整个生产前台无 GC 等待。pinned cache、全部 active 路径、统一资源预算、检查点/多会话、冗余策略与性能/质量对照仍属剩余交付。
+**当时的阶段边界：** 独立磁盘副本保留完整 RAM payload，并未按压力将 Live CPU payload 卸载到磁盘。当时新磁盘读取接口尚未替代实际 stage-in 来源；本项后续接线见下一节。公开自动 capture 仍限制 recency/RAM。磁盘写入仍在既有 store 内容锁范围内完成，Host 释放也保留内容同步，不能据此宣称整个生产前台无 GC 等待。
+
+### Stage-in 的精确存储来源与设备完成确认（2026-10-18）
+
+上一阶段已经可以从独立 NVMe 副本读取历史数据，但实际恢复 GPU K/V 的 `write_block_to_gpu` 仍只读取 RAM。本轮增加 `StageInAccess`：在搬运开始前一次取得确定的存储来源。绑定独立磁盘副本时持 historical 身份与该 allocation 的 IO 权利；RAM 路径持 packed K/V transfer 权利。来源拒绝后直接失败，不改查位置式旧存储，也不临时切换到另一个资源。许可取得后的退休关闭新 stage-in，已经承诺的旧搬运可以逐层完成。
+
+磁盘来源不持 CPU payload 引用，因此旧磁盘搬运仍在进行时，后台可先释放 RAM K/V 和 Mean-K；IO、身份与 metadata 继续保留到该搬运结束。RAM 来源则保留实际需要的 packed K/V。新增复制到已有 buffer 的接口，避免每层创建 `LayerSnapshot` 向量；受限公开请求在接纳前准备并初始化整块 K/V staging buffers，记录 `KVMEM_STAGEIN_WORKSPACE host_bytes`。这些是 Host 暂存容量，不是 pinned cache，也不证明所有生产入口已经完成统一预约。
+
+单 GPU 的受管理历史搬运改用检查提交结果和 stream 完成状态的 H2D 路径。传输错误后关闭后续搬运，不执行旧的失败 fallback。源许可和 Host buffer 由 adapter 成员持有，异常栈退出不释放；如果尚不能确认设备完成，重试恢复、clear 和 cleanup 都不能覆盖或释放它们。只有 checked drain 成功后才释放源许可。最终设备清理持续失败时沿用现有中止进程的处理，不假装安全复用。
+
+宿主测试覆盖 RAM 和 NVMe 来源在退休前取得许可、退休后旧读完成及新读拒绝。磁盘 capture 域的 24 次请求循环还验证 CPU payload 先释放、旧来源不分配新 C++ buffer 即可读取、最后归还精确 extent。Linux NVMe ON **28/28**、OFF **27/27**、相关 ASan/UBSan **9/9**、TSan **9/9**、Windows OFF **23/23** 已通过；sanitizer 不覆盖 CUDA adapter。
+
+真实 GPU 新增四个场景：退休后从磁盘恢复三 token 短块并核对 **48 层**及未写范围；RAM 完成等待失败；NVMe 实际提交后报告失败；NVMe 等待失败且首次取消无法确认完成。首次完整验收通过原有 36 个场景，但新增测试漏建 cache row 元数据，恢复在进入实际拷贝前失败；已改用正常 `prepare_ubatches` 初始化。修正后完整模型 **40/40**、reset/cancel、36 次/48 次连续请求及 backend guard 全部通过，两条长轨迹分别回收 **69/191** 块。最终日志为 `/tmp/kvmem-stagein-model-fixture-fixed.log`；首次失败及单场景诊断日志也保留。故障注入发生在真实 H2D 提交之后，但不是自然硬件故障复现；连续请求仍走现有 RAM 路径。
+
+真实 server delete HTTP 回归 **33/33** 通过，覆盖 JSON/SSE、精确前缀延续、容量拒绝、reset、prefill/生成取消和压力请求。四次压力请求均 `committed=14`、完成边界 `reclaimed=13`、`partial_resource_releases=12`，policy/worker failure 为零。源码与受测隔离副本逐文件 SHA-256 相符；构建、sanitizer、首次失败、最终模型、HTTP 日志与响应保存在 `build-local/historical-stagein-validation/`。
+
+**阶段边界：** 本项接通受管理来源到实际 GPU restore 的路径，仍保留完整 RAM 加磁盘副本。公开自动 capture 仍是受限 recency/RAM，未开放磁盘配置或 Live CPU 卸载。多 GPU、通用批量异步 stage-in、pinned cache 槽位失效、全部 active 入口、统一预算及无 GC 等待证明仍需独立完成。此前偶发 CUDA 非法访问本轮未重现，根因仍未确认。
 
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。server 已接入单 lane 的有限预约、精确前缀延续、新会话与健康取消；仍需扩展缓存分支、设备故障恢复和其它生产路径。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
-2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 的读取、已完成 writer 分量及回收已独立结算。还需完成 NVMe 等资源依赖及 pinned cache 槽位失效，并扩展到其余入口，验证内容同步不会引入前台 GC 等待。
+2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 的读取、已完成 writer 分量及回收已独立结算。独立 NVMe 来源已接到受管理 stage-in；还需完成 pinned cache 槽位失效、通用异步搬运与其余入口，验证内容同步不会引入前台 GC 等待。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 仍拒绝分段 streaming 预约；server 的 SSE 按有限输出整请求预约。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
-4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe tier 的 allocation generation、提交前 IO lease、独立 historical 副本绑定及真实 extent 预约已接通；仍需完成公开适配器的存储来源选择、pinned/stage-in 依赖和统一预算。MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
+4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe tier 的 allocation generation、提交前 IO lease、独立 historical 副本绑定、真实 extent 预约及受管理 stage-in 来源已接通；仍需完成公开入口配置、pinned/批量搬运依赖和统一预算。MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI/server 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到其余生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 
 单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store、预约追加块表、宿主持久域以及受限 llama 适配器入口具备固定物理槽位跨请求复用；server 的多 lane/多会话、跨请求检查点引用及其余队列仍需改造。当前结果不证明生产长期总内存有界，也不证明所有已接纳生产请求都完全不依赖 GC。

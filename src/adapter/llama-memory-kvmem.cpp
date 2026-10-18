@@ -1028,6 +1028,8 @@ struct llama_memory_kvmem::HistoricalCpuCleanup final : kvmem::HistoricalKvClean
     std::vector<HarvestVJob> packed_jobs;
     HarvestVBatch pending_packed;
     std::function<void()> submission_hook;
+    HistoricalStageIn stage_in;
+    std::function<void()> stage_in_hook;
     // Destroy the manager before directory/session/storage ownership.
     std::unique_ptr<kvmem::HistoricalKvGc> gc;
     // A reset may leave external CPU users of the old incarnation alive.
@@ -1128,6 +1130,8 @@ llama_memory_kvmem::~llama_memory_kvmem() {
         cleanup.packed_jobs = std::move(harvest_v_jobs_);
         cleanup.pending_packed = std::move(harvest_v_pending_);
         cleanup.submission_hook = std::move(historical_submission_test_hook_);
+        cleanup.stage_in = std::move(historical_stagein_);
+        cleanup.stage_in_hook = std::move(historical_stagein_test_hook_);
         historical_cleanup_ticket_.submit(std::move(historical_cleanup_));
     }
 }
@@ -1234,6 +1238,9 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         if (!block_tokens_ || row > SIZE_MAX / block_tokens_ || width > SIZE_MAX / block_tokens_)
             throw std::runtime_error("historical capture workspace size overflow");
         std::vector<uint8_t> fallback(row * block_tokens_);
+        HistoricalStageIn stage_in;
+        stage_in.k.resize(cfg.packed_k_bytes_per_token * block_tokens_);
+        stage_in.v.resize(cfg.packed_v_bytes_per_token * block_tokens_);
         if (!n_slots_ || cfg.packed_k_bytes_per_token > SIZE_MAX - cfg.packed_v_bytes_per_token ||
             cfg.packed_k_bytes_per_token + cfg.packed_v_bytes_per_token > SIZE_MAX / block_tokens_)
             throw std::runtime_error("historical layout stride overflow");
@@ -1267,6 +1274,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         harvest_v_fallback_.swap(fallback);
         layout_workspace_ = std::move(layout);
         historical_active_ = std::move(active);
+        historical_stagein_ = std::move(stage_in);
         historical_active_workspace_ = std::move(active_workspace);
         cell_workspace_ = std::move(cells);
         historical_slot_workspace_ = std::move(slot_workspace);
@@ -1293,6 +1301,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             historical_ubatch_workspace_.data.size(), historical_ubatch_workspace_.vector_bytes(),
             historical_ubatch_workspace_.max_tokens, historical_ubatch_workspace_.n_ubatch);
         LLAMA_LOG_INFO("KVMEM_BATCH_CONTEXT reserved_bytes=%zu\n", historical_batch_context_storage_bytes_);
+        LLAMA_LOG_INFO("KVMEM_STAGEIN_WORKSPACE host_bytes=%zu\n",
+            historical_stagein_.k.capacity() + historical_stagein_.v.capacity());
         LLAMA_LOG_INFO("KVMEM_CAPTURE_ARENA bytes=%zu queue_capacity=%zu max_tokens=%zu\n",
             capture_arena_->capacity_bytes(), pos_queue_.capacity(), max_capture_tokens);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_WORKSPACE jobs_per_batch=%zu device_bytes=%zu pinned_bytes=%zu host_queue_bytes=%zu fallback_bytes=%zu layout_bytes=%zu layout_slots=%u layout_host_bytes=%zu\n",
@@ -3289,6 +3299,8 @@ llama_memory_context_ptr llama_memory_kvmem::init_update(llama_context * lctx, b
 }
 
 void llama_memory_kvmem::clear(bool data) {
+    if (historical_stagein_.engaged)
+        throw std::runtime_error("historical stage-in must drain before clearing its GPU destination");
     if (historical_capture_) throw std::runtime_error("historical capture baseline requires context teardown for reset");
     harvest_flush();
     harvest_gpu_v_commit();
@@ -3777,6 +3789,10 @@ void llama_memory_kvmem::harvest_shutdown() {
     // Context disposal cancels uncommitted CPU work. The worker must have
     // returned before touching its slots; device work must also truly finish.
     harvest_worker_stop(true);
+    // Preserve source rights and host pointers until this stream really stops.
+    kvmem_historical_stagein_cancel();
+    historical_stagein_.source = {};
+    historical_stagein_.engaged = false;
     // A failure while establishing the compute -> capture dependency can
     // leave source computation outside the capture stream. A failed request
     // must also confirm that device work before destroying source ownership.
@@ -5364,29 +5380,47 @@ void llama_memory_kvmem::decode_mean_flush() try {
     throw;
 }
 
-void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
+void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) try {
+    if (historical_stagein_.engaged || capture_failed_)
+        throw std::runtime_error("stage-in is closed or still owns an unfinished transfer");
     auto & store = runtime_->store();
     if (block_id >= store.block_count()) {
         return;
     }
-    auto transfer = runtime_->historical_shadow_directory().acquire_packed_kv_transfer(block_id);
+    auto transfer = runtime_->historical_shadow_directory().acquire_stage_in(block_id);
     if (!transfer) {
         throw std::runtime_error("KVMem historical block is unavailable for stage-in");
     }
     const kvmem::KvMemBlock & blk = store.blocks()[block_id];
-    if (!transfer.storage && blk.orig_pos_start != uint64_t(block_id) * block_tokens_)
+    if (!transfer.host.storage && blk.orig_pos_start != uint64_t(block_id) * block_tokens_)
         throw std::logic_error("non-aligned stage-in requires a historical payload identity");
-    if (blk.gpu_slot < 0 || (!transfer.storage && !raw_->has_block(block_id))) {
+    if (blk.gpu_slot < 0 || (!transfer.host.storage && !raw_->has_block(block_id))) {
         return;
     }
-    ++attention_epoch_;
-    occupy_block_cells(block_id);
     const uint32_t nt = blk.n_tokens;
     const size_t krow = ggml_row_size(type_k_, n_embd_k_);
     const size_t vrow = ggml_row_size(type_v_, n_embd_v_);
-    std::vector<uint8_t> kpack(static_cast<size_t>(nt) * krow);
-    std::vector<uint8_t> vpack(static_cast<size_t>(nt) * vrow);
+    const bool managed = transfer.managed();
+    std::vector<uint8_t> legacy_k, legacy_v;
+    auto & kpack = managed ? historical_stagein_.k : legacy_k;
+    auto & vpack = managed ? historical_stagein_.v : legacy_v;
+    if (managed) {
+        // Admission prepared these buffers. Legacy controlled bindings may
+        // prepare them once before their first transfer, never after a submit.
+        if (historical_capture_ && (nt * krow > kpack.capacity() || nt * vrow > vpack.capacity()))
+            throw std::runtime_error("historical stage-in exceeds its reserved Host buffers");
+        historical_stagein_.source = std::move(transfer);
+        historical_stagein_.engaged = true;
+    }
+    kpack.resize(static_cast<size_t>(nt) * krow);
+    vpack.resize(static_cast<size_t>(nt) * vrow);
+    auto & source = managed ? historical_stagein_.source : transfer;
+    if (managed && historical_stagein_test_hook_) historical_stagein_test_hook_();
     const uint32_t cell0 = static_cast<uint32_t>(blk.gpu_slot) * block_tokens_;
+    if (managed && (nt > block_tokens_ || cell0 >= kv_size_ || nt > kv_size_ - cell0))
+        throw std::runtime_error("historical stage-in destination does not cover its exact token span");
+    ++attention_epoch_;
+    occupy_block_cells(block_id);
     if (!multi_gpu_) {
         kvmem_stagein_gpu_ready((size_t) block_tokens_ * std::max(n_embd_k_, n_embd_v_),
                                 std::max(krow, vrow) * (size_t) block_tokens_);
@@ -5395,6 +5429,7 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
     auto write_packed = [&](ggml_tensor * t, uint8_t * base, const uint8_t * host,
                             size_t row, size_t nbytes) {
         if (!t || !host || nbytes == 0 || cell0 >= kv_size_) {
+            if (managed) throw std::runtime_error("historical stage-in has an invalid copy destination");
             return;
         }
         if (multi_gpu_) {
@@ -5403,13 +5438,16 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
         }
         uint8_t * dst = base ? base + static_cast<size_t>(cell0) * row : nullptr;
         // Until batched stage-in owns its leases, managed blocks use the
-        // synchronous H2D path. The transfer lease covers every layer through
-        // device copy completion, including exceptions and fallback paths.
-        if (!transfer.lease && dst && kvmem_stagein_enqueue_v(host, nbytes, dst, sacc)) {
+        // checked H2D path. Source rights and owned Host buffers cover every
+        // layer and survive an exception with uncertain device completion.
+        if (!managed && dst && kvmem_stagein_enqueue_v(host, nbytes, dst, sacc)) {
             return;
         }
         const int64_t t_set = ggml_time_us();
-        if (!(dst && kvmem_stagein_h2d_bytes(dst, host, nbytes))) {
+        if (managed) {
+            if (!dst) throw std::runtime_error("historical stage-in lost its GPU destination");
+            kvmem_historical_stagein_copy(dst, host, nbytes);
+        } else if (!(dst && kvmem_stagein_h2d_bytes(dst, host, nbytes))) {
             kvmem_tensor_set(t, host, static_cast<size_t>(cell0) * row, nbytes);
         }
         if (retr_.enabled) {
@@ -5422,13 +5460,9 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
         }
         const int64_t t_copy = ggml_time_us();
         bool have_k = false, have_v = false;
-        if (transfer.storage) {
-            auto layer = transfer.storage->read_packed_kv(transfer.lease, transfer.lease.handle(), il);
-            if (!layer || layer->packed_k.size() != kpack.size() ||
-                layer->packed_v.size() != vpack.size())
+        if (source.host.storage) {
+            if (!source.copy_layer(il, kpack.data(), kpack.size(), vpack.data(), vpack.size()))
                 throw std::runtime_error("historical stage-in payload does not match the admitted block");
-            kpack = std::move(layer->packed_k);
-            vpack = std::move(layer->packed_v);
             have_k = true;
             have_v = !v_trans_;
         } else {
@@ -5456,6 +5490,16 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
         kvmem_diag("KVMEM_TRACE stage_in_packed block=%u slot=%d n=%u orig=%u\n",
                 block_id, blk.gpu_slot, nt, blk.orig_pos_start);
     }
+    if (managed) {
+        historical_stagein_.source = {};
+        historical_stagein_.engaged = false;
+    }
+} catch (...) {
+    // On an uncertain device completion the member buffers and source rights
+    // survive stack unwinding. Checked shutdown returns them; no fallback or
+    // subsequent stage-in may overwrite their contents in the meantime.
+    if (historical_stagein_.engaged || historical_capture_) capture_fail();
+    throw;
 }
 
 void llama_memory_kvmem::copy_gpu_block_to_host(uint32_t block_id, int32_t gpu_slot,

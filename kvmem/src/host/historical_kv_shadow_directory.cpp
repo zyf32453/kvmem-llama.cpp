@@ -433,6 +433,27 @@ HistoricalKvShadowDirectory::Access HistoricalKvShadowDirectory::acquire_mean_k(
     return acquire(block_id, HistoricalKvRepository::LeaseKind::MeanKRead);
 }
 
+HistoricalKvShadowDirectory::StageInAccess HistoricalKvShadowDirectory::acquire_stage_in(uint32_t block_id) const {
+    const auto it = entries_.find(block_id);
+    if (it == entries_.end()) return {{Access::Status::Unmanaged, {}, {}}, {}};
+    const auto & entry = it->second;
+    if (entry.state != State::Bound || !entry.repository ||
+        entry.repository->repository_id() != entry.repository_id) return {};
+    if (entry.storage && entry.storage->config().nvme_bytes) {
+        auto disk = entry.storage->acquire_nvme_read(*entry.repository, entry.binding.handle);
+        if (!disk) return {};
+        return {{Access::Status::Acquired, {}, entry.storage}, std::move(disk)};
+    }
+    return {acquire_packed_kv_transfer(block_id), {}};
+}
+
+bool HistoricalKvShadowDirectory::StageInAccess::copy_layer(uint32_t layer,
+        uint8_t * k, size_t k_bytes, uint8_t * v, size_t v_bytes) const {
+    if (!*this || !host.storage) return false;
+    return disk ? host.storage->read_nvme_layer(*disk, layer, k, k_bytes, v, v_bytes) :
+        host.storage->copy_packed_kv(host.lease, host.lease.handle(), layer, k, k_bytes, v, v_bytes);
+}
+
 bool HistoricalKvShadowDirectory::unbind_retired(uint32_t block_id) {
     const auto it = entries_.find(block_id);
     if (it == entries_.end() || it->second.state != State::Bound) return false;

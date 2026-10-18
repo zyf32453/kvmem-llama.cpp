@@ -611,6 +611,24 @@ HistoricalKvRawStore::read_packed_kv(const HistoricalKvRepository::Lease & reade
     return LayerSnapshot{source.packed_k, source.packed_v, {}, 0};
 }
 
+bool HistoricalKvRawStore::copy_packed_kv(const HistoricalKvRepository::Lease & reader,
+        HistoricalKvHandle handle, uint32_t layer, uint8_t * k, size_t k_bytes,
+        uint8_t * v, size_t v_bytes) const {
+    if (!reader.has_packed_kv_access() || !reader.repository_id() || !same(reader.handle(), handle) ||
+        handle.slot >= slots_.size() || !required_layer(layer) || !k || !v) return false;
+    const auto & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    if (!reader.has_packed_kv_access()) return false;
+    const auto * block = slot.block.get();
+    if (!block || block->repository_id != reader.repository_id() || !same(block->handle, handle) ||
+        block->packed_kv_released) return false;
+    const auto & source = block->layers[layer];
+    if (!source.written || source.packed_k.size() != k_bytes || source.packed_v.size() != v_bytes) return false;
+    std::copy(source.packed_k.begin(), source.packed_k.end(), k);
+    std::copy(source.packed_v.begin(), source.packed_v.end(), v);
+    return true;
+}
+
 std::optional<HistoricalKvRawStore::NvmeRead> HistoricalKvRawStore::acquire_nvme_read(
         HistoricalKvRepository & repository, HistoricalKvHandle handle) const {
     if (!nvme_ || handle.slot >= slots_.size()) return std::nullopt;

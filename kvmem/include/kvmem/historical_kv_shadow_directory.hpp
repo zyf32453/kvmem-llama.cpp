@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kvmem/historical_kv_repository.hpp"
+#include "kvmem/historical_kv_raw_store.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -119,6 +120,19 @@ public:
         }
     };
 
+    // One source chosen before stage-in. A configured disk copy carries its
+    // own IO right instead of a Host payload pin; failed disk admission never
+    // falls back to RAM or to a positional legacy lookup.
+    struct StageInAccess {
+        Access host;
+        std::optional<HistoricalKvRawStore::NvmeRead> disk;
+        explicit operator bool() const { return disk ? bool(*disk) : bool(host); }
+        bool managed() const noexcept { return host.status == Access::Status::Acquired; }
+        bool from_nvme() const noexcept { return disk.has_value(); }
+        bool copy_layer(uint32_t layer, uint8_t * k, size_t k_bytes,
+                        uint8_t * v, size_t v_bytes) const;
+    };
+
     // On success moves writer into the empty producer output. On failure
     // leaves both outputs with the caller, including on allocation failure.
     // Producer must be kept until all admitted tasks have captured it, then
@@ -168,6 +182,7 @@ public:
     Access acquire_read(uint32_t block_id) const;
     Access acquire_transfer(uint32_t block_id) const;
     Access acquire_packed_kv_transfer(uint32_t block_id) const;
+    StageInAccess acquire_stage_in(uint32_t block_id) const;
     Access acquire_mean_k(uint32_t block_id) const;
 
     // This does NOT call retire. A separately coordinated owner must first
