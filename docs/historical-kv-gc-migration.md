@@ -729,12 +729,26 @@ Linux NVMe ON 全套 **28/28**、OFF **27/27**、相关 ASan/UBSan **11/11**、T
 
 **阶段边界：** 本项接通受管理来源到实际 GPU restore 的路径，仍保留完整 RAM 加磁盘副本。公开自动 capture 仍是受限 recency/RAM，未开放磁盘配置或 Live CPU 卸载。多 GPU、通用批量异步 stage-in、pinned cache 槽位失效、全部 active 入口、统一预算及无 GC 等待证明仍需独立完成。此前偶发 CUDA 非法访问本轮未重现，根因仍未确认。
 
+### CPU cache 槽位的代际与搬运保护（2026-10-18）
+
+此前 `PinnedKvTier` 只有 block ID 到整数槽位的映射，LRU 替换、release 和 clear 不检查是否仍有搬运使用原槽。本轮将 NVMe 已使用的 allocation 状态机提取为带资源类型的 `ResourceAllocationRegistry<Tag>`；NVMe 与 pinned 的 handle/lease 类型不同，不能互相授权。每次分配带独立 arena ID、slot 和单调 generation，取得/归还 IO 权利与关闭新 IO 使用同一个原子 control word。此状态机只保护分配生命周期，内容版本和读写顺序仍由存储 owner 保证。
+
+`PinnedKvTier` 增加精确分配和释放入口。GC 的 try-release 关闭新访问后，即使返回 Deferred，也不返还槽位；旧 IO 退出后按原 generation 确认释放。重复确认幂等，复用后旧确认返回 Stale。clear 同样关闭全部旧代，保留仍被使用的槽位，不能直接重建空闲表。普通 LRU 只替换没有在途 IO 的槽位，淘汰失败不关闭仍有效的旧副本。精确模式没有 block-ID LRU/heat 元数据，容量在构造时固定；旧模式的映射、heat 及互斥锁仍需后续预算和无等待审计。
+
+runtime 的 CPU 缓存写入及恢复现持有精确 allocation lease，恢复前校验当前缓存身份，完成后只结算原代，不能再按 block ID 释放潜在替换项。GPU 目标分配失败时保留 CPU 来源；同步 backend 报错时归还本次新 GPU 目标，保留可重试的来源。这里明确要求 backend 在返回或抛出异常前已结束对 Host 指针的访问，不能用这个同步接口提前交还异步 DMA。
+
+宿主新增验证包括一个物理槽位 **128 代**复用（禁止普通 C++ 分配期间执行）、跨池/跨代拒绝、移动 lease、LRU 跳过在途来源、clear 后旧 IO 延续、重复确认及 **64 轮**读取与后台关闭交错。runtime 测试在实际复制回调期间由另一线程关闭缓存来源，逐字节核对数据，并覆盖目标分配失败、同步复制失败及旧 completion 不影响新代。另增加 HeatAware 兼容用例，防止引入 IO 保护时改变原准入策略。最终 Linux ON **28/28**、OFF **27/27**、Windows **23/23**，相关 ASan/UBSan 与 TSan 各 **4/4** 通过。
+
+真实 CUDA 用例使用 `cudaMallocHost` 分配来源，在实际 H2D 已提交、完成事件尚未就绪时由另一线程关闭 allocation。新 IO 和复用被拒绝；确认事件完成后才归还槽位，再复用 **4 代**逐字节校验。完整模型 **40/40**、reset/cancel、36 次/48 次连续请求及 backend guard 通过，两条长轨迹分别回收 **70/190** 块；完整日志为 `/tmp/kvmem-pinned-model.log`。此后只修正旧 HeatAware 准入兼容分支并重新完成上述宿主验收；最终 CUDA 定向场景 0 及 backend guard 通过，日志为 `/tmp/kvmem-pinned-heat-gpu0.log`。全部原始日志及两个受测版本的源码指纹保存在 `build-local/historical-pinned-validation/`。此前偶发 CUDA 非法访问本轮未重现，根因仍未确认。
+
+**阶段边界：** 本项为实际 CPU cache/runtime 路径建立槽位生命周期协议，还没有把每个 historical handle 的 pinned 副本接进 repository 的独立资源回收确认。`PinnedKvTier` 本身不拥有或注册 page-locked 内存；runtime 现有 `cpu_arena_` 仍是普通 Host vector，不能凭类型名称报告为真实 pinned 内存。公开 historical capture 入口仍未启用该缓存；后续须接内容版本、存储 owner、实际 pinned arena 预算、缓存命中与回收失效，并验证完整请求路径。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。server 已接入单 lane 的有限预约、精确前缀延续、新会话与健康取消；仍需扩展缓存分支、设备故障恢复和其它生产路径。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
-2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 的读取、已完成 writer 分量及回收已独立结算。独立 NVMe 来源已接到受管理 stage-in；还需完成 pinned cache 槽位失效、通用异步搬运与其余入口，验证内容同步不会引入前台 GC 等待。
+2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 的读取、已完成 writer 分量及回收已独立结算。独立 NVMe 来源已接到受管理 stage-in；CPU cache 已有槽位 generation/IO 协议，仍需与 historical 内容版本、pinned arena owner 及回收确认绑定。通用异步搬运与其余入口也未完成；仍须验证内容同步不会引入前台 GC 等待。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 仍拒绝分段 streaming 预约；server 的 SSE 按有限输出整请求预约。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe tier 的 allocation generation、提交前 IO lease、独立 historical 副本绑定、真实 extent 预约及受管理 stage-in 来源已接通；仍需完成公开入口配置、pinned/批量搬运依赖和统一预算。MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI/server 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到其余生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。

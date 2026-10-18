@@ -15,7 +15,10 @@ public:
     virtual int32_t alloc_gpu_slot() { return -1; }
     virtual void free_gpu_slot(int32_t /*slot*/) {}
 
-    // Byte copies. P0 stubs are no-ops so unit tests stay GPU-free.
+    // Synchronous byte copies: source/destination access must have ended before
+    // returning OR throwing. An asynchronous implementation must drain its work
+    // here; the runtime's allocation lease covers this entire call.
+    // P0 stubs are no-ops so unit tests stay GPU-free.
     virtual void copy_block_to_host(uint32_t /*block_id*/,
                                     int32_t /*gpu_slot*/,
                                     void * /*host*/,

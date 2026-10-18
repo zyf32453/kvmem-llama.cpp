@@ -7,6 +7,8 @@
 #include <string>
 #include <filesystem>
 #include <vector>
+#include <functional>
+#include <thread>
 
 using namespace kvmem;
 
@@ -215,6 +217,70 @@ static void test_cpu_full_spills_to_nvme_and_roundtrips() {
 
 #endif
 
+static void test_cpu_stagein_keeps_exact_allocation() {
+    struct CopyBackend : RecordingBackend {
+        std::map<int32_t, std::vector<uint8_t>> data;
+        std::function<void()> before_read;
+        bool fail_allocation = false, fail_copy = false;
+        int32_t alloc_gpu_slot() override { return fail_allocation ? -1 : RecordingBackend::alloc_gpu_slot(); }
+        void copy_block_to_host(uint32_t id, int32_t, void * host, uint64_t bytes) override {
+            std::memset(host, int(id + 7), size_t(bytes));
+        }
+        void copy_block_from_host(uint32_t, int32_t slot, const void * host, uint64_t bytes) override {
+            if (before_read) before_read();
+            if (fail_copy) throw std::runtime_error("quiescent backend copy failure");
+            const auto * p = static_cast<const uint8_t *>(host);
+            data[slot].assign(p, p + bytes);
+        }
+    } be;
+    auto cfg = make_cfg();
+    cfg.store.estimated_block_bytes = 64;
+    cfg.store.select_method = KvMemMethod::Retrieval;
+    cfg.cpu_bytes = 128;
+    KvMemRuntime runtime(cfg, &be);
+    runtime.register_append(64);
+    for (uint32_t id = 0; id < 2; ++id) {
+        runtime.store().set_block_tier(id, KvTier::GPU);
+        runtime.store().set_block_gpu_slot(id, be.alloc_gpu_slot());
+    }
+    runtime.prepare_selection({1}); runtime.finish_reselect();
+    auto * tier = runtime.cpu_tier();
+    const auto old = tier->allocation_for_block(0);
+    CHECK(old.slot >= 0);
+    runtime.prepare_selection({0}); runtime.spill_outgoing();
+    // A failed destination must leave the source generation intact for retry.
+    be.fail_allocation = true;
+    bool rejected = false;
+    try { runtime.admit_incoming(); } catch (const std::runtime_error &) { rejected = true; }
+    CHECK(rejected && tier->allocation_for_block(0).generation == old.generation);
+    be.fail_allocation = false; be.fail_copy = true;
+    const auto frees = be.frees.size();
+    rejected = false;
+    try { runtime.admit_incoming(); } catch (const std::runtime_error &) { rejected = true; }
+    CHECK(rejected && be.frees.size() == frees + 1 && tier->acquire_io(old));
+    be.fail_copy = false;
+    PinnedIoLease extra_reader;
+    be.before_read = [&] {
+        extra_reader = tier->acquire_io(old);
+        PinnedReleaseResult result = PinnedReleaseResult::Retry;
+        std::thread gc([&] { result = tier->try_release_allocation(old); });
+        gc.join();
+        CHECK(result == PinnedReleaseResult::Deferred && tier->block_slot(0) < 0);
+        CHECK(!tier->acquire_io(old) && !tier->free_slots() && tier->place_block(99).slot < 0);
+    };
+    runtime.admit_incoming();
+    const auto gpu = runtime.store().blocks()[0].gpu_slot;
+    CHECK(gpu >= 0 && be.data[gpu] == std::vector<uint8_t>(64, 7));
+    CHECK(runtime.store().blocks()[0].cpu_slot < 0 && !tier->free_slots());
+    extra_reader.reset();
+    tier->collect_released();
+    CHECK(tier->free_slots() == 1);
+    const auto fresh = tier->place_block(0);
+    CHECK(fresh.slot == old.slot && fresh.allocation.generation > old.generation);
+    CHECK(tier->try_release_allocation(old) == PinnedReleaseResult::Stale);
+    CHECK(tier->block_slot(0) == fresh.slot);
+}
+
 static void test_selection_preview_and_resident_commit() {
     RecordingBackend be;
     KvMemRuntime rt(make_cfg(), &be);
@@ -365,6 +431,7 @@ static void test_selection_plan_rejects_changed_table() {
 }
 
 int main() {
+    test_cpu_stagein_keeps_exact_allocation();
     test_selection_preview_and_resident_commit();
     test_full_drain_then_restage();
     test_discard_pending_plan();

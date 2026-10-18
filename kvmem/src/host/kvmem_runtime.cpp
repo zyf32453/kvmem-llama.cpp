@@ -126,6 +126,7 @@ std::vector<uint32_t> KvMemRuntime::preview_reselect(const std::vector<uint32_t>
 
 KvMemPlan KvMemRuntime::prepare_selection(const std::vector<uint32_t> & selected, bool force_raw_refresh) {
     if (pending_) throw std::logic_error("cannot replace an unapplied selection plan");
+    if (cpu_tier_) cpu_tier_->collect_released();
     last_plan_ = store_.set_selection(selected, force_raw_refresh);
     last_plan_.plan_id = ++plan_serial_;
     pending_ = true;
@@ -143,6 +144,7 @@ bool KvMemRuntime::commit_resident_selection(const std::vector<uint32_t> & selec
 KvMemPlan KvMemRuntime::prepare_prefill_pressure(
         const std::vector<uint32_t> &mandatory) {
     if (pending_) throw std::logic_error("cannot replace an unapplied selection plan");
+    if (cpu_tier_) cpu_tier_->collect_released();
     last_plan_ = store_.set_selection(
         store_.pick_prefill_pressure_blocks(mandatory));
     last_plan_.plan_id = ++plan_serial_;
@@ -286,6 +288,8 @@ void KvMemRuntime::stage_out(uint32_t block_id) {
     if (cpu_tier_ && cpu_tier_->enabled() && slot_bytes_ > 0 && !cpu_arena_.empty()) {
         auto p = cpu_tier_->place_block_evicting(block_id);
         if (p.slot >= 0) {
+            auto destination = cpu_tier_->acquire_io(p.allocation);
+            if (!destination) throw std::runtime_error("CPU cache allocation closed before stage-out");
             if (p.evicted_block >= 0) {
                 const uint32_t vic = static_cast<uint32_t>(p.evicted_block);
                 (void) spill_bytes_to_nvme(vic, cpu_ptr(p.slot));
@@ -328,15 +332,21 @@ void KvMemRuntime::stage_in(uint32_t block_id) {
     if (b.tier == KvTier::GPU && b.gpu_slot >= 0) {
         return;
     }
-    const int32_t gpu = backend_->alloc_gpu_slot();
     const uint8_t *src = nullptr;
+    PinnedIoLease source_allocation;
+    const auto cached_allocation = cpu_tier_ && b.cpu_slot >= 0 ?
+        cpu_tier_->allocation_for_block(block_id) : PinnedAllocationHandle{};
     bool from_nvme = false;
     auto pit = prefetch_buf_.find(block_id);
     if (pit != prefetch_buf_.end() && pit->second) {
         src = pit->second->data();
         from_nvme = true;
     } else if (b.cpu_slot >= 0) {
-        src = cpu_ptr(b.cpu_slot);
+        if (cpu_tier_) source_allocation = cpu_tier_->acquire_io(cached_allocation);
+        if (!source_allocation || source_allocation.handle().slot != b.cpu_slot) {
+            throw std::runtime_error("CPU cache source changed before stage-in");
+        }
+        src = cpu_ptr(source_allocation.handle().slot);
     } else if (nvme_tier_ && nvme_tier_->enabled() &&
                (b.nvme_slot >= 0 || b.tier == KvTier::SSD) &&
                slot_bytes_ > 0 && !scratch_.empty()) {
@@ -344,11 +354,24 @@ void KvMemRuntime::stage_in(uint32_t block_id) {
         src = scratch_.data();
         from_nvme = true;
     }
-    if (src && gpu >= 0 && slot_bytes_ > 0) {
-        backend_->copy_block_from_host(block_id, gpu, src, slot_bytes_);
+    const int32_t gpu = backend_->alloc_gpu_slot();
+    // Host-only metadata tests use a null backend. A real source, however,
+    // must not be discarded when its destination cannot be allocated.
+    if (src && gpu < 0 && backend_ != &null_backend_) throw std::runtime_error("no GPU destination for CPU cache stage-in");
+    try {
+        if (src && gpu >= 0 && slot_bytes_ > 0) backend_->copy_block_from_host(block_id, gpu, src, slot_bytes_);
+    } catch (...) {
+        if (gpu >= 0) backend_->free_gpu_slot(gpu);
+        throw;
     }
     if (cpu_tier_ && b.cpu_slot >= 0) {
-        cpu_tier_->release_block(block_id);
+        // Completion settles the exact generation captured before the copy.
+        // No late completion may release a replacement bound to the same ID.
+        source_allocation.reset();
+        const auto released = cpu_tier_->release_owned_allocation(cached_allocation);
+        if (released != PinnedReleaseResult::Released && released != PinnedReleaseResult::AlreadyReleased &&
+            released != PinnedReleaseResult::Deferred && released != PinnedReleaseResult::Stale)
+            throw std::runtime_error("CPU cache release needs retry after stage-in");
         store_.set_block_cpu_copy(block_id, -1);
     }
     store_.set_block_tier(block_id, KvTier::GPU, -1, store_.blocks()[block_id].nvme_slot);

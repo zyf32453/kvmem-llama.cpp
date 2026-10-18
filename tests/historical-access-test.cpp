@@ -1816,6 +1816,77 @@ struct PendingHistoricalGpuRead {
                 "Host release changed the retained GPU allocation or its consumer output");
     }
 };
+
+// Real page-locked source memory, with a copy already queued behind a test
+// barrier. This is allocation-lifetime coverage, not a historical cache hit.
+static void check_pinned_gpu_allocation(llama_memory_kvmem & mem) {
+    using namespace kvmem;
+    constexpr size_t bytes = 4096;
+    struct Pending {
+        void * host = nullptr;
+        cudaStream_t stream = nullptr;
+        cudaEvent_t done = nullptr;
+        PinnedIoLease lease;
+        std::atomic<bool> open{false}, timed_out{false};
+        ~Pending() {
+            open = true;
+            if (stream && cudaStreamSynchronize(stream) != cudaSuccess) std::abort();
+            lease.reset();
+            if (done) cudaEventDestroy(done);
+            if (host) cudaFreeHost(host);
+            if (stream) cudaStreamDestroy(stream);
+        }
+    };
+    PinnedKvTierConfig cfg{bytes, bytes}; cfg.handle_addressed = true;
+    PinnedKvTier tier(cfg);
+    Pending pending;
+    auto * tensor = mem.get_kv()->get_k_storage(mem.raw().config().historical_gc_attention_layers.front());
+    require(ggml_nbytes(tensor) >= bytes && tensor->data, "pinned fixture tensor too small");
+    require(cudaMallocHost(&pending.host, bytes) == cudaSuccess &&
+            cudaStreamCreateWithFlags(&pending.stream, cudaStreamNonBlocking) == cudaSuccess &&
+            cudaEventCreateWithFlags(&pending.done, cudaEventDisableTiming) == cudaSuccess,
+            "pinned fixture allocation failed");
+    PinnedAllocationHandle old;
+    for (unsigned round = 0; round < 4; ++round) {
+        const auto allocation = tier.try_allocate().allocation;
+        require(allocation.slot == 0 && !tier.acquire_io(old), "pinned GPU slot reused a stale generation");
+        if (round) require(tier.try_release_allocation(old) == PinnedReleaseResult::Stale,
+                           "late pinned completion affected a newer generation");
+        const auto expected = pattern(bytes, 700 + round);
+        std::copy(expected.begin(), expected.end(), static_cast<uint8_t *>(pending.host));
+        pending.lease = tier.acquire_io(allocation);
+        pending.open = false;
+        require(bool(pending.lease) && cudaLaunchHostFunc(pending.stream, [](void * data) {
+            auto & p = *static_cast<Pending *>(data);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!p.open.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= deadline) { p.timed_out = true; break; }
+                std::this_thread::yield();
+            }
+        }, &pending) == cudaSuccess &&
+            cudaMemcpyAsync(tensor->data, pending.host, bytes, cudaMemcpyHostToDevice, pending.stream) == cudaSuccess &&
+            cudaEventRecord(pending.done, pending.stream) == cudaSuccess,
+            "pinned fixture H2D submission failed");
+        PinnedReleaseResult result = PinnedReleaseResult::Retry;
+        std::thread gc([&] { result = tier.try_release_allocation(allocation); });
+        gc.join();
+        require(result == PinnedReleaseResult::Deferred && !tier.acquire_io(allocation) &&
+                tier.try_allocate().slot < 0 && !tier.free_slots() &&
+                cudaEventQuery(pending.done) == cudaErrorNotReady && !pending.timed_out,
+                "pinned source recycled before real DMA completed");
+        pending.open = true;
+        require(cudaEventSynchronize(pending.done) == cudaSuccess && !pending.timed_out,
+                "pinned H2D did not complete");
+        pending.lease.reset();
+        require(tier.try_release_allocation(allocation) == PinnedReleaseResult::Released && tier.free_slots() == 1,
+                "completed pinned H2D did not return the slot");
+        std::vector<uint8_t> actual(bytes);
+        ggml_backend_tensor_get(tensor, actual.data(), 0, actual.size());
+        require(actual == expected, "pinned H2D read different-generation bytes");
+        old = allocation;
+    }
+    std::puts("PASS pinned GPU source: 4 allocation generations, real queued H2D, retirement denied new IO/reuse, exact bytes");
+}
 #endif
 struct ModelStageoutFault {
     KvmemStageoutPoint point = KvmemStageoutPoint::EventRecord;
@@ -2814,6 +2885,9 @@ int main(int argc, char ** argv) {
             else if (scenario == 2) check_partial_rollover(*mem);
             else if (scenario == 1) check_managed_async_harvest(*mem);
             else {
+#ifdef KVMEM_TEST_CUDA
+                check_pinned_gpu_allocation(*mem);
+#endif
                 check_mean_ranges(*mem);
                 check_access(*mem);
             }
