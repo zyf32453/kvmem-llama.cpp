@@ -1114,19 +1114,22 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         mem.occupy_in(mem.get_kv(), 0);
         auto & runtime = mem.runtime();
         const auto & directory = runtime.historical_shadow_directory();
-        auto writer = repository->begin_write(0, 0, block, round + 1, 0,
-            [payload, weak_repository](const kvmem::HistoricalKvHandle & h) {
+        auto prepared = payload->prepare_payload(block);
+        const auto kv_bytes = prepared.packed_kv_bytes(), mean_bytes = prepared.mean_k_bytes();
+        auto writer = repository->begin_write(0, 0, block, round + 1, prepared.payload_bytes(),
+            Repository::ResourceRelease{[payload, weak_repository](const kvmem::HistoricalKvHandle & h,
+                                                                 Repository::HostResource resource) {
                 const auto owner = weak_repository.lock();
                 if (!owner) return false;
-                const auto result = payload->release(*owner, h);
+                const auto result = payload->release_resource(*owner, h, resource);
                 return result.code == Payload::ReleaseCode::Released ||
                        result.code == Payload::ReleaseCode::AlreadyReleased;
-            });
+            }, kv_bytes, mean_bytes});
         require(writer.has_value(), "managed harvest slot was not reusable");
         const auto handle = writer->handle();
         require(!round || (handle.slot == previous.slot && handle.generation > previous.generation),
                 "reused payload slot has no new generation");
-        require(payload->reserve(*writer, handle, 0, block), "managed payload reserve failed");
+        require(payload->install_payload(*writer, handle, 0, block, prepared), "managed payload reserve failed");
         struct LayerCheck {
             uint32_t il;
             std::vector<uint8_t> k, v;
@@ -1323,8 +1326,42 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                     require(actual == expected, "managed storage stage-in restored incorrect GPU bytes");
                 }
             }
+            const bool keep_mean = round != 3;
+            auto kept = keep_mean ? directory.acquire_mean_k(0) : directory.acquire_packed_kv_transfer(0);
+            auto gpu = repository->acquire_gpu(handle);
+            require(kept && gpu && !kept.lease.has_host_access(), "managed narrow resource admission failed");
             require(repository->retire(handle) == Repository::RetireResult::Committed &&
                     runtime.unbind_retired_historical_block(0), "completed capture retirement failed");
+            require(reclaim() == Repository::ReclaimResult::ResourceReleased &&
+                    payload->allocated_payload_bytes() == (keep_mean ? mean_bytes : kv_bytes) &&
+                    !repository->ready_count(), "managed Mean-K/KV release waited for an unrelated reader");
+            for (const auto & check : checks) {
+                if (keep_mean) {
+                    std::vector<float> actual(cfg.mean_k_elements);
+                    auto expected = mean_sum(0, block, cfg.mean_k_elements);
+                    for (auto & value : expected) value /= float(block);
+                    require(payload->copy_mean_k(kept.lease, handle, check.il, actual.data(), actual.size()) &&
+                            actual == expected, "KV release changed captured Mean-K");
+                } else {
+                    auto actual = payload->read_packed_kv(kept.lease, handle, check.il);
+                    require(actual && actual->packed_k == check.k && actual->packed_v == check.v,
+                            "Mean-K release changed captured packed KV");
+                }
+                for (auto * tensor : {mem.get_kv()->get_k_storage(check.il), mem.get_kv()->get_v_storage(check.il)}) {
+                    const auto & expected = tensor == mem.get_kv()->get_k_storage(check.il) ? check.k : check.v;
+                    std::vector<uint8_t> actual(expected.size());
+                    ggml_backend_tensor_get(tensor, actual.data(), cell0 * ggml_row_size(tensor->type, tensor->ne[0]), actual.size());
+                    require(actual == expected, "partial Host resource release changed the GPU copy");
+                }
+            }
+            kept.lease.reset();
+            require(reclaim() == Repository::ReclaimResult::HostReleased && !payload->allocated_payload_bytes() &&
+                    !repository->reclaim_completed(handle, repository->repository_id()),
+                    "Host completion lost retained GPU identity");
+            gpu.reset();
+            std::printf("PASS captured resource split: retained=%s layers=%zu bytes=%llu GPU bytes unchanged\n",
+                        keep_mean ? "Mean-K" : "packed-KV", checks.size(),
+                        (unsigned long long) (keep_mean ? mean_bytes : kv_bytes));
         }
         const bool reclaimed = background_gc
             ? repository->reclaim_completed(handle, repository->repository_id())

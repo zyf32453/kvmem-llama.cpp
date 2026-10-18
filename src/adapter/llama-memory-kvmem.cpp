@@ -1557,7 +1557,7 @@ bool llama_memory_kvmem::finish_historical_capture() {
         }
         if (historical_gc_) {
             const auto stats = historical_gc_->stats();
-            LLAMA_LOG_INFO("KVMEM_HISTORICAL_GC finish mode=%s proposed=%llu committed=%llu shadow=%llu reclaimed=%llu deferred=%llu retry=%llu policy_failures=%llu worker_failures=%llu ready=%u payload_bytes=%llu host_released_early=%llu\n",
+            LLAMA_LOG_INFO("KVMEM_HISTORICAL_GC finish mode=%s proposed=%llu committed=%llu shadow=%llu reclaimed=%llu deferred=%llu retry=%llu policy_failures=%llu worker_failures=%llu ready=%u payload_bytes=%llu host_released_early=%llu partial_resource_releases=%llu\n",
                 historical_gc_mode_ == 1 ? "shadow" : "delete",
                 (unsigned long long) stats.proposed, (unsigned long long) stats.committed,
                 (unsigned long long) stats.shadow, (unsigned long long) stats.reclaimed,
@@ -1566,7 +1566,8 @@ bool llama_memory_kvmem::finish_historical_capture() {
                 (unsigned long long) stats.worker_failures,
                 historical_capture_->repository()->ready_count(),
                 (unsigned long long) historical_capture_->payload_bytes(),
-                (unsigned long long) stats.host_released_early);
+                (unsigned long long) stats.host_released_early,
+                (unsigned long long) stats.partial_resource_releases);
             if (stats.policy_failures || stats.worker_failures) return false;
         }
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live_observed=%u task_references=0 rows=%u payload_bytes=%llu gpu_deferred=%llu gpu_returned=%llu\n",
@@ -5368,7 +5369,7 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
     if (block_id >= store.block_count()) {
         return;
     }
-    auto transfer = runtime_->historical_shadow_directory().acquire_transfer(block_id);
+    auto transfer = runtime_->historical_shadow_directory().acquire_packed_kv_transfer(block_id);
     if (!transfer) {
         throw std::runtime_error("KVMem historical block is unavailable for stage-in");
     }
@@ -5422,7 +5423,7 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
         const int64_t t_copy = ggml_time_us();
         bool have_k = false, have_v = false;
         if (transfer.storage) {
-            auto layer = transfer.storage->read_layer(transfer.lease, transfer.lease.handle(), il);
+            auto layer = transfer.storage->read_packed_kv(transfer.lease, transfer.lease.handle(), il);
             if (!layer || layer->packed_k.size() != kpack.size() ||
                 layer->packed_v.size() != vpack.size())
                 throw std::runtime_error("historical stage-in payload does not match the admitted block");
@@ -5540,7 +5541,7 @@ void llama_memory_kvmem::score_retrieval() {
     std::vector<float> mk(n_embd_k_, 0.0f);
     const uint32_t g = n_head_kv_ == 0 ? 1 : n_head_ / n_head_kv_;
     for (uint32_t b = 0; b < nblk; ++b) {
-        auto read = runtime_->historical_shadow_directory().acquire_read(b);
+        auto read = runtime_->historical_shadow_directory().acquire_mean_k(b);
         if (!read) {
             continue;
         }

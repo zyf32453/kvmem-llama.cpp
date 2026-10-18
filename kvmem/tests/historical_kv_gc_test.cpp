@@ -470,12 +470,41 @@ void test_partial_host_release_does_not_return_slot_credit() {
           releases == 1, "complete release lost Ready/pending conservation");
 }
 
+void test_separate_resource_progress_keeps_pending_slot_credit() {
+    using Repo = HistoricalKvRepository;
+    auto repo = std::make_shared<Repo>(2);
+    unsigned calls[3]{};
+    auto writer = repo->begin_write(0, 0, 4, 1, 144,
+        Repo::ResourceRelease{[&](const HistoricalKvHandle &, Repo::HostResource resource) {
+            ++calls[static_cast<unsigned>(resource)]; return true;
+        }, 128, 16});
+    const auto handle = writer->handle();
+    check(repo->publish_write(*writer), "manager resource fixture publication failed");
+    writer.reset();
+    auto mean = repo->acquire_mean_k(handle);
+    auto gpu = repo->acquire_gpu(handle);
+    HistoricalKvGc gc(repo, std::make_unique<DeleteOnce>(handle), config(HistoricalKvGc::Mode::Delete));
+    { DenyCppAllocation deny; gc.manual_tick(); gc.manual_tick(); }
+    check(gc.stats().partial_resource_releases == 1 && !gc.stats().host_released_early &&
+          calls[0] == 1 && !calls[1] && !calls[2] && repo->observe_range(0, 2).pending == 1 &&
+          repo->ready_count() == 1, "partial resource progress changed full-slot accounting");
+    mean.reset();
+    { DenyCppAllocation deny; gc.manual_tick(); }
+    check(gc.stats().host_released_early == 1 && !gc.stats().reclaimed && calls[1] == 1 && !calls[2],
+          "Mean-K completion ignored the retained GPU identity");
+    gpu.reset();
+    { DenyCppAllocation deny; gc.manual_tick(); }
+    check(gc.stats().reclaimed == 1 && calls[2] == 1 && repo->ready_count() == 2 &&
+          !repo->observe_range(0, 2).pending, "resource completion did not settle the pending slot");
+}
+
 } // namespace
 
 int main() {
     try {
         test_retire_active_then_background_release();
         test_partial_host_release_does_not_return_slot_credit();
+        test_separate_resource_progress_keeps_pending_slot_credit();
         test_shadow_and_conditional_intent();
         test_releasing_retry_and_off_drain();
         test_lru_policy_through_manager();

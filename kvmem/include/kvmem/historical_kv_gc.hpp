@@ -45,6 +45,7 @@ public:
         uint64_t policy_failures = 0;
         uint64_t worker_failures = 0;
         uint64_t host_released_early = 0; // Host bundle gone, identity/GPU still held.
+        uint64_t partial_resource_releases = 0; // Progress before the complete Host bundle is gone.
     };
 
     HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
@@ -95,6 +96,7 @@ private:
     std::atomic<uint64_t> policy_failures_{0};
     std::atomic<uint64_t> worker_failures_{0};
     std::atomic<uint64_t> host_released_early_{0};
+    std::atomic<uint64_t> partial_resource_releases_{0};
     bool policy_failed_ = false;
 };
 

@@ -54,6 +54,12 @@ HistoricalKvRawStore::PreparedPayload::operator bool() const noexcept { return b
 uint64_t HistoricalKvRawStore::PreparedPayload::payload_bytes() const noexcept {
     return block_ ? block_->payload_bytes : 0;
 }
+uint64_t HistoricalKvRawStore::PreparedPayload::packed_kv_bytes() const noexcept {
+    return block_ ? block_->packed_kv_bytes : 0;
+}
+uint64_t HistoricalKvRawStore::PreparedPayload::mean_k_bytes() const noexcept {
+    return block_ ? block_->mean_k_bytes : 0;
+}
 uint32_t HistoricalKvRawStore::PreparedPayload::token_capacity() const noexcept {
     return block_ ? block_->valid_tokens : 0;
 }
@@ -147,6 +153,8 @@ HistoricalKvRawStore::PreparedPayload HistoricalKvRawStore::prepare_payload(uint
         layer.packed_k.resize(k_bytes);
         layer.packed_v.resize(v_bytes);
         layer.mean_k_sum.resize(config_.mean_k_elements);
+        block->packed_kv_bytes = add(block->packed_kv_bytes, add(layer.packed_k.capacity(), layer.packed_v.capacity()));
+        block->mean_k_bytes = add(block->mean_k_bytes, multiply(layer.mean_k_sum.capacity(), sizeof(float)));
         block->payload_bytes = add(static_cast<size_t>(block->payload_bytes),
                                    payload_bytes(layer.packed_k, layer.packed_v, layer.mean_k_sum));
     }
@@ -447,11 +455,26 @@ HistoricalKvRawStore::read_layer(
     std::lock_guard<std::mutex> lock(slot.mu);
     const Block * block = slot.block.get();
     if (!block || block->repository_id != reader.repository_id() ||
-        !same(block->handle, handle)) return std::nullopt;
+        !same(block->handle, handle) || block->packed_kv_released || block->mean_k_released) return std::nullopt;
     const Layer & source = block->layers[layer];
     if (!source.written) return std::nullopt;
     return LayerSnapshot{source.packed_k, source.packed_v,
                          source.mean_k_sum, source.mean_tokens};
+}
+
+std::optional<HistoricalKvRawStore::LayerSnapshot>
+HistoricalKvRawStore::read_packed_kv(const HistoricalKvRepository::Lease & reader,
+                                   HistoricalKvHandle handle, uint32_t layer) const {
+    if (!reader.has_packed_kv_access() || !reader.repository_id() || !same(reader.handle(), handle) ||
+        handle.slot >= slots_.size() || !required_layer(layer)) return std::nullopt;
+    const auto & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    const auto * block = slot.block.get();
+    if (!block || block->repository_id != reader.repository_id() ||
+        !same(block->handle, handle) || block->packed_kv_released) return std::nullopt;
+    const auto & source = block->layers[layer];
+    if (!source.written) return std::nullopt;
+    return LayerSnapshot{source.packed_k, source.packed_v, {}, 0};
 }
 
 std::optional<HistoricalKvRawStore::BlockInfo>
@@ -463,7 +486,7 @@ HistoricalKvRawStore::inspect(const HistoricalKvRepository & repository,
     std::lock_guard<std::mutex> lock(slot.mu);
     const Block * block = slot.block.get();
     if (!block || block->repository_id != repository.repository_id() ||
-        !same(block->handle, handle)) return std::nullopt;
+        !same(block->handle, handle) || (block->packed_kv_released && block->mean_k_released)) return std::nullopt;
     return BlockInfo{block->handle, block->original_begin,
                      block->valid_tokens, block->written_layers,
                      block->payload_bytes};
@@ -472,14 +495,14 @@ HistoricalKvRawStore::inspect(const HistoricalKvRepository & repository,
 bool HistoricalKvRawStore::copy_mean_k(
     const HistoricalKvRepository::Lease & reader,
     HistoricalKvHandle handle, uint32_t layer, float * output, size_t elements) const {
-    if (!reader || !reader.has_host_access() || !reader.repository_id() || !same(reader.handle(), handle) ||
+    if (!reader || !reader.has_mean_k_access() || !reader.repository_id() || !same(reader.handle(), handle) ||
         handle.slot >= slots_.size() || !required_layer(layer) || !output ||
         !config_.mean_k_elements || elements != config_.mean_k_elements) return false;
     const Slot & slot = *slots_[handle.slot];
     std::lock_guard<std::mutex> lock(slot.mu);
     const Block * block = slot.block.get();
     if (!block || block->repository_id != reader.repository_id() ||
-        !same(block->handle, handle)) return false;
+        !same(block->handle, handle) || block->mean_k_released) return false;
     const auto & source = block->layers[layer];
     if (!source.written || !source.mean_tokens) return false;
     for (size_t i = 0; i < elements; ++i)
@@ -532,6 +555,83 @@ HistoricalKvRawStore::release(const HistoricalKvRepository & repository,
         slot.releasing = false;
     }
     return {ReleaseCode::Released, bytes};
+}
+
+HistoricalKvRawStore::ReleaseResult HistoricalKvRawStore::release_resource(
+    const HistoricalKvRepository & repository, HistoricalKvHandle handle,
+    HistoricalKvRepository::HostResource resource) noexcept {
+    using Resource = HistoricalKvRepository::HostResource;
+    if (!handle.incarnation || !handle.generation || handle.slot >= slots_.size())
+        return {ReleaseCode::Stale, 0};
+    auto & slot = *slots_[handle.slot];
+    std::unique_ptr<Block> metadata;
+    Block * block = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(slot.mu);
+        if (slot.releasing) return {ReleaseCode::Busy, 0};
+        if (!slot.block) {
+            if (slot.last_released_repository_id == repository.repository_id() && same(slot.last_released, handle))
+                return {ReleaseCode::AlreadyReleased, 0};
+            if (slot.last_released_repository_id == repository.repository_id() &&
+                slot.last_released.incarnation == handle.incarnation && handle.generation <= slot.last_released.generation)
+                return {ReleaseCode::Stale, 0};
+            return repository.is_resource_releasing(handle, resource) ?
+                ReleaseResult{ReleaseCode::Absent, 0} : ReleaseResult{ReleaseCode::Busy, 0};
+        }
+        block = slot.block.get();
+        if (block->repository_id != repository.repository_id() || !same(block->handle, handle))
+            return {ReleaseCode::Stale, 0};
+        if (!repository.is_resource_releasing(handle, resource)) return {ReleaseCode::Busy, 0};
+        if (resource == Resource::Metadata) {
+            if (!block->packed_kv_released || !block->mean_k_released || block->payload_bytes)
+                return {ReleaseCode::Busy, 0};
+            metadata = std::move(slot.block);
+        } else if (resource == Resource::PackedKv ? block->packed_kv_released : block->mean_k_released) {
+            return {ReleaseCode::AlreadyReleased, 0};
+        }
+        slot.releasing = true;
+    }
+    if (metadata) {
+        // The allocation/header credit stays charged until every reference
+        // drains. Payload bytes alone never authorize a new physical slot.
+        metadata.reset();
+        std::lock_guard<std::mutex> lock(slot.mu);
+        slot.last_released = handle;
+        slot.last_released_repository_id = repository.repository_id();
+        slot.releasing = false;
+        return {ReleaseCode::Released, 0};
+    }
+    uint64_t total = 0;
+    for (size_t layer = 0; layer < config_.n_layer; ++layer) {
+        uint64_t bytes = 0;
+        {
+            std::vector<uint8_t> k, v;
+            std::vector<float> mean;
+            {
+                std::lock_guard<std::mutex> lock(slot.mu);
+                auto & source = block->layers[layer];
+                if (resource == Resource::PackedKv) {
+                    k.swap(source.packed_k); v.swap(source.packed_v);
+                } else {
+                    mean.swap(source.mean_k_sum);
+                }
+            }
+            bytes = k.capacity() + v.capacity() + mean.capacity() * sizeof(float);
+        } // Physical vector destruction outside the slot lock, no allocations.
+        block->accounting->bytes.fetch_sub(bytes, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(slot.mu);
+            block->payload_bytes -= bytes;
+            (resource == Resource::PackedKv ? block->packed_kv_bytes : block->mean_k_bytes) -= bytes;
+        }
+        total += bytes;
+    }
+    {
+        std::lock_guard<std::mutex> lock(slot.mu);
+        (resource == Resource::PackedKv ? block->packed_kv_released : block->mean_k_released) = true;
+        slot.releasing = false;
+    }
+    return {ReleaseCode::Released, total};
 }
 
 uint64_t HistoricalKvRawStore::allocated_payload_bytes() const noexcept {

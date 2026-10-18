@@ -14,11 +14,11 @@ namespace kvmem {
 struct HistoricalKvCaptureSessionTestAccess {
     static void before_release(HistoricalKvCaptureSession & session, uint32_t index,
                                std::function<void()> before) {
-        auto original = std::move(session.callbacks_.at(index));
-        session.callbacks_[index] = [original = std::move(original), before = std::move(before)](
-                HistoricalKvHandle handle) {
-            before();
-            return original(handle);
+        auto original = std::move(session.callbacks_.at(index).callback);
+        session.callbacks_[index].callback = [original = std::move(original), before = std::move(before)](
+                HistoricalKvHandle handle, HistoricalKvRepository::HostResource resource) {
+            if (resource == HistoricalKvRepository::HostResource::PackedKv) before();
+            return original(handle, resource);
         };
     }
 };

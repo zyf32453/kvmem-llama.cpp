@@ -157,7 +157,8 @@ static void test_host_admission_is_atomic_with_retirement() {
         auto gpu = repo.acquire_gpu(handle);
         std::thread host([&] {
             while (!go.load()) std::this_thread::yield();
-            auto transfer = repo.acquire_transfer(handle);
+            auto transfer = round % 3 == 0 ? repo.acquire_transfer(handle) :
+                round % 3 == 1 ? repo.acquire_packed_kv_transfer(handle) : repo.acquire_mean_k(handle);
             acquired = bool(transfer);
             attempted = true;
             while (!drop.load()) std::this_thread::yield();
@@ -564,7 +565,40 @@ static void test_final_publication_under_ref_churn_and_retirement() {
     }
 }
 
+static void test_resource_counter_saturation_does_not_cross_fields() {
+    using Repo = HistoricalKvRepository;
+    Repo repo(1);
+    std::atomic<unsigned> released{0};
+    auto writer = repo.begin_write(0, 0, 4, 1, 64, successful_release(released));
+    const auto handle = writer->handle();
+    check(repo.publish_write(*writer), "saturation fixture publication failed");
+    writer.reset();
+    std::vector<Repo::Lease> readers;
+    readers.reserve(32767);
+    for (unsigned i = 0; i < 32767; ++i) {
+        auto lease = repo.acquire_packed_kv(handle);
+        check(bool(lease), "resource counter saturated below its declared limit");
+        readers.push_back(std::move(*lease));
+    }
+    auto mean = repo.acquire_mean_k(handle);
+    auto gpu = repo.acquire_gpu(handle);
+    check(!repo.acquire_packed_kv(handle) && mean && gpu,
+          "saturated KV counter carried into another resource count");
+    const auto meta = repo.inspect(handle);
+    check(meta && meta->packed_kv_references == 32767 && meta->mean_k_references == 1 &&
+          meta->host_references == 32768, "independent counter observation was corrupted");
+    repo.retire(handle);
+    readers.clear();
+    check(repo.try_reclaim(handle) == Repo::ReclaimResult::Deferred, "remaining Mean-K reader was not counted");
+    mean.reset();
+    check(repo.try_reclaim(handle) == Repo::ReclaimResult::HostReleased && released == 1,
+          "saturated reference retirement lost a payload release");
+    gpu.reset();
+    check(repo.try_reclaim(handle) == Repo::ReclaimResult::Complete, "counter field saturation leaked a slot");
+}
+
 int main() {
+    test_resource_counter_saturation_does_not_cross_fields();
     test_retire_closes_new_entry_but_keeps_old_reader();
     test_gpu_ready_writing_execution_is_not_cpu_publication();
     test_partial_host_release_retry_and_slot_credit();

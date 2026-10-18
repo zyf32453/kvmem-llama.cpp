@@ -13,8 +13,9 @@ namespace kvmem {
 class HistoricalKvGc;
 
 // A fixed-size lifetime directory; payload ownership stays with its storage
-// binding. The callback releases the exact generation's Host bundle and must
-// tolerate a partial retry. It must not free GPU allocations or mutate GPU
+// binding. ReleaseCallback frees the exact generation's Host bundle; a
+// ResourceRelease separates packed KV, Mean-K, and final storage metadata.
+// Both must tolerate partial retry and must not free GPU allocations or mutate GPU
 // residency: GPU-only execution can still own those resources when it runs.
 // A legacy binding requiring all references to drain can check is_releasing()
 // and return false until the full-block phase is reached.
@@ -23,6 +24,15 @@ class HistoricalKvRepository {
 
 public:
     using ReleaseCallback = std::function<bool(const HistoricalKvHandle &)>;
+    enum class HostAccess { None, All, PackedKv, MeanK };
+    enum class HostResource { PackedKv, MeanK, Metadata };
+    struct ResourceRelease {
+        // Metadata runs only after every reference and both payload resources
+        // have drained. Each successful resource callback is acknowledged once.
+        std::function<bool(const HistoricalKvHandle &, HostResource)> callback;
+        uint64_t packed_kv_bytes = 0;
+        uint64_t mean_k_bytes = 0;
+    };
 
     struct RangeObservation {
         // At most `count` entries, in ascending physical slot order.
@@ -33,10 +43,11 @@ public:
     };
 
     enum class RetireResult { Committed, AlreadyRetired, Stale, VersionChanged, Retry };
-    // HostReleased is partial progress, NOT a Ready slot. Metadata/GPU users
-    // still prevent generation reuse. It is reported once per generation.
-    enum class ReclaimResult { Complete, HostReleased, Deferred, Stale, Retry };
-    enum class LeaseKind { Writer, Execution, GpuExecution, Read, Transfer };
+    // ResourceReleased means at least one Host component progressed, but the
+    // entire Host bundle is not yet released. HostReleased means the bundle is
+    // gone while identity remains. Neither is a Ready slot or reusable credit.
+    enum class ReclaimResult { Complete, HostReleased, ResourceReleased, Deferred, Stale, Retry };
+    enum class LeaseKind { Writer, Execution, GpuExecution, Read, Transfer, PackedKvRead, PackedKvTransfer, MeanKRead };
     enum class CompletionState { Unfinished, Live, Retired };
 
     class Lease {
@@ -54,14 +65,20 @@ public:
         bool is_writer() const { return kind_ == LeaseKind::Writer; }
         // GPU-only permission cannot be used to read/copy Host payload, even
         // before retirement. Future Host dependencies must be admitted up front.
-        bool has_host_access() const noexcept { return shared_ && host_reference_; }
+        bool has_host_access() const noexcept { return shared_ && access_ == HostAccess::All; }
+        bool has_packed_kv_access() const noexcept {
+            return has_host_access() || (shared_ && access_ == HostAccess::PackedKv);
+        }
+        bool has_mean_k_access() const noexcept {
+            return has_host_access() || (shared_ && access_ == HostAccess::MeanK);
+        }
         uint64_t repository_id() const noexcept;
         std::optional<HistoricalKvBlockMeta> metadata() const;
         void reset() noexcept;
 
     private:
         friend class HistoricalKvRepository;
-        Lease(std::shared_ptr<Shared>, HistoricalKvHandle, LeaseKind, bool host_reference = false);
+        Lease(std::shared_ptr<Shared>, HistoricalKvHandle, LeaseKind, HostAccess access = HostAccess::None);
         void disarm() noexcept;
         void count_operation() noexcept;
         std::shared_ptr<Shared> shared_;
@@ -69,7 +86,7 @@ public:
         LeaseKind kind_ = LeaseKind::Read;
         bool counted_exec_ = false;
         bool counted_operation_ = false;
-        bool host_reference_ = false;
+        HostAccess access_ = HostAccess::None;
     };
 
     // Request-private, real physical slots. Reserved slots are neither Ready
@@ -108,6 +125,9 @@ public:
     std::optional<Lease> begin_write(uint64_t logical_id, uint64_t original_begin,
                                      uint32_t valid_tokens, uint64_t birth_seq,
                                      uint64_t payload_bytes, ReleaseCallback release);
+    std::optional<Lease> begin_write(uint64_t logical_id, uint64_t original_begin,
+                                     uint32_t valid_tokens, uint64_t birth_seq,
+                                     uint64_t payload_bytes, ResourceRelease release);
     // All-or-none acquisition in a bounded pass; no waiting for GC. This
     // reserves slots only. A request owner must also reserve real payload,
     // scratch and metadata before promising whole-request admission.
@@ -119,6 +139,10 @@ public:
         Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
         uint32_t valid_tokens, uint64_t birth_seq,
         uint64_t payload_bytes, ReleaseCallback release);
+    std::optional<Lease> begin_reserved_write(
+        Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
+        uint32_t valid_tokens, uint64_t birth_seq,
+        uint64_t payload_bytes, ResourceRelease release);
     // One atomic phase-bit update under the original writer: only Writing
     // becomes Live. Retirement is sticky and refcount churn cannot postpone
     // the last producer's completion publication.
@@ -138,6 +162,12 @@ public:
     std::optional<Lease> acquire_gpu_ready_writing(HistoricalKvHandle handle);
     std::optional<Lease> acquire_read(HistoricalKvHandle handle);
     std::optional<Lease> acquire_transfer(HistoricalKvHandle handle);
+    // Narrow rights must cover every future use in the operation. They cannot
+    // read the other resource or be upgraded after retirement. All counters
+    // share the phase CAS; saturation rejects admission instead of overflowing.
+    std::optional<Lease> acquire_packed_kv(HistoricalKvHandle handle);
+    std::optional<Lease> acquire_packed_kv_transfer(HistoricalKvHandle handle);
+    std::optional<Lease> acquire_mean_k(HistoricalKvHandle handle);
     // When supplied, the content version is checked under the same slot guard
     // as the phase transition. A mismatch leaves the generation Live/Writing.
     RetireResult retire(HistoricalKvHandle handle,
@@ -164,6 +194,8 @@ public:
     // Host callback ownership may precede the full Releasing/Ready transition
     // while GPU-only or metadata references still protect this generation.
     bool is_host_releasing(HistoricalKvHandle handle) const noexcept;
+    // Query from the corresponding callback only; grants no reference itself.
+    bool is_resource_releasing(HistoricalKvHandle handle, HostResource resource) const noexcept;
     // True only after the exact generation's release callback completed and
     // its slot crossed to Ready. A later generation also proves completion.
     // The repository ID prevents equal-looking handles from another owner
@@ -209,6 +241,13 @@ public:
 
 private:
     friend class HistoricalKvGc;
+    std::optional<Lease> begin_write_impl(uint64_t logical_id, uint64_t original_begin,
+        uint32_t valid_tokens, uint64_t birth_seq, uint64_t payload_bytes,
+        ReleaseCallback release, ResourceRelease resources);
+    std::optional<Lease> begin_reserved_write_impl(Reservation & reservation,
+        uint64_t logical_id, uint64_t original_begin, uint32_t valid_tokens,
+        uint64_t birth_seq, uint64_t payload_bytes,
+        ReleaseCallback release, ResourceRelease resources);
     bool claim_gc_owner() noexcept;
     void release_gc_owner() noexcept;
     std::optional<Lease> acquire_kind(HistoricalKvHandle, LeaseKind, uint32_t allowed_phases);

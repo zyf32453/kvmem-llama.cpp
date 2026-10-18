@@ -92,7 +92,7 @@ private:
     std::unique_ptr<ReservationCleanup> reservation_;
     void release_unused() noexcept;
     bool complete(bool cancelled);
-    std::vector<HistoricalKvRepository::ReleaseCallback> callbacks_;
+    std::vector<HistoricalKvRepository::ResourceRelease> callbacks_;
     std::vector<HistoricalKvRepository::Lease> writers_;
     std::vector<HistoricalKvShadowDirectory::Producer> producers_;
     std::vector<HistoricalKvHandle> handles_;

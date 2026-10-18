@@ -709,7 +709,121 @@ static void test_host_payload_releases_before_gpu_identity() {
           "last GPU owner did not allow full Ready");
 }
 
+static void test_mean_and_kv_release_independently() {
+    using Repo = HistoricalKvRepository;
+    using Resource = Repo::HostResource;
+    HistoricalKvRawStore store({2, 4, 2, 3, 1, {}}, 1);
+    Repo repo(1);
+    HistoricalKvHandle previous{};
+    for (bool hold_mean : {true, false}) {
+        auto prepared = store.prepare_payload(4);
+        const auto total = prepared.payload_bytes();
+        const auto retained = hold_mean ? prepared.mean_k_bytes() : prepared.packed_kv_bytes();
+        check(total == 48 && retained == (hold_mean ? 8 : 40), "resource accounting fixture differs");
+        unsigned kv_calls = 0, mean_calls = 0, metadata_calls = 0;
+        uint64_t physically_released = 0;
+        const auto early = hold_mean ? Resource::PackedKv : Resource::MeanK;
+        Repo::ResourceRelease release{[&](const HistoricalKvHandle & handle, Resource resource) {
+            ++(resource == Resource::PackedKv ? kv_calls : resource == Resource::MeanK ? mean_calls : metadata_calls);
+            const auto result = store.release_resource(repo, handle, resource);
+            physically_released += result.physical_payload_bytes;
+            // Lose the first acknowledgement after the actual physical release.
+            // Retrying must not destroy/rebate that resource twice.
+            if (resource == early && (hold_mean ? kv_calls : mean_calls) == 1) return false;
+            if (resource == Resource::Metadata && metadata_calls == 1) return false;
+            return callback_succeeded(result.code);
+        }, prepared.packed_kv_bytes(), prepared.mean_k_bytes()};
+        auto writer = repo.begin_write(0, 0, 4, 1, total, std::move(release));
+        const auto handle = writer->handle();
+        check(store.install_payload(*writer, handle, 0, 4, prepared), "split payload installation failed");
+        if (previous.generation) {
+            check(handle.generation > previous.generation &&
+                  store.release_resource(repo, previous, Resource::PackedKv).code == HistoricalKvRawStore::ReleaseCode::Stale,
+                  "old resource callback reached a new allocation");
+        }
+        for (uint32_t layer = 0; layer < 2; ++layer)
+            check(store.write_layer(*writer, handle, layer, std::vector<uint8_t>(8, 7),
+                  std::vector<uint8_t>(12, 9), {8.f}, 4), "split fixture write failed");
+        check(store.publish_complete(repo, *writer, handle), "split fixture publication failed");
+        auto held = hold_mean ? repo.acquire_mean_k(handle) : repo.acquire_packed_kv_transfer(handle);
+        auto gpu = repo.acquire_gpu(handle);
+        float mean = 0;
+        check(held && gpu && !held->has_host_access() && !store.read_layer(*held, handle, 0) &&
+              (hold_mean ? !store.read_packed_kv(*held, handle, 0) :
+                           !store.copy_mean_k(*held, handle, 0, &mean, 1)),
+              "narrow resource permission acquired unrelated data");
+        writer.reset();
+        repo.retire(handle);
+        std::atomic<bool> reader_started{false}, stop_reader{false}, reader_ok{true};
+        std::thread reader([&] {
+            while (!stop_reader.load()) {
+                if (hold_mean) {
+                    float value = 0;
+                    if (!store.copy_mean_k(*held, handle, 1, &value, 1) || value != 2.f) reader_ok = false;
+                } else {
+                    auto copy = store.read_packed_kv(*held, handle, 1);
+                    if (!copy || copy->packed_k.size() != 8 || copy->packed_k[0] != 7 ||
+                        copy->packed_v.size() != 12 || copy->packed_v.back() != 9) reader_ok = false;
+                }
+                reader_started = true;
+            }
+        });
+        while (!reader_started.load()) std::this_thread::yield();
+        Repo::ReclaimResult first, second;
+        std::thread worker([&] {
+            DenyPackedAllocations deny;
+            first = repo.try_reclaim(handle);
+            second = repo.try_reclaim(handle);
+        });
+        worker.join();
+        stop_reader = true;
+        reader.join();
+        check(reader_ok, "concurrent resource release corrupted the unrelated reader");
+        const auto meta = repo.inspect(handle);
+        check(first == Repo::ReclaimResult::Retry && second == Repo::ReclaimResult::ResourceReleased &&
+              store.allocated_payload_bytes() == retained && store.inspect(repo, handle)->payload_bytes == retained &&
+              meta && meta->payload_bytes == retained && !meta->host_released &&
+              meta->packed_kv_released == hold_mean && meta->mean_k_released != hold_mean &&
+              !repo.ready_count() && !repo.acquire_mean_k(handle) && !repo.acquire_packed_kv(handle),
+              "resource release waited for an unrelated reader or returned full credit");
+        for (uint32_t layer = 0; layer < 2; ++layer) {
+            if (hold_mean) {
+                check(store.copy_mean_k(*held, handle, layer, &mean, 1) && mean == 2.f,
+                      "KV release changed the retained Mean-K");
+            } else {
+                auto copy = store.read_packed_kv(*held, handle, layer);
+                check(copy && copy->packed_k == std::vector<uint8_t>(8, 7) &&
+                      copy->packed_v == std::vector<uint8_t>(12, 9) && copy->mean_k_sum.empty(),
+                      "Mean-K release changed retained packed K/V");
+            }
+        }
+        held.reset();
+        {
+            DenyPackedAllocations deny;
+            check(repo.try_reclaim(handle) == Repo::ReclaimResult::HostReleased, "Host did not release before GPU");
+        }
+        check(!store.allocated_payload_bytes() && !store.inspect(repo, handle) && !metadata_calls &&
+              !repo.ready_count() && physically_released == total,
+              "Host completion retained bytes or freed metadata too soon");
+        bool denied = false;
+        try { auto premature = store.prepare_payload(4); } catch (const std::bad_alloc &) { denied = true; }
+        check(denied && !repo.try_reserve_slots(1), "partial release allowed a new physical allocation");
+        gpu.reset();
+        {
+            DenyPackedAllocations deny;
+            check(repo.try_reclaim(handle) == Repo::ReclaimResult::Retry && !repo.ready_count() &&
+                  !repo.reclaim_completed(handle, repo.repository_id()), "metadata retry prematurely published Ready");
+            check(repo.try_reclaim(handle) == Repo::ReclaimResult::Complete, "last reference did not release metadata");
+        }
+        check(metadata_calls == 2 && kv_calls == (hold_mean ? 2u : 1u) &&
+              mean_calls == (hold_mean ? 1u : 2u) && physically_released == total && repo.ready_count() == 1,
+              "resource retry doubled release or lost a callback");
+        previous = handle;
+    }
+}
+
 int main() {
+    test_mean_and_kv_release_independently();
     test_host_payload_releases_before_gpu_identity();
     test_exact_generation_ram_reclamation();
     test_incremental_unaligned_tail_retired_while_writing();

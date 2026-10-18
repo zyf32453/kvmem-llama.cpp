@@ -416,12 +416,21 @@ HistoricalKvShadowDirectory::Access HistoricalKvShadowDirectory::acquire(
         entry.repository->repository_id() != entry.repository_id) return {};
     // Do not inspect then read: retirement can commit between those actions.
     // The repository admits the lease atomically against the exact handle.
-    auto lease = kind == HistoricalKvRepository::LeaseKind::Read
-        ? entry.repository->acquire_read(entry.binding.handle)
-        : entry.repository->acquire_transfer(entry.binding.handle);
+    auto lease = kind == HistoricalKvRepository::LeaseKind::Read ? entry.repository->acquire_read(entry.binding.handle) :
+        kind == HistoricalKvRepository::LeaseKind::MeanKRead ? entry.repository->acquire_mean_k(entry.binding.handle) :
+        kind == HistoricalKvRepository::LeaseKind::PackedKvTransfer ? entry.repository->acquire_packed_kv_transfer(entry.binding.handle) :
+        entry.repository->acquire_transfer(entry.binding.handle);
     if (!lease) return {};
     return {Access::Status::Acquired, std::move(*lease),
             entry.storage};
+}
+
+HistoricalKvShadowDirectory::Access HistoricalKvShadowDirectory::acquire_packed_kv_transfer(uint32_t block_id) const {
+    return acquire(block_id, HistoricalKvRepository::LeaseKind::PackedKvTransfer);
+}
+
+HistoricalKvShadowDirectory::Access HistoricalKvShadowDirectory::acquire_mean_k(uint32_t block_id) const {
+    return acquire(block_id, HistoricalKvRepository::LeaseKind::MeanKRead);
 }
 
 bool HistoricalKvShadowDirectory::unbind_retired(uint32_t block_id) {

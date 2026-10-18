@@ -132,16 +132,16 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
         result->producers_.reserve(static_cast<size_t>(required));
         result->callbacks_.reserve(static_cast<size_t>(required));
         for (uint64_t i = 0; i < required; ++i) {
-            result->callbacks_.emplace_back([
+            result->callbacks_.push_back({[
                 weak = std::weak_ptr<HistoricalKvRepository>(result->repository_),
-                storage = result->storage_](HistoricalKvHandle handle) {
+                storage = result->storage_](HistoricalKvHandle handle, HistoricalKvRepository::HostResource resource) {
                 const auto owner = weak.lock();
                 if (!owner) return false;
-                const auto released = storage->release(*owner, handle).code;
+                const auto released = storage->release_resource(*owner, handle, resource).code;
                 return released == HistoricalKvRawStore::ReleaseCode::Released ||
                        released == HistoricalKvRawStore::ReleaseCode::AlreadyReleased ||
                        released == HistoricalKvRawStore::ReleaseCode::Absent;
-            });
+            }, result->reservation_->ram->payload(i).packed_kv_bytes(), result->reservation_->ram->payload(i).mean_k_bytes()});
         }
         result->domain_->last_use_sequence_ += required;
         result->domain_->request_claimed_ = true;
@@ -206,16 +206,16 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
         // Prepare callable allocations before publishing the session. Weak
         // repository capture avoids a repository -> callback -> owner cycle.
         for (uint64_t i = 0; i < required; ++i) {
-            result->callbacks_.emplace_back([
+            result->callbacks_.push_back({[
                 weak = std::weak_ptr<HistoricalKvRepository>(result->repository_),
-                storage = result->storage_](HistoricalKvHandle handle) {
+                storage = result->storage_](HistoricalKvHandle handle, HistoricalKvRepository::HostResource resource) {
                 const auto owner = weak.lock();
                 if (!owner) return false;
-                const auto released = storage->release(*owner, handle).code;
+                const auto released = storage->release_resource(*owner, handle, resource).code;
                 return released == HistoricalKvRawStore::ReleaseCode::Released ||
                        released == HistoricalKvRawStore::ReleaseCode::AlreadyReleased ||
                        released == HistoricalKvRawStore::ReleaseCode::Absent;
-            });
+            }, result->reservation_->ram->payload(i).packed_kv_bytes(), result->reservation_->ram->payload(i).mean_k_bytes()});
         }
         return result;
     } catch (const std::bad_alloc &) {

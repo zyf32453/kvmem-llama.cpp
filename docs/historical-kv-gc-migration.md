@@ -639,12 +639,30 @@ server 现可显式使用 `--kvmem-historical-capture N` 和 `--kvmem-historical
 
 最终宿主 CTest **27/27**，相关 ASan/UBSan **7/7**、TSan **7/7** 通过（六个核心组件加一个 legacy 桥接组件；sanitizer 不覆盖 CUDA adapter）。delete 模式真实 HTTP 回归 **33/33** 断言通过，包括 JSON/SSE、精确前缀延续、容量拒绝、reset、prefill/生成取消及后续压力请求。四次压力请求均 `committed=14`、完成边界 `reclaimed=13`，policy/worker failure 为零。本轮这些普通 HTTP 请求的 `host_released_early=0`；提前释放的受控 GPU 用例已证明可行，但没有据此声称自然请求的峰值内存或延迟已经改善。HTTP 证据位于 `/tmp/kvmem-resource-split-http-delete/`，本轮原始日志与响应备份到本地 `build-local/historical-resource-split-validation/`。
 
+### Packed K/V、Mean-K 与存储记录的独立回收（2026-10-18）
+
+上一节把 Host bundle 与 GPU/身份分离，但一个只需要 Mean-K 的评分 reader 仍会留住全部 packed K/V。本轮增加 `PackedKvRead`、`PackedKvTransfer` 和 `MeanKRead` 许可，分别对应只读 K/V、搬运 K/V 和读取评分均值；原有普通 read/transfer/execution/writer 保留完整 Host 权利。退休关闭所有新的资源申请，窄许可不能读另一类资源，也不能在退休后升级。阶段和四类引用计数仍在同一原子 control word 中提交，每类计数上限 32767，饱和时明确拒绝，避免溢出到其它计数或阶段位。
+
+新增 `ResourceRelease` 回调协议，按 packed K/V、Mean-K、最后的存储 metadata 分别确认完成。一个资源的失败不妨碍其它已满足条件的资源尝试释放；成功分量不重复执行，失败分量以原句柄幂等重试。实际存储每层交换出待释放向量，在槽锁外析构，之后才扣除真实容量；`allocated_payload_bytes` 反映剩余向量容量。K/V 和 Mean-K 都释放后，只要旧 GPU/身份引用仍在，存储记录的 allocation 信用继续占用，repository 也不会变成 Ready。metadata 仅在全部旧引用结束后释放；完成确认丢失时同样可以重试。
+
+生产 capture session 在请求接纳时预备分资源回调及实际 K/V/Mean-K bytes，追加时只移动既有回调与 payload。目录增加窄许可入口，适配器 `score_retrieval` 使用 Mean-K 许可，stage-in 使用 packed K/V transfer 许可并只复制 K/V，不再顺带复制 Mean-K。legacy `RawKvStore` 的整块回调保留旧等待条件。新增 `partial_resource_releases` 统计记录 Host bundle 尚未全部释放时的进展；该值不作为 Ready 容量或可用预约信用。
+
+宿主新增两种对称情形：保留评分 reader 时释放 K/V，保留 K/V transfer 时释放 Mean-K；读取线程与回收线程并发，逐层校验仍被保留的数据。测试还覆盖资源或 metadata 已物理释放但确认丢失后的重试、旧代 callback 不影响新代、禁止普通 C++ 分配时回收、32767 个引用的计数边界、退休与三类 Host 许可并发，以及 manager 的 Ready/pending 守恒。首次构建暴露旧 capture 测试 hook 仍接受整块回调签名，已改为仅在 packed K/V 释放前设置原有屏障，没有改变生产取消/完成语义。
+
+宿主 CTest **27/27**、相关 ASan/UBSan **8/8** 和 TSan **8/8** 通过；补充的 metadata 确认丢失用例在三套构建中分别再通过。真实模型的多代 CUDA capture 用例改为分资源回调，在 **48 个注意力层**逐层验证：保留 Mean-K 时剩余 **98,304 bytes**，保留 packed K/V 时剩余 **3,145,728 bytes**，其余 Host payload 已释放，保留数据和 GPU 副本字节不变。这些是实际 payload 容量，不是 RSS。先前“GPU 事件未完成时 Host 可先释放”的用例也继续通过。
+
+最终完整模型 **35/35**、reset/cancel、36 次/48 次连续请求和 backend guard 通过；两条长轨迹本轮分别回收 69/191 块。最终日志为 `/tmp/kvmem-mean-split-model-final.log`；早期基线为 `/tmp/kvmem-mean-split-model-initial.log`。本轮未重现先前的偶发 CUDA 非法访问，其根因仍未解决。
+
+受限 server 的 delete HTTP 回归 **33/33** 通过，证据在 `/tmp/kvmem-mean-split-http-delete/`。四次压力请求各 `committed=14`、完成边界 `reclaimed=13`，policy/worker failure 为零；prefill 取消时剩余 321/385 个输入 token，生成取消时输入已完成。普通 HTTP 用例没有触发组件单独释放，`partial_resource_releases=0`，不据此声明实际请求内存峰值或速度改善。命令、响应、构建与 sanitizer 日志备份到本地 `build-local/historical-mean-split-validation/`。
+
+**本轮边界：** 写入 producer 及其任务仍持完整 Host writer，避免遗漏未来写入依赖；还未拆成每个生产分量独立的 writer 权利。K 与 V 在 packed K/V 内仍共同释放。NVMe、pinned cache、MTP 也未因此获得支持。虽然 scorer/stage-in 的接口已使用窄许可，自动 historical capture 的公开入口仍限制为 recency/RAM，不能把接口测试报告为完整 retrieval 生产接入或吞吐改善。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。server 已接入单 lane 的有限预约、精确前缀延续、新会话与健康取消；仍需扩展缓存分支、设备故障恢复和其它生产路径。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
-2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host bundle 与 GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放；还需完成 Mean-K、NVMe 等资源的独立依赖及 pinned cache 槽位失效，并扩展到其余入口。
+2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 读取/回收也已独立。还需细化各生产分量的 writer、NVMe 等资源依赖及 pinned cache 槽位失效，并扩展到其余入口。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 仍拒绝分段 streaming 预约；server 的 SSE 按有限输出整请求预约。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI/server 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到其余生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。

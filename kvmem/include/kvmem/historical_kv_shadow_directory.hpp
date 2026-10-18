@@ -167,6 +167,8 @@ public:
     // A failed managed admission must never fall back to a legacy read.
     Access acquire_read(uint32_t block_id) const;
     Access acquire_transfer(uint32_t block_id) const;
+    Access acquire_packed_kv_transfer(uint32_t block_id) const;
+    Access acquire_mean_k(uint32_t block_id) const;
 
     // This does NOT call retire. A separately coordinated owner must first
     // retire the exact generation and ensure all production reads are gated.

@@ -36,6 +36,10 @@ struct HistoricalKvBlockMeta {
     // release sets payload_bytes to zero but does not imply a Ready slot.
     uint32_t host_references = 0;
     bool host_released = false;
+    uint32_t packed_kv_references = 0;
+    uint32_t mean_k_references = 0;
+    bool packed_kv_released = false;
+    bool mean_k_released = false;
 };
 
 // The manager owns this immutable-for-one-round, safely sampled observation.

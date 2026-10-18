@@ -16,7 +16,7 @@ namespace kvmem {
 // physical allocation address, never original_begin / a block size. The
 // repository owns admission and lifetime: callers must hold its writer/read/
 // transfer lease until their use of a payload is complete. In particular,
-// release() belongs in the repository's background release callback only.
+// release()/release_resource() belong in repository background callbacks only.
 // That callback must keep this store alive until the repository has drained.
 struct HistoricalKvRawStoreConfig {
     uint32_t n_layer = 0;
@@ -47,6 +47,8 @@ public:
         PreparedPayload & operator=(const PreparedPayload &) = delete;
         explicit operator bool() const noexcept;
         uint64_t payload_bytes() const noexcept;
+        uint64_t packed_kv_bytes() const noexcept;
+        uint64_t mean_k_bytes() const noexcept;
         uint32_t token_capacity() const noexcept;
     private:
         friend class HistoricalKvRawStore;
@@ -163,6 +165,10 @@ public:
     std::optional<LayerSnapshot> read_layer(
         const HistoricalKvRepository::Lease & reader,
         HistoricalKvHandle handle, uint32_t layer) const;
+    // Copies K/V only; requires no Mean-K dependency and never returns it.
+    std::optional<LayerSnapshot> read_packed_kv(
+        const HistoricalKvRepository::Lease & reader,
+        HistoricalKvHandle handle, uint32_t layer) const;
     // Scoring copies only the normalized mean, never the large packed K/V
     // vectors. The admitted reader must cover the entire call.
     bool copy_mean_k(const HistoricalKvRepository::Lease & reader,
@@ -183,6 +189,11 @@ public:
     // a failed reserve); Busy means another release is still finishing.
     ReleaseResult release(const HistoricalKvRepository & repository,
                           HistoricalKvHandle handle) noexcept;
+    // Independent resource disposal with per-component idempotence. Physical
+    // bytes return after destruction outside slot.mu; the allocation/header
+    // credit returns only in Metadata after all references have drained.
+    ReleaseResult release_resource(const HistoricalKvRepository & repository,
+        HistoricalKvHandle handle, HistoricalKvRepository::HostResource resource) noexcept;
     // Includes private PreparedPayload allocations as well as installed data.
     uint64_t allocated_payload_bytes() const noexcept;
     uint32_t capacity() const noexcept;
@@ -207,6 +218,10 @@ private:
         uint32_t valid_tokens = 0;
         uint32_t written_layers = 0;
         uint64_t payload_bytes = 0;
+        uint64_t packed_kv_bytes = 0;
+        uint64_t mean_k_bytes = 0;
+        bool packed_kv_released = false;
+        bool mean_k_released = false;
         std::shared_ptr<Accounting> accounting;
         bool payload_accounted = false;
         std::vector<Layer> layers;
