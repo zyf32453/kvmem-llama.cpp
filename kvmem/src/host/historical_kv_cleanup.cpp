@@ -51,8 +51,9 @@ HistoricalKvCleanup::~HistoricalKvCleanup() {
     worker_.join();
 }
 HistoricalKvCleanup & HistoricalKvCleanup::process() {
-    // At most 32 admitted domains if each still holds both its reservation
-    // and domain disposal cells. Reuse occurs only after CPU destruction.
+    // A production adapter domain may hold three cells (domain metadata,
+    // request-private RAM, adapter teardown), so 64 cells admit at most 21
+    // such domains concurrently. Reuse follows CPU destruction only.
     static HistoricalKvCleanup service(64);
     return service;
 }

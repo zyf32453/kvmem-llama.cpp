@@ -31,7 +31,7 @@ struct llama_memory_params;
 struct ggml_tensor;
 class llama_memory_recurrent;
 class llama_memory_kvmem_mtp;
-namespace kvmem { class HistoricalKvCaptureSession; class HistoricalKvActiveSet; class HistoricalKvGc; }
+namespace kvmem { class HistoricalKvCaptureSession; class HistoricalKvCaptureDomain; class HistoricalKvActiveSet; class HistoricalKvGc; }
 
 // Bounded block-slot pool over a llama_kv_cache.
 //
@@ -605,6 +605,7 @@ private:
     struct HistoricalCpuCleanup;
     kvmem::HistoricalKvCleanup::Ticket historical_cleanup_ticket_;
     std::unique_ptr<HistoricalCpuCleanup> historical_cleanup_;
+    std::shared_ptr<kvmem::HistoricalKvCaptureDomain> historical_domain_;
     std::unique_ptr<kvmem::HistoricalKvCaptureSession> historical_capture_;
     // One decode context at a time. Prepared before capture admission and
     // reused by successful historical init_batch calls; failure is terminal.

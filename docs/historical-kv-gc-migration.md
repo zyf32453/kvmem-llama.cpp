@@ -561,7 +561,9 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 
 新增宿主用例用 **2 个物理槽位连续完成 24 个有界请求**，累计追加 96 token，即 12 倍于这两个槽位的 8-token 容量。测试逐次完成真实 RAM payload 写入/发布、请求结束、精确 retire/reclaim、下一请求接纳，并在禁止前台 C++ 分配的区间验证实际追加，同时检查固定表容量、旧 handle 不复活、仓库在请求结束后保持开放。另用单槽位验证未执行计划阻止 `admit`，取消准备后 RAM/元数据归还，Live 槽位和仍有执行租约的 Retired 槽位不能作为接纳信用，完全回收后才允许新代写入。隔离远程宿主 CTest **27/27**，相关 ASan/UBSan **4/4** 和 TSan **4/4** 均通过；最终增补的零分配用例亦分别通过 ASan/UBSan 与 TSan 复验。小容量清理队列在旧请求私有析构尚未完成时会拒绝新预约；测试等后台清理完成后再继续，这符合非阻塞接纳的背压契约。
 
-此入口还**没有接入 llama 适配器或 server**；真实模型仍走原单请求 capture owner，因此这项宿主级 12 倍轨迹不是生产多请求 P4 验收。适配器接入时还需把域的私有准备/安装与 GPU、cell、图等请求资源组成完整的接纳与失败回滚，并逐项升级跨请求缓存的物理 ID。本轮 CUDA 构建及用户提供的真实 GGUF 模型 **35/35** 场景和 backend guard 通过，日志 `/tmp/kvmem-domain-final-model.log`；这只检验现有单请求路径无回归。
+此轮先把 llama 适配器的**首个**受限请求接到持久域：域和请求 RAM 都在准备阶段保持私有，与现有 GPU、cell、图和输入 workspace 一起检查，最后由请求 `admit` 安装元数据；适配器在关闭时把域与 capture、runtime、GC 一同交给 CPU 清理对象，保证 worker 与销毁顺序。真实模型回归增加断言，确认失败准备不发布域，成功请求的域与 capture 指向同一仓库，`finish` 后仓库仍开放。最终 GGUF/CUDA **35/35** 场景和 backend guard 通过，原始日志为 `/tmp/kvmem-domain-adapter-final-model.log`。recency/RAM delete CLI 真实推理完成 356-token 输入、8-token 输出，`proposed=committed=reclaimed=8`、policy/worker failure 为 0，GPU 延期/归还各 8 次；日志 `/tmp/kvmem-domain-adapter-delete.log`。此外，CPU 清理队列固定 64 格；适配器域最多同时占用域元数据、请求私有 RAM、适配器销毁三个格位，因此最坏同时接纳量不超过 21 个域，耗尽时拒绝新请求而不等待。
+
+适配器目前仍拒绝第二次 `begin`、cached-turn continuation、reset/truncate，server 也未调用多请求入口；因此宿主级 12 倍轨迹还不是生产多请求 P4 验收。下一步需复用或重新预约每次请求的 GPU/cell/图与 capture arena，保留正确的 active/GC 状态，处理跨请求缓存中的物理 ID，再运行真实模型的连续请求长轨迹。已接纳请求的其余构图和后端资源也仍未全部纳入 P3 预算。
 
 ## 剩余生产接入与完整验收
 

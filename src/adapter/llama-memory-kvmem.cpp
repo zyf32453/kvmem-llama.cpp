@@ -1016,6 +1016,7 @@ llama_memory_kvmem::llama_memory_kvmem(
 struct llama_memory_kvmem::HistoricalCpuCleanup final : kvmem::HistoricalKvCleanup::Task {
     std::unique_ptr<kvmem::KvMemRuntime> runtime;
     std::unique_ptr<kvmem::RawKvStore> raw;
+    std::shared_ptr<kvmem::HistoricalKvCaptureDomain> domain;
     std::unique_ptr<kvmem::HistoricalKvCaptureSession> capture;
     std::unique_ptr<kvmem::HistoricalKvActiveSet> active;
     HistoricalActiveWorkspace active_workspace;
@@ -1106,6 +1107,7 @@ llama_memory_kvmem::~llama_memory_kvmem() {
         auto & cleanup = *historical_cleanup_;
         cleanup.runtime = std::move(runtime_);
         cleanup.raw = std::move(raw_);
+        cleanup.domain = std::move(historical_domain_);
         cleanup.capture = std::move(historical_capture_);
         cleanup.active = std::move(historical_active_);
         cleanup.active_workspace = std::move(historical_active_workspace_);
@@ -1125,7 +1127,7 @@ llama_memory_kvmem::~llama_memory_kvmem() {
 
 bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t input_tokens,
         uint64_t max_output_tokens, uint64_t max_appends) {
-    if (historical_capture_ || historical_batch_context_storage_ || method_ != 0 || multi_gpu_ || mtp_ || recr_ || v_trans_ ||
+    if (historical_capture_ || historical_domain_ || historical_batch_context_storage_ || method_ != 0 || multi_gpu_ || mtp_ || recr_ || v_trans_ ||
         replay_ || !kv_ || raw_cfg_.nvme_bytes || rt_cfg_.cpu_bytes || rt_cfg_.nvme_bytes ||
         raw_cfg_.historical_gc_attention_layers.empty() ||
         !harvest_v_jobs_.empty() || !harvest_v_pending_.jobs.empty() ||
@@ -1171,7 +1173,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             return false;
         }
         auto cleanup = std::make_unique<HistoricalCpuCleanup>();
-        auto session = kvmem::HistoricalKvCaptureSession::try_prepare(*runtime_, cfg, capacity, demand);
+        auto domain = kvmem::HistoricalKvCaptureDomain::try_prepare(*runtime_, cfg, capacity);
+        auto session = kvmem::HistoricalKvCaptureSession::try_prepare_next(domain, demand);
         if (!session) {
             LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM or CPU cleanup capacity\n");
             return false;
@@ -1266,6 +1269,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         harvest_v_job_limit_ = KVMEM_CAPTURE_MAX_JOBS;
         historical_cleanup_ticket_ = std::move(*cleanup_ticket);
         historical_cleanup_ = std::move(cleanup);
+        historical_domain_ = std::move(domain);
         historical_capture_ = std::move(session);
         const auto workspace = kvmem_capture_workspace_status();
         const auto cell_nodes = kv_->get_cells(0).index_status();

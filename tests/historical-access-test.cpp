@@ -297,6 +297,14 @@ struct kvmem_transfer_test_access {
         return true;
     }
     static bool capture_failed(const llama_memory_kvmem & mem) { return mem.historical_capture_->failed(); }
+    static bool capture_domain_bound(const llama_memory_kvmem & mem) {
+        return mem.historical_domain_ && mem.historical_capture_ &&
+               mem.historical_capture_->domain() == mem.historical_domain_ &&
+               mem.historical_domain_->repository() == mem.historical_capture_->repository();
+    }
+    static bool capture_domain_unpublished(const llama_memory_kvmem & mem) {
+        return !mem.historical_domain_;
+    }
     static bool append_after_failure(llama_memory_kvmem & mem) { return mem.prepare_working_set(1); }
     static uint64_t source_readers(const llama_memory_kvmem & mem) {
         uint64_t total = 0;
@@ -1605,6 +1613,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
                 !failed.pinned_bytes && !failed.events && !failed.host_bytes && cleanup.occupied() == 1 &&
                 mem.runtime().store().allocated_bytes() == table_bytes &&
                 !mem.runtime().historical_shadow_directory().size() &&
+                kvmem_transfer_test_access::capture_domain_unpublished(mem) &&
                 !mem.get_kv()->get_cells(0).index_status().reserved &&
                 kvmem_transfer_test_access::capture_arena_unpublished(mem) &&
                 !kvmem_transfer_test_access::slot_workspace(mem).bytes &&
@@ -1615,6 +1624,8 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         std::puts("PASS request prepare rollback: CPU cleanup paused, GPU workspace returned, no metadata or cleanup credit retained");
     }
     require(llama_kvmem_historical_capture_begin(ctx, 12, 160, 3, 7), "real request capture admission failed");
+    require(kvmem_transfer_test_access::capture_domain_bound(mem),
+            "real request did not bind its capture owner to the persistent domain");
     const auto backend_workspace = ctx->get_historical_backend_status();
     require(backend_workspace.scheduler && backend_workspace.output_buffer &&
             !backend_workspace.needs_scheduler_reserve &&
@@ -2068,6 +2079,9 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     } else {
         require(llama_kvmem_historical_capture_finish(), "real managed request failed completion verification");
     }
+    require(kvmem_transfer_test_access::capture_domain_bound(mem) &&
+            !kvmem_transfer_test_access::capture_repository(mem)->closed(),
+            "request completion closed its persistent historical repository");
     bool cold = false;
     for (const auto & expected : saved) {
         if (expected.id == retired_during_request) continue;
