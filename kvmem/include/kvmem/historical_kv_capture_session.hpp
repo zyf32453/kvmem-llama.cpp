@@ -6,6 +6,8 @@
 
 namespace kvmem {
 
+class HistoricalKvCaptureDomain;
+
 // A finite, single-request capture owner. The caller may attach one GC
 // manager to its repository after admission. It connects actual appends to
 // the RAM reservation and producer handoff. This is NOT
@@ -20,6 +22,14 @@ public:
     static std::unique_ptr<HistoricalKvCaptureSession> try_prepare(
         KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
         uint32_t capacity, const HistoricalKvRamDemand & demand,
+        HistoricalKvCleanup * cleanup = nullptr);
+    // Reserve one bounded request against a persistent domain. The first
+    // request can be prepared while its domain is private; admit() installs
+    // that domain after the caller prepares its other resources. Only one
+    // request may be prepared/active in a domain at a time.
+    static std::unique_ptr<HistoricalKvCaptureSession> try_prepare_next(
+        std::shared_ptr<HistoricalKvCaptureDomain> domain,
+        const HistoricalKvRamDemand & demand,
         HistoricalKvCleanup * cleanup = nullptr);
     bool admit() noexcept;
     bool admitted() const noexcept { return admitted_; }
@@ -59,7 +69,8 @@ public:
     // Keeping these owners alive also keeps late release callbacks' target alive.
     std::shared_ptr<HistoricalKvRepository> repository() const noexcept { return repository_; }
     std::shared_ptr<HistoricalKvRawStore> storage() const noexcept { return storage_; }
-    uint64_t next_use_sequence() noexcept { return ++last_use_sequence_; }
+    std::shared_ptr<HistoricalKvCaptureDomain> domain() const noexcept { return domain_; }
+    uint64_t next_use_sequence() noexcept;
     uint64_t input_remaining() const noexcept { return input_remaining_; }
     uint64_t output_remaining() const noexcept { return output_remaining_; }
     uint64_t appends_remaining() const noexcept { return appends_remaining_; }
@@ -68,6 +79,7 @@ private:
     friend struct HistoricalKvCaptureSessionTestAccess;
     explicit HistoricalKvCaptureSession(KvMemRuntime & runtime);
     KvMemRuntime & runtime_;
+    std::shared_ptr<HistoricalKvCaptureDomain> domain_;
     std::shared_ptr<HistoricalKvRepository> repository_;
     std::shared_ptr<HistoricalKvRawStore> storage_;
     struct ReservationCleanup;
@@ -80,9 +92,51 @@ private:
     std::vector<HistoricalKvHandle> handles_;
     uint64_t input_remaining_ = 0, output_remaining_ = 0, appends_remaining_ = 0;
     uint64_t last_use_sequence_ = 0;
+    uint64_t birth_start_ = 0;
+    uint64_t expected_revision_ = 0;
     uint32_t expected_rows_ = 0, expected_blocks_ = 0, reserved_blocks_ = 0;
     uint32_t live_blocks_at_finish_ = 0;
     bool input_ = true, failed_ = false, finished_ = false, admitted_ = false;
+};
+
+// Runtime-scoped ownership of the physical pool and bounded metadata table.
+// A request returns only its private unused RAM; installed history and its
+// repository remain available to later requests until the domain is closed.
+// The runtime and cleanup service must outlive this object. All foreground
+// methods are serialized by their caller; the GC may reclaim concurrently.
+class HistoricalKvCaptureDomain {
+public:
+    // Prepare the repository and full physical table privately. Compose this
+    // with the adapter's other resources, then commit with admit().
+    static std::shared_ptr<HistoricalKvCaptureDomain> try_prepare(
+        KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
+        uint32_t capacity, HistoricalKvCleanup * cleanup = nullptr);
+    bool admit() noexcept;
+    // Host-only convenience for callers with no other admission resources.
+    static std::shared_ptr<HistoricalKvCaptureDomain> try_create(
+        KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
+        uint32_t capacity, HistoricalKvCleanup * cleanup = nullptr);
+    ~HistoricalKvCaptureDomain();
+    HistoricalKvCaptureDomain(const HistoricalKvCaptureDomain &) = delete;
+    HistoricalKvCaptureDomain & operator=(const HistoricalKvCaptureDomain &) = delete;
+    std::shared_ptr<HistoricalKvRepository> repository() const noexcept { return repository_; }
+    std::shared_ptr<HistoricalKvRawStore> storage() const noexcept { return storage_; }
+    uint32_t metadata_remaining() const noexcept;
+    void close() noexcept;
+
+private:
+    friend class HistoricalKvCaptureSession;
+    explicit HistoricalKvCaptureDomain(KvMemRuntime & runtime);
+    struct MetadataCleanup;
+    KvMemRuntime & runtime_;
+    std::shared_ptr<HistoricalKvRepository> repository_;
+    std::shared_ptr<HistoricalKvRawStore> storage_;
+    HistoricalKvCleanup::Ticket cleanup_ticket_;
+    std::unique_ptr<MetadataCleanup> cleanup_task_;
+    uint64_t next_logical_id_ = 0;
+    uint64_t last_use_sequence_ = 0;
+    bool request_claimed_ = false;
+    bool installed_ = false;
 };
 
 } // namespace kvmem

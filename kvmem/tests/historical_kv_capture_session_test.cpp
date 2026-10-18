@@ -482,6 +482,142 @@ static void reserved_metadata_reuses_reclaimed_table_slots() {
           "cyclic metadata/payload slots did not return to bounded Ready state");
 }
 
+static void persistent_domain_reuses_capacity_across_requests() {
+    KvMemRuntime runtime(runtime_config());
+    HistoricalKvCleanup cleanup(4);
+    const auto initial_bytes = runtime.store().allocated_bytes();
+    {
+        auto cancelled = HistoricalKvCaptureDomain::try_prepare(
+            runtime, storage_config(), 2, &cleanup);
+        check(cancelled && runtime.store().allocated_bytes() == initial_bytes,
+              "cancelled domain changed the runtime during preparation");
+    }
+    check(!cleanup.occupied() && !runtime.historical_shadow_directory().size(),
+          "unadmitted domain leaked its cleanup credit or table");
+    auto domain = HistoricalKvCaptureDomain::try_prepare(runtime, storage_config(), 2, &cleanup);
+    check(domain && runtime.store().allocated_bytes() == initial_bytes &&
+          !runtime.historical_shadow_directory().size(),
+          "domain private preparation changed runtime before admission");
+    allocation_budget = 0;
+    const bool installed = domain->admit();
+    allocation_budget = -1;
+    check(installed && !domain->admit(), "domain did not commit its fixed table exactly once");
+    check(domain && domain->metadata_remaining() == 2,
+          "persistent domain did not reserve its bounded table");
+    auto repository = domain->repository();
+    auto storage = domain->storage();
+    const auto table_bytes = runtime.store().allocated_bytes();
+    HistoricalKvHandle previous{};
+    uint64_t previous_use = 0;
+    for (uint32_t request = 0; request < 24; ++request) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (cleanup.occupied() > 1 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        check(cleanup.occupied() == 1, "prior request private cleanup did not drain");
+        auto session = HistoricalKvCaptureSession::try_prepare_next(
+            domain, demand(4, 0, 1), &cleanup);
+        check(session && session->reserved_blocks() == 1 && session->admit(),
+              "reclaimed Ready slot was not admitted into the next request");
+        check(!HistoricalKvCaptureSession::try_prepare_next(domain, demand(4, 0, 1), &cleanup),
+              "a second request bypassed the domain claim");
+        check(session->next_use_sequence() > previous_use,
+              "use sequence reset across request boundaries");
+        previous_use = session->next_use_sequence();
+        const auto frees_before = foreground_frees;
+        allocation_budget = 0;
+        const bool appended = session->append(4);
+        allocation_budget = -1;
+        check(appended && foreground_frees == frees_before,
+              "persistent request append allocated or freed on the foreground");
+        const auto id = runtime.store().chronological_ids().back();
+        auto task = runtime.historical_shadow_directory().find(id)->writer_context;
+        const auto handle = task->handle();
+        session->producers_captured();
+        complete(task, 4);
+        task.reset();
+        check(session->end_input() && session->finish(),
+              "persistent request did not complete its own producers");
+        session.reset();
+        check(!repository->closed() &&
+              runtime.store().block_count() <= 2 &&
+              runtime.historical_shadow_directory().size() <= 2 &&
+              runtime.store().allocated_bytes() == table_bytes &&
+              runtime.store().block_id_containing(4 * request) == static_cast<int32_t>(id),
+              "request teardown closed the domain or grew its physical table");
+        if (request)
+            check(!repository->acquire_read(previous),
+                  "recycled request reopened an old handle generation");
+        check(repository->retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+              repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
+              !storage->allocated_payload_bytes(),
+              "request block was not physically released before reuse");
+        previous = handle;
+    }
+    check(runtime.store().total_tokens() == 96 && repository->ready_count() == 2 &&
+          runtime.store().block_count() == 2,
+          "24 requests did not exceed physical capacity by twelvefold");
+    domain.reset();
+    wait_cleanup(cleanup);
+    check(repository->closed(), "persistent domain teardown left writer admission open");
+}
+
+static void persistent_domain_rejects_pending_and_live_capacity() {
+    KvMemRuntime runtime(runtime_config());
+    HistoricalKvCleanup cleanup(3);
+    auto domain = HistoricalKvCaptureDomain::try_prepare(runtime, storage_config(), 1, &cleanup);
+    check(bool(domain), "single-slot domain setup failed");
+    auto prepared = HistoricalKvCaptureSession::try_prepare_next(domain, demand(4, 0, 1), &cleanup);
+    check(bool(prepared), "initial private request reservation failed");
+    runtime.prepare_selection({});
+    check(!prepared->admit(), "request admitted across a pending selection plan");
+    runtime.discard_pending();
+    prepared.reset();
+    check(domain->repository()->ready_count() == 1 && domain->metadata_remaining() == 1,
+          "cancelled request leaked its private RAM or metadata");
+    check(!runtime.historical_shadow_directory().uses_reserved_table(),
+          "cancelled initial request installed the domain table");
+    auto session = HistoricalKvCaptureSession::try_prepare_next(domain, demand(4, 0, 1), &cleanup);
+    check(session && session->admit() && session->append(4),
+          "cancelled request prevented a later admission");
+    auto task = runtime.historical_shadow_directory().find(0)->writer_context;
+    const auto handle = task->handle();
+    session->producers_captured();
+    complete(task, 4);
+    task.reset();
+    check(session->end_input() && session->finish(), "single-slot request did not finish");
+    session.reset();
+    check(!HistoricalKvCaptureSession::try_prepare_next(domain, demand(4, 0, 1), &cleanup) &&
+          domain->repository()->ready_count() == 0,
+          "a Live slot was counted as a future reclaim credit");
+    auto execution = domain->repository()->acquire_new(handle);
+    check(bool(execution) &&
+          domain->repository()->retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          domain->repository()->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred &&
+          !HistoricalKvCaptureSession::try_prepare_next(domain, demand(4, 0, 1), &cleanup),
+          "retired slot with an execution lease was reused");
+    execution.reset();
+    check(domain->repository()->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "released execution lease did not permit exact reclaim");
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (cleanup.occupied() > 1 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    auto next = HistoricalKvCaptureSession::try_prepare_next(domain, demand(4, 0, 1), &cleanup);
+    check(next && next->admit() && next->append(4),
+          "fully reclaimed single-slot generation was not reused");
+    auto new_task = runtime.historical_shadow_directory().find(0)->writer_context;
+    const auto new_handle = new_task->handle();
+    check(!domain->repository()->acquire_read(handle) &&
+          (handle.slot != new_handle.slot || handle.generation != new_handle.generation),
+          "new request revived the old generation");
+    next->producers_captured();
+    complete(new_task, 4);
+    new_task.reset();
+    check(next->end_input() && next->finish(), "reused request did not finish");
+    next.reset();
+    domain.reset();
+    wait_cleanup(cleanup);
+}
+
 static void reserved_metadata_mixes_fresh_and_recycled_slots_atomically() {
     KvMemRuntime runtime(runtime_config());
     auto repo = std::make_shared<HistoricalKvRepository>(3);
@@ -705,6 +841,8 @@ int main() {
         wait_cleanup();
         reserved_metadata_batch_is_atomic();
         reserved_metadata_reuses_reclaimed_table_slots();
+        persistent_domain_reuses_capacity_across_requests();
+        persistent_domain_rejects_pending_and_live_capacity();
         reserved_metadata_mixes_fresh_and_recycled_slots_atomically();
         unadmitted_rollback_with_stalled_cleanup();
         unused_reservation_handoff_with_stalled_cleanup();
