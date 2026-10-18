@@ -587,6 +587,20 @@ CLI 兼容性验收也通过：recency/RAM delete 以 capacity=32、Ready low=12
 
 上述结果是**单 GPU、单 lane、文本、recency、RAM 的适配器连续请求**验收，证明所列存储和元数据可以跨请求复用；它不是 server 接入、全部 CPU/GPU 内存有界或完整 P3/P4 已完成的证明。其余构图/后端分配、reset/checkpoint、支持组合和效果对照仍在下列待办内。
 
+### 新会话接纳、取消与旧 incarnation 后台退出（2026-10-18）
+
+server 的普通会话流程会在缓存不匹配或请求取消时调用 clear/truncate/rollback；此前 historical capture 必须销毁整个 llama context 才能重置，不能直接接入这些流程。本轮新增明确的 `llama_kvmem_historical_capture_reset_begin` 入口：在同一个已准备的上下文中，先确认旧设备计算完成并结清普通采集任务，再私下准备新的 runtime、仓库域、真实 RAM 预约、active owner 和后台清理票据；全部准备成功才关闭旧 incarnation、清空 GPU cell 映射并发布从位置零开始的新请求。GPU buffer、后端图存储、固定行记录和采集 arena 继续复用。容量必须保持不变；申请过大、分配失败或清理队列无空间时拒绝，新域不会覆盖旧会话。发生执行/设备错误的上下文仍须 teardown，不能用 reset 擦掉错误。
+
+这一入口同时允许取消**健康但尚未完成输入配额**的旧请求。旧请求的未用预约交给 CPU 清理队列；旧 GC 只收到停止请求，不在前台 join。旧 CPU 读者继续持有原 handle 和原 payload，新仓库使用不同 incarnation，因此旧句柄不能取得新会话的读取或执行权。旧 runtime、仓库、payload store、active 和 GC 保存在后台清理对象里，直到旧 GC 退出且所有 lease/预约都释放后才析构。新域默认 GC off，调用方须在首个 decode 前显式启动所选策略；server 参数和自动配置接线尚未完成。
+
+新增 `HistoricalKvRepository::cleanup_ready`，不仅检查 operation 计数，还要求关闭后的内部 shared state 没有 lease 或 reservation owner。原因是 lease 会先递减 operation 计数，再放下自己的 shared_ptr；仅看计数归零可能使后台提前交出最后一个 owner，导致历史存储最终由前台析构。该判定仅在关闭、GC/元数据生产者停止后用于后台清理，不是策略的删除限制，也不把 CPU 读者变成“不能退休”的块。
+
+宿主新增用例验证关闭后旧读者和未用 reservation 各自阻止最终清理，最后一个 owner 退出后才允许析构。宿主 CTest **27/27**、相关 repository/capture session/cleanup 的 ASan/UBSan **3/3** 和 TSan **3/3** 通过。真实模型专门用例已验证：64-token 输入只执行 48 token 后取消；超量/清理队列不足时旧请求仍可继续；旧 GC 暂停且旧读者存活期间，新域从位置零执行并完成；旧读者内容保持一致、旧句柄不能复活；最后一个旧 lease 的释放没有触发前台 C++ delete，旧域最终由后台销毁。初次模型日志 `/tmp/kvmem-reset-model.log`。测试程序新增 `--reset` 独立选择。
+
+最终还增加了禁止 C++ 分配的准备失败用例和正常 `finish` 后再次重置的用例。server 构建成功；完整真实模型的 **35/35** 旧场景、新 reset 场景、两条连续请求长轨迹和 backend guard 均通过，日志 `/tmp/kvmem-reset-final-model.log`。本轮两条长轨迹分别回收 69/190 块，仍满足实际复用和固定容量断言。本地七个待提交源码/测试文件与隔离远程受测版本的 SHA-256 一致。本轮没有 HTTP 请求验收，不能将 server 编译成功报告为接口接线完成。
+
+这是 server 接线所需的显式会话切换机制，**不是 server 已启用 historical GC**。普通 `llama_memory_clear`、缓存前缀截断、检查点恢复、多会话绑定和设备故障恢复仍须按各自协议接线；不会因新 reset 用例通过就把它们记成已完成。新旧域在切换期间各自持有实际资源，仍需纳入完整 P3 总预算；固定清理队列只保证待退出域数量受限，不替代总 bytes 预算。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
@@ -594,7 +608,7 @@ CLI 兼容性验收也通过：recency/RAM delete 以 capacity=32、Ready low=12
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。仍需接入 server 调度、缓存命中/分支与错误取消。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
-4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
+4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；仍需把它接到 server 的取消/新会话入口，将普通 clear/truncate/关闭统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到完整生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 
 单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store、预约追加块表、宿主持久域以及受限 llama 适配器入口具备固定物理槽位跨请求复用；server 多请求生命周期、跨请求检查点引用及其余队列仍需改造。当前结果不证明生产长期总内存有界，也不证明所有已接纳生产请求都完全不依赖 GC。

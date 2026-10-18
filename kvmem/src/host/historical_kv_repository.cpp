@@ -588,6 +588,11 @@ uint64_t HistoricalKvRepository::outstanding_operations() const noexcept {
     return shared_->operations.load(std::memory_order_acquire);
 }
 
+bool HistoricalKvRepository::cleanup_ready() const noexcept {
+    return shared_->closing.load(std::memory_order_acquire) &&
+        !shared_->operations.load(std::memory_order_acquire) && shared_.use_count() == 1;
+}
+
 HistoricalKvRepository::CompletionState HistoricalKvRepository::completion_state(
         HistoricalKvHandle handle) const noexcept {
     const auto & shared = shared_;

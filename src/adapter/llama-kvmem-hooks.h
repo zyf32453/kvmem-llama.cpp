@@ -52,12 +52,22 @@ LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 // The first begin requires an empty context. After a successful finish,
 // begin may reserve another finite request at the next original position;
 // keep the same capacity and GC manager. Insufficient Ready/cleanup capacity
-// refuses entry without waiting. Reset, branching and server integration
-// remain separate lifecycle work. Call before each request's first decode.
+// refuses entry without waiting. A full reset uses reset_begin below;
+// cached-prefix rewinds, branching and server integration remain separate
+// lifecycle work. Call before each request's first decode.
 // The context must own the currently bound KVMem memory so its batch allocator is reserved
 // before the capture owner is published. end_prefill_capture
 // separates input and output quotas. finish requires llama_synchronize first.
 LLAMA_API bool llama_kvmem_historical_capture_begin(struct llama_context * ctx, uint32_t capacity,
+        uint64_t input_tokens, uint64_t max_output_tokens, uint64_t max_appends);
+// Start a new conversation at position zero, cancelling any healthy unfinished
+// request. Synchronizes its device work, prepares a distinct repository and all
+// new RAM before replacing the old domain, then reuses the prepared GPU/input
+// workspace. The capacity must stay unchanged. Preparation refusal preserves
+// the old domain; an execution/device failure requires context teardown. Old CPU leases
+// and a stopped GC are drained by background cleanup, never by waiting here.
+// The new domain starts with GC off; call gc_start before its first decode.
+LLAMA_API bool llama_kvmem_historical_capture_reset_begin(struct llama_context * ctx, uint32_t capacity,
         uint64_t input_tokens, uint64_t max_output_tokens, uint64_t max_appends);
 // After begin and before decode. mode: 1 shadow, 2 delete. LRU pressure
 // requires 0 < ready_low < ready_high <= historical capacity.

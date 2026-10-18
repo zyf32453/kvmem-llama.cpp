@@ -156,6 +156,11 @@ public:
     // Public writer/read/transfer/execution leases count, internal metadata
     // guards do not. Reclamation still uses the full control reference count.
     uint64_t outstanding_operations() const noexcept;
+    // After close and after the GC/metadata producers stop: no lease or
+    // reservation still owns the shared state. Unlike the operation count,
+    // this also covers a lease's final shared_ptr release. The background
+    // domain cleanup must retain its repository/storage until this is true.
+    bool cleanup_ready() const noexcept;
     // For a handle returned by begin_write/begin_reserved_write, Live means
     // its producer published; Retired includes ongoing/completed release or
     // later slot reuse. Uses atomic scalars, never a worker lock or a guard.

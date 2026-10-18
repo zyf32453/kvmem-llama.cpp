@@ -375,6 +375,23 @@ static void test_close_blocks_new_work_but_old_lease_can_finish() {
           "close prevented draining existing work");
 }
 
+static void test_closed_cleanup_waits_for_leases_and_reservations() {
+    HistoricalKvRepository repo(2);
+    auto reserved = repo.try_reserve_slots(1);
+    auto writer = repo.begin_write(1, 0, 1, 1, 8, [](auto) { return true; });
+    check(reserved && writer && repo.publish_write(*writer), "cleanup setup failed");
+    auto reader = repo.acquire_read(writer->handle());
+    writer.reset();
+    check(reader && !repo.cleanup_ready(), "open repository became cleanup-ready");
+    repo.close();
+    check(!repo.cleanup_ready(), "cleanup ignored an old reader");
+    reader.reset();
+    check(!repo.outstanding_operations() && !repo.cleanup_ready(),
+          "zero operation count hid a still-owned reservation");
+    reserved.reset();
+    check(repo.cleanup_ready(), "closed repository did not become cleanup-ready after final owners left");
+}
+
 static void test_repository_identity_and_releasing_authority() {
     HistoricalKvRepository first(1, 70);
     HistoricalKvRepository second(1, 70);
@@ -482,6 +499,7 @@ int main() {
     test_default_incarnation_is_unique();
     test_bounded_observation_counts_each_slot_once();
     test_close_blocks_new_work_but_old_lease_can_finish();
+    test_closed_cleanup_waits_for_leases_and_reservations();
     test_repository_identity_and_releasing_authority();
     test_final_publication_under_ref_churn_and_retirement();
     std::cout << "historical KV repository checks passed\n";

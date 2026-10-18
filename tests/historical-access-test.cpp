@@ -36,13 +36,14 @@ static_assert(sizeof(llm_graph_input_attn_kv) < 1024, "KV attention input copied
 // Only the foreground interval explicitly guarded by a test rejects C++
 // allocation. Model loading, CUDA and background capture are unaffected.
 static thread_local bool deny_cpp_allocation = false;
+static thread_local size_t foreground_cpp_frees = 0;
 void * operator new(size_t size) {
     if (deny_cpp_allocation) throw std::bad_alloc();
     if (void * p = std::malloc(size ? size : 1)) return p;
     throw std::bad_alloc();
 }
 void * operator new[](size_t size) { return ::operator new(size); }
-void operator delete(void * p) noexcept { std::free(p); }
+void operator delete(void * p) noexcept { if (p) ++foreground_cpp_frees; std::free(p); }
 void operator delete[](void * p) noexcept { ::operator delete(p); }
 void operator delete(void * p, size_t) noexcept { ::operator delete(p); }
 void operator delete[](void * p, size_t) noexcept { ::operator delete(p); }
@@ -2230,6 +2231,117 @@ static void check_context_close_with_paused_worker(
     std::puts("PASS real context teardown: returned before paused GC resumed, CPU owners retained then released on cleanup worker");
 }
 
+static void check_reset_request(llama_context * ctx, llama_model * model, llama_memory_kvmem & mem) {
+    const auto * vocab = llama_model_get_vocab(model);
+    const std::string text(600, 'a');
+    const int count = -llama_tokenize(vocab, text.c_str(), text.size(), nullptr, 0, true, true);
+    require(count >= 64, "reset fixture has too few tokens");
+    std::vector<llama_token> tokens(count);
+    require(llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(), count, true, true) == count,
+            "reset fixture tokenization failed");
+    require(llama_kvmem_historical_capture_begin(ctx, 6, 64, 0, 3), "reset fixture admission failed");
+    auto decode = [&](uint32_t n) {
+        auto batch = llama_batch_get_one(tokens.data(), n);
+        require(llama_decode(ctx, batch) == 0, "reset fixture graph failed");
+        llama_synchronize(ctx);
+        mem.harvest_flush();
+        kvmem_transfer_test_access::commit(mem);
+    };
+    decode(32);
+    auto old_repository = kvmem_transfer_test_access::capture_repository(mem);
+    auto old_storage = kvmem_transfer_test_access::capture_storage(mem);
+    const auto old_handle = mem.runtime().historical_shadow_directory().observe(0).handle;
+    const auto arena = kvmem_transfer_test_access::capture_arena(mem).get();
+    const auto rows = kvmem_transfer_test_access::row_buffer(mem);
+    const auto backend = ctx->get_historical_backend_status();
+    require(!llama_kvmem_historical_capture_reset_begin(ctx, 6, 193, 0, 1) &&
+            !old_repository->closed() && mem.store_n_tokens() == 32,
+            "failed reset changed the current domain");
+    bool allocation_refused = false;
+    {
+        DenyCppAllocation deny;
+        allocation_refused = !llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 1, 2);
+    }
+    require(allocation_refused && !old_repository->closed() && mem.store_n_tokens() == 32,
+            "reset allocation failure replaced the current conversation");
+    std::vector<kvmem::HistoricalKvCleanup::Ticket> saturated;
+    saturated.reserve(64);
+    while (auto ticket = kvmem::HistoricalKvCleanup::process().try_reserve())
+        saturated.push_back(std::move(*ticket));
+    require(!llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 1, 2) &&
+            !old_repository->closed() && mem.store_n_tokens() == 32,
+            "reset without cleanup capacity replaced the old conversation");
+    saturated.clear();
+    decode(16); // The old unfinished request remains usable after refusal.
+    auto old_reader = old_repository->acquire_read(old_handle);
+    require(bool(old_reader), "reset fixture old reader missing");
+    const auto layer_id = mem.raw().config().historical_gc_attention_layers.front();
+    const auto old_layer = old_storage->read_layer(*old_reader, old_handle, layer_id);
+    require(bool(old_layer), "reset fixture old payload missing");
+    std::weak_ptr<kvmem::HistoricalKvRepository> weak_repository = old_repository;
+    std::weak_ptr<kvmem::HistoricalKvRawStore> weak_storage = old_storage;
+
+    auto gate = std::make_shared<HistoricalPolicyGate>();
+    struct Unpause { std::shared_ptr<HistoricalPolicyGate> gate; ~Unpause() { gate->open(); } } unpause{gate};
+    kvmem_transfer_test_access::install_gc_policy(mem, std::make_unique<PausedHistoricalPolicy>(gate));
+    require(gate->entered_signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+            "reset fixture GC did not reach barrier");
+    std::promise<void> returned;
+    auto signal = returned.get_future();
+    auto watchdog = std::async(std::launch::async, [gate, signal = std::move(signal)]() mutable {
+        const bool no_gc_wait = signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        gate->open();
+        return no_gc_wait;
+    });
+    // Cancel the remaining 16 input tokens, start a distinct incarnation at
+    // position zero, and execute it while the old GC and CPU reader persist.
+    require(llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 1, 2), "real reset admission failed");
+    auto fresh = kvmem_transfer_test_access::capture_repository(mem);
+    require(fresh != old_repository && old_repository->closed() && !fresh->closed() &&
+            !fresh->acquire_read(old_handle) && !old_repository->acquire_read(old_handle) &&
+            !mem.store_n_tokens() && mem.seq_pos_max(0) == -1 &&
+            kvmem_transfer_test_access::capture_arena(mem).get() == arena &&
+            kvmem_transfer_test_access::row_buffer(mem) == rows,
+            "reset reused the old namespace or changed fixed workspace storage");
+    require(llama_kvmem_historical_gc_start(2, 2, 4), "reset could not start the new domain's GC");
+    decode(32);
+    mem.end_prefill_capture();
+    decode(1);
+    require(llama_kvmem_historical_capture_finish(), "new request failed after reset");
+    const auto after = ctx->get_historical_backend_status();
+    require(after.scheduler == backend.scheduler && after.output_buffer == backend.output_buffer &&
+            after.graph_results == backend.graph_results && after.graph_meta == backend.graph_meta,
+            "reset changed prepared backend ownership");
+    const auto still_old = old_storage->read_layer(*old_reader, old_handle, layer_id);
+    require(still_old && still_old->packed_k == old_layer->packed_k &&
+            still_old->packed_v == old_layer->packed_v &&
+            mem.runtime().historical_shadow_directory().observe(0).handle.incarnation != old_handle.incarnation,
+            "new conversation overwrote or revived an old CPU generation");
+    returned.set_value();
+    require(watchdog.get(), "reset or fresh request waited for the old GC worker");
+    old_repository.reset();
+    old_storage.reset();
+    require(!weak_repository.expired() && !weak_storage.expired(),
+            "reset dropped background ownership before its old reader completed");
+    const auto frees = foreground_cpp_frees;
+    old_reader.reset();
+    require(foreground_cpp_frees == frees, "old lease performed foreground historical destruction");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while ((!weak_repository.expired() || !weak_storage.expired()) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    require(weak_repository.expired() && weak_storage.expired(), "reset leaked the old CPU domain");
+    const auto completed_incarnation = mem.runtime().historical_shadow_directory().observe(0).handle.incarnation;
+    fresh.reset();
+    require(llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 0, 1),
+            "reset could not replace a successfully finished request");
+    decode(32);
+    mem.end_prefill_capture();
+    require(llama_kvmem_historical_capture_finish() && mem.store_n_tokens() == 32 &&
+            mem.runtime().historical_shadow_directory().observe(0).handle.incarnation != completed_incarnation,
+            "completed-request reset lost its new incarnation or position zero");
+    std::puts("PASS real reset: partial-input cancellation, allocation/cleanup refusal rollback, paused old GC, old reader isolation, background final release, finished-request reset, reused GPU/backend workspace");
+}
+
 static void check_repeated_requests(llama_context * ctx, llama_model * model,
                                     llama_memory_kvmem & mem, bool generate) {
     const auto * vocab = llama_model_get_vocab(model);
@@ -2319,14 +2431,17 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
 
 int main(int argc, char ** argv) {
     if (argc != 2 && argc != 3 && argc != 4) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --scenario 0..34] (requires CUDA)\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --scenario 0..34] (requires CUDA)\n", argv[0]);
         return argc == 1 ? 77 : 1;
     }
     try {
         unsigned first_scenario = 0, end_scenario = 35;
-        bool run_repeated = true;
+        bool run_repeated = true, run_reset = true;
         if (argc == 3) {
-            require(std::string(argv[2]) == "--repeated", "unknown test selection");
+            const std::string selected = argv[2];
+            require(selected == "--repeated" || selected == "--reset", "unknown test selection");
+            run_repeated = selected == "--repeated";
+            run_reset = selected == "--reset";
             end_scenario = 0;
         } else if (argc == 4) {
             require(std::string(argv[2]) == "--scenario", "unknown test selection");
@@ -2334,6 +2449,7 @@ int main(int argc, char ** argv) {
             require(first_scenario < 35, "scenario index must be 0..34");
             end_scenario = first_scenario + 1;
             run_repeated = false;
+            run_reset = false;
         }
         llama_backend_init();
         ggml_backend_load_all();
@@ -2412,6 +2528,14 @@ int main(int argc, char ** argv) {
         llama_kvmem_set_params(&kp);
         cp.n_ubatch = 16;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
+        if (run_reset) {
+            std::unique_ptr<llama_context, decltype(&llama_free)> reset_ctx(
+                llama_init_from_model(model.get(), cp), llama_free);
+            require(bool(reset_ctx), "reset context init failed");
+            auto * reset_mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(reset_ctx.get()));
+            require(reset_mem != nullptr, "reset adapter is missing");
+            check_reset_request(reset_ctx.get(), model.get(), *reset_mem);
+        }
         for (bool generate : {false, true}) if (run_repeated) {
             std::unique_ptr<llama_context, decltype(&llama_free)> repeated_ctx(
                 llama_init_from_model(model.get(), cp), llama_free);

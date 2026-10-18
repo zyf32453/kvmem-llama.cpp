@@ -1030,7 +1030,14 @@ struct llama_memory_kvmem::HistoricalCpuCleanup final : kvmem::HistoricalKvClean
     std::function<void()> submission_hook;
     // Destroy the manager before directory/session/storage ownership.
     std::unique_ptr<kvmem::HistoricalKvGc> gc;
-    bool ready() const noexcept override { return !gc || gc->worker_finished(); }
+    // A reset may leave external CPU users of the old incarnation alive.
+    // Keep their final storage owner here so dropping their lease cannot
+    // perform historical payload destruction on the caller's thread.
+    bool wait_for_operations = false;
+    bool ready() const noexcept override {
+        return (!gc || gc->worker_finished()) &&
+            (!wait_for_operations || !domain || domain->repository()->cleanup_ready());
+    }
 };
 
 // A decode context owns the prepared slot vectors while upstream is using
@@ -1368,6 +1375,92 @@ bool llama_memory_kvmem::continue_historical_capture(uint32_t capacity, uint64_t
         return true;
     } catch (const std::exception & e) {
         LLAMA_LOG_ERROR("historical capture next request: %s\n", e.what());
+        return false;
+    }
+}
+
+bool llama_memory_kvmem::reset_historical_capture(uint32_t capacity, uint64_t input_tokens,
+        uint64_t max_output_tokens, uint64_t max_appends) {
+    if (!historical_domain_)
+        return begin_historical_capture(capacity, input_tokens, max_output_tokens, max_appends);
+    if (!historical_capture_ || capture_failed_ || historical_capture_->failed() ||
+        historical_domain_->repository()->closed() || historical_batch_context_in_use_ ||
+        !historical_active_ || historical_active_->engaged() || runtime_->pending() ||
+        capacity != historical_domain_->repository()->capacity() ||
+        input_tokens > capture_token_capacity_ || max_output_tokens > capture_token_capacity_ - input_tokens)
+        return false;
+    bool replacing = false;
+    try {
+        // The public entry already synchronized compute. Complete ordinary
+        // capture ownership before deciding whether this workspace is reusable.
+        // This does not finish the input quota or wait for the GC worker.
+        harvest_flush();
+        harvest_gpu_v_commit();
+        if (!capture_arena_ || capture_arena_.use_count() != 1 ||
+            !pos_queue_.empty() || !cur_capture_.positions.empty() ||
+            !decode_mean_pending_batch_.positions.empty() ||
+            !harvest_v_jobs_.empty() || !harvest_v_pending_.jobs.empty() ||
+            std::any_of(historical_gpu_readers_.begin(), historical_gpu_readers_.end(), [](uint32_t n) { return n != 0; }) ||
+            std::any_of(historical_gpu_retired_.begin(), historical_gpu_retired_.end(), [](uint8_t n) { return n != 0; }))
+            return false;
+        auto ticket = kvmem::HistoricalKvCleanup::process().try_reserve();
+        if (!ticket) return false;
+        auto cleanup = std::make_unique<HistoricalCpuCleanup>();
+        auto runtime = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_, &backend_);
+        auto raw = std::make_unique<kvmem::RawKvStore>(raw_cfg_);
+        auto domain = kvmem::HistoricalKvCaptureDomain::try_prepare(
+            *runtime, historical_domain_->storage()->config(), capacity);
+        kvmem::HistoricalKvRamDemand demand;
+        demand.uncached_input_tokens = input_tokens;
+        demand.max_accepted_output_tokens = max_output_tokens;
+        demand.max_append_boundaries = max_appends;
+        auto capture = kvmem::HistoricalKvCaptureSession::try_prepare_next(domain, demand);
+        if (!capture) return false;
+        auto active = kvmem::HistoricalKvActiveSet::prepare(domain->repository(), n_slots_);
+        if (!capture->admit()) return false;
+
+        // Everything that can allocate is private and admitted above. The
+        // serialized owner now retires the entire old conversation namespace.
+        // Existing CPU users retain it; none can obtain new execution rights.
+        replacing = true;
+        historical_capture_->fail();
+        if (historical_gc_) historical_gc_->request_stop();
+        auto & old = *historical_cleanup_;
+        old.wait_for_operations = true;
+        old.runtime = std::move(runtime_);
+        old.raw = std::move(raw_);
+        old.domain = std::move(historical_domain_);
+        old.capture = std::move(historical_capture_);
+        old.active = std::move(historical_active_);
+        old.gc = std::move(historical_gc_);
+        old.submission_hook = std::move(historical_submission_test_hook_);
+        runtime_ = std::move(runtime);
+        raw_ = std::move(raw);
+        historical_domain_ = std::move(domain);
+        historical_capture_ = std::move(capture);
+        historical_active_ = std::move(active);
+        historical_gc_mode_ = 0;
+        historical_cleanup_ticket_.submit(std::move(historical_cleanup_));
+        historical_cleanup_ticket_ = std::move(*ticket);
+        historical_cleanup_ = std::move(cleanup);
+        kv_->clear(false);
+        reset_slots();
+        reset_turn_policy();
+        historical_active_workspace_.requested.clear();
+        historical_active_workspace_.requested_ids.clear();
+        historical_active_workspace_.remove_ids.clear();
+        harvest_gpu_queued_.clear();
+        if (!kvmem::FixedByteArena::reset_exclusive(capture_arena_)) std::terminate();
+        capture_max_tokens_ = static_cast<size_t>(input_tokens + max_output_tokens);
+        capture_tokens_used_ = 0;
+        ++attention_epoch_;
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE reset capacity=%u reserved=%u input=%llu output_max=%llu gc=off\n",
+            capacity, historical_capture_->reserved_blocks(),
+            (unsigned long long) input_tokens, (unsigned long long) max_output_tokens);
+        return true;
+    } catch (const std::exception & e) {
+        if (replacing) capture_fail();
+        LLAMA_LOG_ERROR("historical capture reset: %s\n", e.what());
         return false;
     }
 }
@@ -6156,6 +6249,14 @@ bool llama_kvmem_historical_capture_begin(llama_context * ctx, uint32_t capacity
 bool llama_kvmem_historical_gc_start(int mode, uint32_t ready_low, uint32_t ready_high) {
     auto * mem = kvmem_capture_active();
     return mem && mem->start_historical_gc(mode, ready_low, ready_high);
+}
+
+bool llama_kvmem_historical_capture_reset_begin(llama_context * ctx, uint32_t capacity,
+        uint64_t input_tokens, uint64_t max_output_tokens, uint64_t max_appends) {
+    auto * mem = kvmem_capture_active();
+    if (!mem || !ctx || ctx->get_memory() != mem || !ctx->historical_simple_input_prepared()) return false;
+    llama_synchronize(ctx);
+    return mem->reset_historical_capture(capacity, input_tokens, max_output_tokens, max_appends);
 }
 
 bool llama_kvmem_historical_capture_finish(void) {
