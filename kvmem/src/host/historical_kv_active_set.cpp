@@ -57,11 +57,20 @@ HistoricalKvActiveSet::TryAcquireResult HistoricalKvActiveSet::try_acquire(
             [&](HistoricalKvHandle handle) { return same_handle(handle, item.handle); });
         if (admitted) continue;
 
-        auto lease = item.gpu_ready_writing ?
-            repository_->acquire_gpu_ready_writing(item.handle) :
-            repository_->acquire_new(item.handle);
+        // Duplicate requests must retain the strongest resource dependency,
+        // even if the GPU-only occurrence was listed first.
+        bool host = false, mandatory = false, gpu_ready_writing = false;
+        for (const auto & need : requested) {
+            if (!same_handle(need.handle, item.handle)) continue;
+            host |= !need.gpu_only && !need.gpu_ready_writing;
+            mandatory |= need.mandatory;
+            gpu_ready_writing |= need.gpu_ready_writing;
+        }
+        auto lease = host ? repository_->acquire_new(item.handle) :
+            gpu_ready_writing ? repository_->acquire_gpu_ready_writing(item.handle) :
+            repository_->acquire_gpu(item.handle);
         if (!lease) {
-            if (!item.mandatory) continue;
+            if (!mandatory) continue;
             return {AcquireStatus::MissingMandatory, item.handle};
         }
         handles_.push_back(item.handle);

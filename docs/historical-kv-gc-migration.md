@@ -621,14 +621,30 @@ server 现可显式使用 `--kvmem-historical-capture N` 和 `--kvmem-historical
 
 最终完整真实模型回归也通过：原有 **35/35** 场景、新 reset/cancel 场景、36 次/48 次连续请求长轨迹及 backend guard。两条长轨迹本次分别回收 70/190 块，日志 `/tmp/kvmem-http-full-model.log`。本轮未重现前节记录的偶发 CUDA 非法访问，仍不能据此认定其根因已解决。验收原始日志、响应和命令已备份到本地 `build-local/historical-http-validation/`。
 
-此项完成的是受限 server 请求闭环。模型采样器、其余图对象、缓存元数据和新旧域切换期间的总 bytes 仍未全部纳入 P3；GPU/Host 依赖拆分、checkpoint、其它后端组合及策略效果比较也未完成。真实设备错误目前需要重启 server，而不是自动重建 context。不能将这些 HTTP 测试报告为完整生产交付或全内存有界。
+此项完成的是受限 server 请求闭环。模型采样器、其余图对象、缓存元数据和新旧域切换期间的总 bytes 仍未全部纳入 P3；当时 GPU/Host 依赖拆分尚未实现，后续进展见下节。checkpoint、其它后端组合及策略效果比较也未完成。真实设备错误目前需要重启 server，而不是自动重建 context。不能将这些 HTTP 测试报告为完整生产交付或全内存有界。
+
+### RAM Host payload 与 GPU 执行身份分离（2026-10-18）
+
+此前 repository 只有一个整块引用计数：即使旧 active 只读已独立驻留的 GPU 副本，也会把 CPU payload 一直保留到 active 结束。本轮把许可区分为需要 Host 的 writer/read/transfer/普通 execution，以及只保留身份的 GPU execution。默认 execution 仍保留后续可能用到的 Host 数据；只有调用方能证明整个操作及其未来步骤均只依赖独立 GPU 副本时，才能使用 `acquire_gpu` 或显式 GPU-ready Writing 许可。按句柄存储拒绝使用 GPU-only 许可读取 K/V 或 Mean-K，退休后也不能升级为新 Host 许可。
+
+阶段、Host 引用和身份/GPU 引用编码在同一个原子 control word 中；获得执行/读取许可与登记 Host 依赖是同一次 CAS，因此不会出现“已获得许可，退休却看不到未来 Host 依赖”的窗口。重复的 active 请求按最强依赖合并：同一块即使先出现 GPU-only 请求，后续 Host 请求也不能被去重过程丢掉。受限 recency 适配器对已完整驻留 GPU 的旧历史使用 GPU-only 许可；当前写入跨度仍由 producer 持有 Host 引用。
+
+退休仍立即关闭下一次选择。最后一个 Host 依赖结束后，后台可以调用精确代际的释放回调，销毁 `HistoricalKvRawStore` 中该块的 RAM K/V/Mean-K bundle；此时旧 GPU execution 与元数据观察仍可保留身份。新增 `HostReleased` 结果和 `host_released_early` 计数，只记录部分资源释放。该块仍是 Retired，**不是 Ready**，不返还可预约槽位，也不撤销 pending slot credit。所有身份/GPU 引用退出且 Host 回调成功后，才进入完整 Releasing/Ready 并允许新代复用；失败回调仍按原句柄重试。GC 不修改 GPU 映射、mask 或工作集。
+
+这次拆分覆盖的是 RAM Host bundle 与 GPU/身份之间的依赖。K/V 与 Mean-K 仍作为同一 Host bundle 释放，NVMe allocation/IO 和 pinned cache 尚未独立接入。旧位置式 `RawKvStore` 桥接保留整块等待条件，不能把它报告成已支持提前释放；兼容回归专门检查仅剩 GPU-only 引用时它仍保留实际 CPU payload，最后引用退出才释放。
+
+新增宿主回归覆盖 Host read/transfer 延迟释放、GPU-only 许可禁止读 Host、回调重试、重复请求保留 Host 依赖、Host admission 与退休并发，以及部分释放后的 Ready/pending 守恒。真实 GPU 用例在已驻留的 K 张量上提交单独的 CUDA 读取操作，用测试屏障保持其完成事件未就绪；后台释放 CPU payload 时，检查旧 active/身份和 GPU 槽位仍在、槽位不能复用，随后解除屏障并逐字节验证读取结果。这个证据证明**真实 GPU 消费者未完成时 Host 可先释放**，不声称原 attention kernel 仍在运行，也没有将该等待屏障加入生产路径。
+
+完整真实模型回归已通过原有 **35/35** 场景、reset/cancel、36 次和 48 次连续请求及 backend guard；两条长轨迹分别回收 70/191 块。原始日志为 `/tmp/kvmem-resource-split-full-model.log`，单场景 GPU 证据为 `/tmp/kvmem-resource-split-gpu.log`。此前记录的偶发 CUDA 非法访问本轮未重现，根因仍未查明。
+
+最终宿主 CTest **27/27**，相关 ASan/UBSan **7/7**、TSan **7/7** 通过（六个核心组件加一个 legacy 桥接组件；sanitizer 不覆盖 CUDA adapter）。delete 模式真实 HTTP 回归 **33/33** 断言通过，包括 JSON/SSE、精确前缀延续、容量拒绝、reset、prefill/生成取消及后续压力请求。四次压力请求均 `committed=14`、完成边界 `reclaimed=13`，policy/worker failure 为零。本轮这些普通 HTTP 请求的 `host_released_early=0`；提前释放的受控 GPU 用例已证明可行，但没有据此声称自然请求的峰值内存或延迟已经改善。HTTP 证据位于 `/tmp/kvmem-resource-split-http-delete/`，本轮原始日志与响应备份到本地 `build-local/historical-resource-split-validation/`。
 
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。server 已接入单 lane 的有限预约、精确前缀延续、新会话与健康取消；仍需扩展缓存分支、设备故障恢复和其它生产路径。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
-2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
+2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host bundle 与 GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放；还需完成 Mean-K、NVMe 等资源的独立依赖及 pinned cache 槽位失效，并扩展到其余入口。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 仍拒绝分段 streaming 预约；server 的 SSE 按有限输出整请求预约。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI/server 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到其余生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。

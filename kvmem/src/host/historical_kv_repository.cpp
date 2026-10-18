@@ -9,7 +9,10 @@
 namespace kvmem {
 namespace {
 
-// The low three bits are the phase. The remaining bits count references.
+// One atomic word: phase (3 bits), Host references (30), identity/GPU-only
+// references (31). Acquisition registers its future Host dependency in the
+// SAME CAS as execution admission, so retirement cannot release payload in
+// a gap between obtaining permission and publishing a separate Host count.
 // Reserving is internal: it keeps an unpublished slot invisible while its
 // generation, immutable metadata, and release callback are installed.
 // Publication sets bit 0. A retained writer can observe only Writing, Live
@@ -26,14 +29,19 @@ static_assert((uint64_t(Phase::Writing) | kPublishBit) == uint64_t(Phase::Live) 
               (uint64_t(Phase::Live) | kPublishBit) == uint64_t(Phase::Live) &&
               (uint64_t(Phase::Retired) | kPublishBit) == uint64_t(Phase::Retired),
               "publication must preserve every non-Writing writer phase");
-constexpr uint64_t kRefOne = 8;
-constexpr uint64_t kMaxRefs = std::numeric_limits<uint64_t>::max() >> 3;
+constexpr uint64_t kHostOne = 8;
+constexpr uint64_t kOtherOne = uint64_t(1) << 33;
+constexpr uint64_t kMaxHostRefs = (uint64_t(1) << 30) - 1;
+constexpr uint64_t kMaxOtherRefs = (uint64_t(1) << 31) - 1;
 constexpr unsigned kCasAttempts = 16;
+enum class HostRelease : uint8_t { Bound, Releasing, Released };
 
 Phase phase_of(uint64_t control) { return static_cast<Phase>(control & kPhaseMask); }
-uint64_t refs_of(uint64_t control) { return control >> 3; }
-uint64_t code(Phase phase, uint64_t refs = 0) {
-    return (refs << 3) | static_cast<uint64_t>(phase);
+uint64_t host_refs_of(uint64_t control) { return (control >> 3) & kMaxHostRefs; }
+uint64_t other_refs_of(uint64_t control) { return control >> 33; }
+uint64_t refs_of(uint64_t control) { return host_refs_of(control) + other_refs_of(control); }
+uint64_t code(Phase phase, uint64_t host = 0, uint64_t other = 0) {
+    return host * kHostOne | other * kOtherOne | static_cast<uint64_t>(phase);
 }
 uint32_t phase_bit(Phase phase) { return 1u << static_cast<unsigned>(phase); }
 constexpr uint32_t kReadable = (1u << static_cast<unsigned>(Phase::Writing)) |
@@ -85,6 +93,7 @@ struct HistoricalKvRepository::Shared {
         std::atomic<uint64_t> last_use_seq{0};
         std::atomic<uint64_t> exec_refs{0};
         std::atomic<bool> release_busy{false};
+        std::atomic<HostRelease> host_release{HostRelease::Bound};
         uint64_t logical_id = 0;
         uint64_t original_begin = 0;
         uint64_t birth_seq = 0;
@@ -98,20 +107,22 @@ struct HistoricalKvRepository::Shared {
         : capacity(n), incarnation(session), repository_id(allocate_repository_id()),
           slots(new Slot[n]) {}
 
-    bool try_pin(uint32_t index, uint32_t phases) const {
+    bool try_pin(uint32_t index, uint32_t phases, bool host = false) const {
         auto & control = slots[index].control;
         uint64_t observed = control.load(std::memory_order_acquire);
         for (unsigned attempt = 0; attempt < kCasAttempts; ++attempt) {
-            if (!(phases & phase_bit(phase_of(observed))) || refs_of(observed) == kMaxRefs) return false;
-            if (control.compare_exchange_weak(observed, observed + kRefOne,
+            if (!(phases & phase_bit(phase_of(observed))) ||
+                (host ? host_refs_of(observed) == kMaxHostRefs : other_refs_of(observed) == kMaxOtherRefs))
+                return false;
+            if (control.compare_exchange_weak(observed, observed + (host ? kHostOne : kOtherOne),
                                               std::memory_order_acq_rel,
                                               std::memory_order_acquire)) return true;
         }
         return false;
     }
 
-    void unpin(uint32_t index) const noexcept {
-        slots[index].control.fetch_sub(kRefOne, std::memory_order_acq_rel);
+    void unpin(uint32_t index, bool host) const noexcept {
+        slots[index].control.fetch_sub(host ? kHostOne : kOtherOne, std::memory_order_acq_rel);
     }
 
     bool matches(uint32_t index, HistoricalKvHandle handle) const {
@@ -138,6 +149,9 @@ struct HistoricalKvRepository::Shared {
             std::min<uint64_t>(refs - 1, std::numeric_limits<uint32_t>::max()) : 0);
         out.active = slot.exec_refs.load(std::memory_order_acquire) != 0;
         out.sealed = out.life == HistoricalKvLife::Live;
+        out.host_references = static_cast<uint32_t>(host_refs_of(control));
+        out.host_released = slot.host_release.load(std::memory_order_acquire) == HostRelease::Released;
+        if (out.host_released) out.payload_bytes = 0;
         return out;
     }
 
@@ -152,17 +166,19 @@ struct HistoricalKvRepository::Shared {
 };
 
 HistoricalKvRepository::Lease::Lease(std::shared_ptr<Shared> shared,
-                                     HistoricalKvHandle handle, LeaseKind kind)
-    : shared_(std::move(shared)), handle_(handle), kind_(kind) {}
+                                     HistoricalKvHandle handle, LeaseKind kind, bool host_reference)
+    : shared_(std::move(shared)), handle_(handle), kind_(kind), host_reference_(host_reference) {}
 
 HistoricalKvRepository::Lease::~Lease() { reset(); }
 
 HistoricalKvRepository::Lease::Lease(Lease && other) noexcept
     : shared_(std::move(other.shared_)), handle_(other.handle_), kind_(other.kind_),
-      counted_exec_(other.counted_exec_), counted_operation_(other.counted_operation_) {
+      counted_exec_(other.counted_exec_), counted_operation_(other.counted_operation_),
+      host_reference_(other.host_reference_) {
     other.kind_ = LeaseKind::Read;
     other.counted_exec_ = false;
     other.counted_operation_ = false;
+    other.host_reference_ = false;
 }
 
 HistoricalKvRepository::Lease & HistoricalKvRepository::Lease::operator=(Lease && other) noexcept {
@@ -173,9 +189,11 @@ HistoricalKvRepository::Lease & HistoricalKvRepository::Lease::operator=(Lease &
         kind_ = other.kind_;
         counted_exec_ = other.counted_exec_;
         counted_operation_ = other.counted_operation_;
+        host_reference_ = other.host_reference_;
         other.kind_ = LeaseKind::Read;
         other.counted_exec_ = false;
         other.counted_operation_ = false;
+        other.host_reference_ = false;
     }
     return *this;
 }
@@ -196,19 +214,20 @@ void HistoricalKvRepository::Lease::reset() noexcept {
     if (shared_) {
         if (counted_exec_)
             shared_->slots[handle_.slot].exec_refs.fetch_sub(1, std::memory_order_acq_rel);
-        shared_->unpin(handle_.slot);
+        shared_->unpin(handle_.slot, host_reference_);
         if (counted_operation_) shared_->operations.fetch_sub(1, std::memory_order_acq_rel);
         shared_.reset();
     }
     kind_ = LeaseKind::Read;
     counted_exec_ = false;
     counted_operation_ = false;
+    host_reference_ = false;
 }
 
 void HistoricalKvRepository::Lease::count_operation() noexcept {
     shared_->operations.fetch_add(1, std::memory_order_acq_rel);
     counted_operation_ = true;
-    if (kind_ == LeaseKind::Execution) {
+    if (kind_ == LeaseKind::Execution || kind_ == LeaseKind::GpuExecution) {
         shared_->slots[handle_.slot].exec_refs.fetch_add(1, std::memory_order_acq_rel);
         counted_exec_ = true;
     }
@@ -219,6 +238,7 @@ void HistoricalKvRepository::Lease::disarm() noexcept {
     kind_ = LeaseKind::Read;
     counted_exec_ = false;
     counted_operation_ = false;
+    host_reference_ = false;
 }
 
 HistoricalKvRepository::HistoricalKvRepository(uint32_t capacity, uint64_t incarnation)
@@ -332,10 +352,11 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reser
     slot.payload_bytes = payload_bytes;
     slot.last_use_seq.store(birth_seq, std::memory_order_relaxed);
     slot.exec_refs.store(0, std::memory_order_relaxed);
+    slot.host_release.store(HostRelease::Bound, std::memory_order_relaxed);
     slot.release = std::move(release);
     ++reservation.consumed_;
     slot.control.store(code(Phase::Writing, 1), std::memory_order_release);
-    Lease writer(shared, handle, LeaseKind::Writer);
+    Lease writer(shared, handle, LeaseKind::Writer, true);
     writer.count_operation();
     return writer;
 }
@@ -369,10 +390,11 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_write
         slot.payload_bytes = payload_bytes;
         slot.last_use_seq.store(birth_seq, std::memory_order_relaxed);
         slot.exec_refs.store(0, std::memory_order_relaxed);
+        slot.host_release.store(HostRelease::Bound, std::memory_order_relaxed);
         slot.release = std::move(release);
         slot.generation.store(handle.generation, std::memory_order_release);
         slot.control.store(code(Phase::Writing, 1), std::memory_order_release);
-        Lease writer(shared, handle, LeaseKind::Writer);
+        Lease writer(shared, handle, LeaseKind::Writer, true);
         writer.count_operation();
         // A write admitted before close may complete with its writer lease.
         // Returning nullopt here would orphan a Writing slot if a bounded
@@ -401,8 +423,13 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_new
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_gpu_ready_writing(
     HistoricalKvHandle handle) {
-    return acquire_kind(handle, LeaseKind::Execution,
+    return acquire_kind(handle, LeaseKind::GpuExecution,
         phase_bit(Phase::Writing) | phase_bit(Phase::Live));
+}
+
+std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_gpu(
+    HistoricalKvHandle handle) {
+    return acquire_kind(handle, LeaseKind::GpuExecution, phase_bit(Phase::Live));
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_read(
@@ -420,8 +447,9 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_kin
     const auto shared = shared_;
     if (handle.incarnation != shared->incarnation || handle.slot >= shared->capacity ||
         shared->closing.load(std::memory_order_acquire)) return std::nullopt;
-    if (!shared->try_pin(handle.slot, allowed_phases)) return std::nullopt;
-    Lease lease(shared, handle, kind);
+    const bool host = kind != LeaseKind::GpuExecution;
+    if (!shared->try_pin(handle.slot, allowed_phases, host)) return std::nullopt;
+    Lease lease(shared, handle, kind, host);
     if (!shared->matches(handle.slot, handle) || shared->closing.load(std::memory_order_acquire))
         return std::nullopt;
     lease.count_operation();
@@ -486,32 +514,50 @@ HistoricalKvRepository::ReclaimResult HistoricalKvRepository::try_reclaim(
     } clear{slot};
 
     const Phase phase = phase_of(slot.control.load(std::memory_order_acquire));
+    Lease guard;
+    bool full_release = phase == Phase::Releasing;
     if (phase == Phase::Retired) {
         if (!shared->try_pin(handle.slot, phase_bit(Phase::Retired))) return ReclaimResult::Deferred;
-        Lease guard(shared, handle, LeaseKind::Read);
+        guard = Lease(shared, handle, LeaseKind::Read);
         if (!shared->matches(handle.slot, handle)) return ReclaimResult::Stale;
-        uint64_t only_guard = code(Phase::Retired, 1);
-        if (!slot.control.compare_exchange_strong(only_guard, code(Phase::Releasing),
-                                                  std::memory_order_acq_rel,
-                                                  std::memory_order_acquire)) return ReclaimResult::Deferred;
-        guard.disarm(); // The CAS consumed the sole reference and closed entry.
+        if (host_refs_of(slot.control.load(std::memory_order_acquire))) return ReclaimResult::Deferred;
+        // New Host access closed at retire_commit; any previously admitted
+        // future Host dependency was counted in that same control word. Only
+        // GPU/metadata references can remain now. Keep identity pinned during
+        // partial release, or consume our sole guard to enter full Releasing.
+        uint64_t only_guard = code(Phase::Retired, 0, 1);
+        full_release = slot.control.compare_exchange_strong(only_guard, code(Phase::Releasing),
+            std::memory_order_acq_rel, std::memory_order_acquire);
+        if (full_release) guard.disarm();
     } else if (phase == Phase::Releasing) {
-        // Only a release owner can publish Ready, and release_busy excludes
-        // another owner. The generation is stable for this entire branch.
         if (!shared->matches(handle.slot, handle)) return ReclaimResult::Stale;
     } else if (phase == Phase::Writing || phase == Phase::Live) {
         if (!shared->try_pin(handle.slot, phase_bit(phase))) return ReclaimResult::Deferred;
-        Lease guard(shared, handle, LeaseKind::Read);
+        guard = Lease(shared, handle, LeaseKind::Read);
         return shared->matches(handle.slot, handle) ? ReclaimResult::Deferred : ReclaimResult::Stale;
     } else {
         return phase == Phase::Reserving ? ReclaimResult::Deferred : ReclaimResult::Stale;
     }
 
-    bool complete = false;
-    try { complete = slot.release && slot.release(handle); }
-    catch (...) { complete = false; }
-    if (!complete) return ReclaimResult::Retry;
-    slot.release = {};
+    const bool newly_released = slot.host_release.load(std::memory_order_acquire) != HostRelease::Released;
+    if (newly_released) {
+        slot.host_release.store(HostRelease::Releasing, std::memory_order_release);
+        bool complete = false;
+        try { complete = slot.release && slot.release(handle); }
+        catch (...) { complete = false; }
+        if (!complete) return ReclaimResult::Retry;
+        slot.release = {};
+        slot.host_release.store(HostRelease::Released, std::memory_order_release);
+    }
+    if (!full_release) {
+        uint64_t only_guard = code(Phase::Retired, 0, 1);
+        full_release = slot.control.compare_exchange_strong(only_guard, code(Phase::Releasing),
+            std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!full_release) return newly_released ? ReclaimResult::HostReleased : ReclaimResult::Deferred;
+        guard.disarm();
+    }
+    // No live metadata/execution owner remains and the Host callback completed.
+    // A partial Host release never grants a physical slot to request admission.
     slot.control.store(code(Phase::Ready), std::memory_order_release);
     return ReclaimResult::Complete;
 }
@@ -519,7 +565,7 @@ HistoricalKvRepository::ReclaimResult HistoricalKvRepository::try_reclaim(
 bool HistoricalKvRepository::mark_executed(const Lease & admitted, uint64_t sequence) {
     const auto shared = shared_;
     if (!admitted.shared_ || admitted.shared_.get() != shared.get() ||
-        admitted.kind_ != LeaseKind::Execution) return false;
+        (admitted.kind_ != LeaseKind::Execution && admitted.kind_ != LeaseKind::GpuExecution)) return false;
     const HistoricalKvHandle handle = admitted.handle_;
     if (handle.slot >= shared->capacity || !shared->matches(handle.slot, handle)) return false;
     const Phase phase = phase_of(shared->slots[handle.slot].control.load(std::memory_order_acquire));
@@ -551,6 +597,17 @@ bool HistoricalKvRepository::is_releasing(HistoricalKvHandle handle) const noexc
     // drained. Once it publishes Ready, the bound payload is already gone.
     return phase_of(slot.control.load(std::memory_order_acquire)) == Phase::Releasing &&
            slot.generation.load(std::memory_order_acquire) == handle.generation;
+}
+
+bool HistoricalKvRepository::is_host_releasing(HistoricalKvHandle handle) const noexcept {
+    const auto shared = shared_;
+    if (handle.incarnation != shared->incarnation || handle.slot >= shared->capacity || !handle.generation)
+        return false;
+    const auto & slot = shared->slots[handle.slot];
+    const auto control = slot.control.load(std::memory_order_acquire);
+    return (phase_of(control) == Phase::Retired || phase_of(control) == Phase::Releasing) &&
+        !host_refs_of(control) && slot.host_release.load(std::memory_order_acquire) == HostRelease::Releasing &&
+        slot.generation.load(std::memory_order_acquire) == handle.generation;
 }
 
 bool HistoricalKvRepository::reclaim_completed(

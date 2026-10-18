@@ -32,6 +32,10 @@ struct HistoricalKvBlockMeta {
     uint32_t references = 0;
     bool active = false;
     bool sealed = false;
+    // Observations only, never permission to read or release. Partial Host
+    // release sets payload_bytes to zero but does not imply a Ready slot.
+    uint32_t host_references = 0;
+    bool host_released = false;
 };
 
 // The manager owns this immutable-for-one-round, safely sampled observation.

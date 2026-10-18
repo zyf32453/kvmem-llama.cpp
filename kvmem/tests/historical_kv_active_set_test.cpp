@@ -142,8 +142,9 @@ static void test_gpu_ready_writing_requires_explicit_request() {
     auto later = HistoricalKvActiveSet::acquire(repository, {{handle, false, true}});
     check(later && later.active->empty(), "retired GPU-ready block entered a later active");
     writer->reset();
-    check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred,
-          "old GPU-ready active did not protect the retiring payload");
+    check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::HostReleased &&
+          released == 1 && !repository->ready_count(),
+          "GPU-only active retained Host bytes or lost its identity");
     admitted.active.reset();
     check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
           released.load() == 1, "GPU-ready active payload did not finish releasing");
@@ -231,7 +232,26 @@ static void test_prepared_mandatory_failure_returns_all_leases() {
     check(bool(acquired), "failed prepared active could not be reused");
 }
 
+static void test_duplicate_resource_requests_keep_host_dependency() {
+    auto repository = std::make_shared<HistoricalKvRepository>(1);
+    std::atomic<unsigned> released{0};
+    const auto handle = live_block(repository, 0, released);
+    auto active = HistoricalKvActiveSet::prepare(repository, 2);
+    const std::vector<HistoricalKvActiveRequest> mixed{
+        {handle, false, false, true}, {handle, true, false, false}};
+    check(bool(active->try_acquire(mixed)) && active->handles().size() == 1 &&
+          repository->inspect(handle)->host_references == 1,
+          "duplicate GPU-first request omitted its future Host dependency");
+    repository->retire(handle);
+    check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred &&
+          released == 0, "mixed-resource operation lost Host payload");
+    active->release();
+    check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "mixed-resource operation did not release after completion");
+}
+
 int main() try {
+    test_duplicate_resource_requests_keep_host_dependency();
     test_preview_then_retire_then_new_active();
     test_old_active_finishes_after_retirement();
     test_mandatory_failure_rolls_back_prior_admission();

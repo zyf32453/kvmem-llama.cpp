@@ -12,7 +12,11 @@ namespace kvmem {
 struct HistoricalKvActiveRequest {
     HistoricalKvHandle handle;
     bool mandatory = false;
+    // Also asserts GPU-only access, even if Host capture is still Writing.
     bool gpu_ready_writing = false;
+    // Whole-operation proof of independent GPU residency. Default false
+    // retains future Host access; duplicate requests retain the strongest need.
+    bool gpu_only = false;
 };
 
 // One caller-defined active operation. Every invocation of acquire() obtains

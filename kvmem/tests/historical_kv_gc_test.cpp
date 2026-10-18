@@ -444,11 +444,38 @@ void test_tenfold_ram_reuse_without_worker_allocation() {
           "tenfold LRU/RAM reuse leaked capacity or lost a release");
 }
 
+void test_partial_host_release_does_not_return_slot_credit() {
+    auto repo = std::make_shared<HistoricalKvRepository>(2);
+    unsigned releases = 0;
+    auto writer = repo->begin_write(7, 0, 32, 1, 1024,
+        [&](const HistoricalKvHandle &) { ++releases; return true; });
+    const auto handle = writer->handle();
+    check(repo->publish_write(*writer), "split manager fixture publication failed");
+    writer.reset();
+    auto current = repo->acquire_gpu(handle);
+    HistoricalKvGc gc(repo, std::make_unique<DeleteOnce>(handle), config(HistoricalKvGc::Mode::Delete));
+    gc.manual_tick();
+    gc.manual_tick();
+    auto observation = repo->observe_range(0, 2);
+    check(releases == 1 && gc.stats().host_released_early == 1 && !gc.stats().reclaimed &&
+          observation.ready == 1 && observation.pending == 1 &&
+          !repo->try_reserve_slots(2), "manager counted partial bytes as a reusable slot");
+    gc.manual_tick();
+    check(gc.stats().host_released_early == 1 && releases == 1,
+          "worker duplicated partial completion");
+    current.reset();
+    gc.manual_tick();
+    observation = repo->observe_range(0, 2);
+    check(gc.stats().reclaimed == 1 && observation.ready == 2 && !observation.pending &&
+          releases == 1, "complete release lost Ready/pending conservation");
+}
+
 } // namespace
 
 int main() {
     try {
         test_retire_active_then_background_release();
+        test_partial_host_release_does_not_return_slot_credit();
         test_shadow_and_conditional_intent();
         test_releasing_retry_and_off_drain();
         test_lru_policy_through_manager();

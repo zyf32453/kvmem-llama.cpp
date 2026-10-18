@@ -80,6 +80,8 @@ void test_gc_releases_real_raw_kv_after_old_active_finishes() {
     const size_t before = raw->allocated_bytes();
     auto old_active = repository->acquire_new(handle);
     check(old_active.has_value(), "old active did not acquire execution permission");
+    auto old_gpu = repository->acquire_gpu(handle);
+    check(old_gpu.has_value(), "GPU-only execution permission was not admitted");
 
     HistoricalKvGc::Config gc_config;
     gc_config.mode = HistoricalKvGc::Mode::Delete;
@@ -98,6 +100,13 @@ void test_gc_releases_real_raw_kv_after_old_active_finishes() {
           "GC released real CPU data before the old active completed");
 
     old_active->reset();
+    gc.manual_tick();
+    check(repository->inspect(handle)->host_references == 0 &&
+          !repository->inspect(handle)->host_released && raw->has_block(0) &&
+          raw->allocated_bytes() == before && !gc.stats().host_released_early &&
+          !repository->ready_count(),
+          "legacy whole-block callback released early under GPU-only permission");
+    old_gpu->reset();
     gc.manual_tick();
     check(!raw->has_block(0) && raw->bytes_k() == 0 && raw->bytes_v() == 0 &&
           raw->allocated_bytes() < before,

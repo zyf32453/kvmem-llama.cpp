@@ -667,7 +667,50 @@ static void test_sparse_layers_and_independent_progress() {
     }
 }
 
+static void test_host_payload_releases_before_gpu_identity() {
+    using Repo = HistoricalKvRepository;
+    HistoricalKvRawStoreConfig config{1, 4, 2, 3, 1, {}};
+    HistoricalKvRawStore store(config, 1);
+    Repo repo(1);
+    auto writer = repo.begin_write(0, 0, 4, 1, 24, [&](const HistoricalKvHandle & h) {
+        return callback_succeeded(store.release(repo, h).code);
+    });
+    const auto handle = writer->handle();
+    check(store.reserve(*writer, handle, 0, 4) &&
+          store.write_layer(*writer, handle, 0, std::vector<uint8_t>(8, 7),
+                            std::vector<uint8_t>(12, 9), {8.f}, 4) &&
+          store.publish_complete(repo, *writer, handle), "split payload fixture failed");
+    auto gpu = repo.acquire_gpu(handle);
+    auto reader = repo.acquire_read(handle);
+    auto transfer = repo.acquire_transfer(handle);
+    float mean = 0;
+    check(gpu && !gpu->has_host_access() && !store.read_layer(*gpu, handle, 0) &&
+          !store.copy_mean_k(*gpu, handle, 0, &mean, 1), "GPU-only permission granted Host access");
+    writer.reset();
+    repo.retire(handle);
+    check(repo.try_reclaim(handle) == Repo::ReclaimResult::Deferred && store.allocated_payload_bytes(),
+          "Host reader/transfer did not hold actual bytes");
+    reader.reset();
+    check(repo.try_reclaim(handle) == Repo::ReclaimResult::Deferred &&
+          store.read_layer(*transfer, handle, 0)->packed_k == std::vector<uint8_t>(8, 7),
+          "last Host transfer lost its original payload");
+    transfer.reset();
+    Repo::ReclaimResult result = Repo::ReclaimResult::Retry;
+    std::thread worker([&] { result = repo.try_reclaim(handle); });
+    worker.join();
+    check(result == Repo::ReclaimResult::HostReleased && !store.allocated_payload_bytes() &&
+          !store.inspect(repo, handle) && !repo.ready_count() &&
+          !repo.reclaim_completed(handle, repo.repository_id()) &&
+          gpu->metadata()->host_released && gpu->metadata()->active &&
+          !store.read_layer(*gpu, handle, 0) && !repo.acquire_read(handle),
+          "partial Host release freed identity or retained actual RAM");
+    gpu.reset();
+    check(repo.try_reclaim(handle) == Repo::ReclaimResult::Complete && repo.ready_count() == 1,
+          "last GPU owner did not allow full Ready");
+}
+
 int main() {
+    test_host_payload_releases_before_gpu_identity();
     test_exact_generation_ram_reclamation();
     test_incremental_unaligned_tail_retired_while_writing();
     test_abandoned_partial_writer_reclaims_payload();

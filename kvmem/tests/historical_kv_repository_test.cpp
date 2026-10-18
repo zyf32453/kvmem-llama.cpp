@@ -97,11 +97,86 @@ static void test_gpu_ready_writing_execution_is_not_cpu_publication() {
           !repo.publish_write(*writer),
           "old admitted GPU execution lost use or retired writer republished");
     writer->reset();
-    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Deferred &&
-          releases == 0, "retired Writing span was released before old GPU execution finished");
+    check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::HostReleased &&
+          releases == 1 && !gpu_execution->has_host_access() && !repo.ready_count() &&
+          repo.inspect(handle)->host_released && repo.inspect(handle)->active &&
+          repo.mark_executed(*gpu_execution, 7) && !repo.acquire_read(handle),
+          "GPU-only execution retained Host bytes, lost identity, or gained Host access");
     gpu_execution->reset();
     check(repo.try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete &&
           releases == 1, "GPU-ready Writing span failed eventual physical release");
+}
+
+static void test_partial_host_release_retry_and_slot_credit() {
+    using Repo = HistoricalKvRepository;
+    Repo repo(1);
+    unsigned calls = 0;
+    auto writer = repo.begin_write(1, 0, 4, 1, 64, [&](const HistoricalKvHandle & h) {
+        check(repo.is_host_releasing(h), "callback lacks exclusive Host ownership");
+        return ++calls >= 2;
+    });
+    const auto handle = writer->handle();
+    check(repo.publish_write(*writer), "split retry fixture not published");
+    auto gpu = repo.acquire_gpu(handle);
+    writer.reset();
+    check(repo.retire(handle) == Repo::RetireResult::Committed &&
+          repo.try_reclaim(handle) == Repo::ReclaimResult::Retry &&
+          repo.inspect(handle)->active && !repo.inspect(handle)->host_released,
+          "failed partial callback lost execution or reported release");
+    check(repo.try_reclaim(handle) == Repo::ReclaimResult::HostReleased && calls == 2 &&
+          repo.try_reclaim(handle) == Repo::ReclaimResult::Deferred && calls == 2,
+          "partial retry skipped or duplicated Host destruction");
+    auto observation = repo.observe_range(0, 1);
+    check(!observation.ready && observation.pending == 1 && !repo.try_reserve_slots(1) &&
+          !repo.reclaim_completed(handle, repo.repository_id()) &&
+          !repo.acquire_gpu(handle) && !repo.acquire_transfer(handle) &&
+          repo.mark_executed(*gpu, 20), "partial release became Ready or revoked old execution");
+    Repo::Lease moved = std::move(*gpu);
+    gpu.reset();
+    check(repo.outstanding_operations() == 1, "GPU lease move dropped identity ownership");
+    moved.reset();
+    check(repo.try_reclaim(handle) == Repo::ReclaimResult::Complete && calls == 2 &&
+          repo.ready_count() == 1 && !repo.outstanding_operations(), "final metadata release lost credit");
+    auto next = repo.begin_write(2, 4, 4, 2, 64, [](const HistoricalKvHandle &) { return true; });
+    check(next && next->handle().generation != handle.generation &&
+          !repo.inspect(next->handle())->host_released && next->has_host_access() &&
+          repo.try_reclaim(handle) == Repo::ReclaimResult::Stale,
+          "new generation inherited old Host completion");
+}
+
+static void test_host_admission_is_atomic_with_retirement() {
+    using Repo = HistoricalKvRepository;
+    Repo repo(1);
+    for (unsigned round = 0; round < 200; ++round) {
+        std::atomic<bool> released{false}, go{false}, attempted{false}, drop{false}, acquired{false};
+        auto writer = repo.begin_write(round, round * 4, 4, round + 1, 64,
+            [&](const HistoricalKvHandle &) { released = true; return true; });
+        const auto handle = writer->handle();
+        check(repo.publish_write(*writer), "racing writer publication failed");
+        writer.reset();
+        auto gpu = repo.acquire_gpu(handle);
+        std::thread host([&] {
+            while (!go.load()) std::this_thread::yield();
+            auto transfer = repo.acquire_transfer(handle);
+            acquired = bool(transfer);
+            attempted = true;
+            while (!drop.load()) std::this_thread::yield();
+        });
+        go = true;
+        auto retired = repo.retire(handle);
+        while (retired == Repo::RetireResult::Retry) retired = repo.retire(handle);
+        while (!attempted.load()) std::this_thread::yield();
+        const auto result = repo.try_reclaim(handle);
+        const bool correct = retired == Repo::RetireResult::Committed &&
+            (acquired ? result == Repo::ReclaimResult::Deferred && !released :
+                        result == Repo::ReclaimResult::HostReleased && released);
+        drop = true;
+        host.join();
+        check(correct, "retire observed a gap before an admitted Host dependency was counted");
+        gpu.reset();
+        check(repo.try_reclaim(handle) == Repo::ReclaimResult::Complete,
+              "racing Host dependency leaked a slot");
+    }
 }
 
 static void test_operation_accounting_and_completion_observation() {
@@ -492,6 +567,8 @@ static void test_final_publication_under_ref_churn_and_retirement() {
 int main() {
     test_retire_closes_new_entry_but_keeps_old_reader();
     test_gpu_ready_writing_execution_is_not_cpu_publication();
+    test_partial_host_release_retry_and_slot_credit();
+    test_host_admission_is_atomic_with_retirement();
     test_operation_accounting_and_completion_observation();
     test_writing_retire_cannot_resurrect();
     test_failed_release_stays_closed_and_retries();

@@ -12,9 +12,12 @@ namespace kvmem {
 
 class HistoricalKvGc;
 
-// A fixed-size, host-only lifetime directory. It deliberately does not own a
-// RawKvStore allocation yet. The release callback must identify and release
-// the exact allocation named by its handle and must tolerate a partial retry.
+// A fixed-size lifetime directory; payload ownership stays with its storage
+// binding. The callback releases the exact generation's Host bundle and must
+// tolerate a partial retry. It must not free GPU allocations or mutate GPU
+// residency: GPU-only execution can still own those resources when it runs.
+// A legacy binding requiring all references to drain can check is_releasing()
+// and return false until the full-block phase is reached.
 class HistoricalKvRepository {
     struct Shared;
 
@@ -30,8 +33,10 @@ public:
     };
 
     enum class RetireResult { Committed, AlreadyRetired, Stale, VersionChanged, Retry };
-    enum class ReclaimResult { Complete, Deferred, Stale, Retry };
-    enum class LeaseKind { Writer, Execution, Read, Transfer };
+    // HostReleased is partial progress, NOT a Ready slot. Metadata/GPU users
+    // still prevent generation reuse. It is reported once per generation.
+    enum class ReclaimResult { Complete, HostReleased, Deferred, Stale, Retry };
+    enum class LeaseKind { Writer, Execution, GpuExecution, Read, Transfer };
     enum class CompletionState { Unfinished, Live, Retired };
 
     class Lease {
@@ -47,13 +52,16 @@ public:
         HistoricalKvHandle handle() const { return handle_; }
         LeaseKind kind() const { return kind_; }
         bool is_writer() const { return kind_ == LeaseKind::Writer; }
+        // GPU-only permission cannot be used to read/copy Host payload, even
+        // before retirement. Future Host dependencies must be admitted up front.
+        bool has_host_access() const noexcept { return shared_ && host_reference_; }
         uint64_t repository_id() const noexcept;
         std::optional<HistoricalKvBlockMeta> metadata() const;
         void reset() noexcept;
 
     private:
         friend class HistoricalKvRepository;
-        Lease(std::shared_ptr<Shared>, HistoricalKvHandle, LeaseKind);
+        Lease(std::shared_ptr<Shared>, HistoricalKvHandle, LeaseKind, bool host_reference = false);
         void disarm() noexcept;
         void count_operation() noexcept;
         std::shared_ptr<Shared> shared_;
@@ -61,6 +69,7 @@ public:
         LeaseKind kind_ = LeaseKind::Read;
         bool counted_exec_ = false;
         bool counted_operation_ = false;
+        bool host_reference_ = false;
     };
 
     // Request-private, real physical slots. Reserved slots are neither Ready
@@ -115,8 +124,13 @@ public:
     // the last producer's completion publication.
     bool publish_write(const Lease & writer);
     // A retired block never grants a new lease, even if old leases remain.
-    // acquire_new is the execution permission used at each active boundary.
+    // acquire_new conservatively retains Host payload for the whole execution,
+    // including future reads/transfers not yet submitted at this boundary.
     std::optional<Lease> acquire_new(HistoricalKvHandle handle);
+    // Caller proves an independently owned GPU copy covers the entire
+    // operation, including future uses. This pins identity/execution only;
+    // it cannot subsequently be upgraded into a Host reader after retirement.
+    std::optional<Lease> acquire_gpu(HistoricalKvHandle handle);
     // A specialized execution permission for a request's older GPU-complete
     // span while its asynchronous Host capture is still Writing. The adapter
     // must prove the whole span's GPU producer has completed and it does not
@@ -129,7 +143,9 @@ public:
     RetireResult retire(HistoricalKvHandle handle,
                         std::optional<uint64_t> expected_content_version = std::nullopt);
     // Call from the CPU reclaimer, not from the foreground. False/throwing
-    // callbacks leave the slot Releasing and are retried with the same handle.
+    // callbacks keep admission closed and retry with the same handle. Host
+    // release may run in Retired while GPU-only/metadata users remain; only
+    // full completion drains every reference and crosses Releasing to Ready.
     ReclaimResult try_reclaim(HistoricalKvHandle handle);
 
     // Record a successfully submitted model computation using its already
@@ -142,9 +158,12 @@ public:
     // Process-unique repository identity, independent of caller-controlled
     // incarnation values. Storage bindings use this to reject a foreign GC.
     uint64_t repository_id() const noexcept;
-    // Only Releasing has closed all lease admission and drained old refs.
-    // Storage callbacks may release physical payload only in this phase.
+    // Full-block release: all old references have drained. Kept for storage
+    // bindings that have not separated Host from GPU/identity dependencies.
     bool is_releasing(HistoricalKvHandle handle) const noexcept;
+    // Host callback ownership may precede the full Releasing/Ready transition
+    // while GPU-only or metadata references still protect this generation.
+    bool is_host_releasing(HistoricalKvHandle handle) const noexcept;
     // True only after the exact generation's release callback completed and
     // its slot crossed to Ready. A later generation also proves completion.
     // The repository ID prevents equal-looking handles from another owner
@@ -154,7 +173,8 @@ public:
     // Request-completion observations only; neither grants access nor permits
     // physical release. Call after the request has quiesced new task admission.
     // Public writer/read/transfer/execution leases count, internal metadata
-    // guards do not. Reclamation still uses the full control reference count.
+    // guards do not. Full Ready still requires all control references to drain;
+    // Host payload can be released earlier when its own references are zero.
     uint64_t outstanding_operations() const noexcept;
     // After close and after the GC/metadata producers stop: no lease or
     // reservation still owns the shared state. Unlike the operation count,

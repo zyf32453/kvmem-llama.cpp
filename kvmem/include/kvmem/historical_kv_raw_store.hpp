@@ -173,8 +173,9 @@ public:
     std::optional<BlockInfo> inspect(const HistoricalKvRepository & repository,
                                      HistoricalKvHandle handle) const;
 
-    // Exact-repository, exact-generation, whole-bundle release. The caller's
-    // repository must be in Releasing, after all old leases have drained.
+    // Exact-repository, exact-generation Host-bundle release. The repository
+    // must hold Host release ownership after actual Host dependencies drain.
+    // GPU-only/metadata leases may still retain the identity and prevent Ready.
     // No large allocation is freed
     // while holding the slot lock. On Released, the returned bytes are the
     // payload vector capacity actually destroyed by this invocation. A stale

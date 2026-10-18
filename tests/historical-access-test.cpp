@@ -1559,6 +1559,52 @@ enum class RetirementPoint {
     None, BetweenCalls, AfterSubmission, WritingAfterSubmission, PausedWorker,
     StageoutRecord, StageoutWait, StageoutUnconfirmed
 };
+#ifdef KVMEM_TEST_CUDA
+// Prolong a real device consumer of an already resident KV allocation. All
+// allocations precede the gate; the CUDA host function calls no CUDA API.
+// This is a test barrier only, never part of request execution/admission.
+struct PendingHistoricalGpuRead {
+    cudaStream_t stream = nullptr;
+    cudaEvent_t done = nullptr;
+    void * output = nullptr;
+    std::atomic<bool> open{false}, timed_out{false};
+    std::vector<uint8_t> expected;
+    ~PendingHistoricalGpuRead() {
+        open = true;
+        if (stream) cudaStreamSynchronize(stream);
+        if (done) cudaEventDestroy(done);
+        if (output) cudaFreeHost(output);
+        if (stream) cudaStreamDestroy(stream);
+    }
+    void start(ggml_tensor * tensor, size_t offset, size_t bytes) {
+        expected.resize(bytes);
+        ggml_backend_tensor_get(tensor, expected.data(), offset, bytes);
+        require(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess &&
+                cudaEventCreateWithFlags(&done, cudaEventDisableTiming) == cudaSuccess &&
+                cudaMallocHost(&output, bytes) == cudaSuccess, "GPU-only read fixture allocation failed");
+        require(cudaLaunchHostFunc(stream, [](void * data) {
+            auto & self = *static_cast<PendingHistoricalGpuRead *>(data);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!self.open.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= deadline) { self.timed_out = true; break; }
+                std::this_thread::yield();
+            }
+        }, this) == cudaSuccess &&
+                cudaMemcpyAsync(output, static_cast<uint8_t *>(tensor->data) + offset, bytes,
+                                cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
+                cudaEventRecord(done, stream) == cudaSuccess,
+                "GPU-only read fixture submission failed");
+        require(pending(), "GPU consumer was not held before retirement");
+    }
+    bool pending() const { return !timed_out && cudaEventQuery(done) == cudaErrorNotReady; }
+    void finish() {
+        open = true;
+        require(cudaEventSynchronize(done) == cudaSuccess && !timed_out &&
+                std::equal(expected.begin(), expected.end(), static_cast<uint8_t *>(output)),
+                "Host release changed the retained GPU allocation or its consumer output");
+    }
+};
+#endif
 struct ModelStageoutFault {
     KvmemStageoutPoint point = KvmemStageoutPoint::EventRecord;
     bool fired = false, unconfirmed = false;
@@ -2022,12 +2068,46 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
             }
             if (retired_during_request == UINT32_MAX) return;
             const auto before = repository->inspect(handle);
+#ifdef KVMEM_TEST_CUDA
+            PendingHistoricalGpuRead pending_read;
+            if (!writing && before && before->active && !before->host_references) {
+                auto * tensor = mem.get_kv()->get_k_storage(mem.raw().config().historical_gc_attention_layers.front());
+                const auto & block = mem.store().blocks()[retired_during_request];
+                pending_read.start(tensor, size_t(retired_gpu_slot) * mem.block_tokens() * tensor->nb[1],
+                                   size_t(block.n_tokens) * tensor->nb[1]);
+            }
+#endif
             if (!before || (writing ? !before->references : !before->active) ||
                 repository->retire(handle) != kvmem::HistoricalKvRepository::RetireResult::Committed)
                 return;
             const auto after = repository->inspect(handle);
-            protected_old_execution = after && (writing ? after->references > 0 : after->active) &&
-                repository->try_reclaim(handle) == kvmem::HistoricalKvRepository::ReclaimResult::Deferred;
+            if (writing) {
+                protected_old_execution = after && after->host_references > 0 &&
+                    repository->try_reclaim(handle) == kvmem::HistoricalKvRepository::ReclaimResult::Deferred;
+            } else {
+                // The real background worker must free Host bytes before this
+                // submitted active and its deliberately prolonged GPU consumer
+                // are allowed to complete. Full Ready is still forbidden.
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                auto observed = repository->inspect(handle);
+                while (observed && (!observed->host_released || !gc.stats().host_released_early) &&
+                        std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    observed = repository->inspect(handle);
+                }
+                protected_old_execution = observed && observed->host_released && observed->active &&
+                    !observed->host_references && !storage->inspect(*repository, handle) &&
+                    !repository->reclaim_completed(handle, repository->repository_id()) &&
+                    mem.store().blocks()[retired_during_request].gpu_slot == retired_gpu_slot;
+#ifdef KVMEM_TEST_CUDA
+                require(pending_read.done && pending_read.pending(),
+                        "CPU payload waited for GPU completion or GPU identity was released early");
+                pending_read.finish();
+#endif
+                require(protected_old_execution && gc.stats().host_released_early > 0,
+                        "real background Host release did not precede active completion");
+                std::puts("PASS real Host/GPU split: CPU payload freed while GPU event pending, identity retained, GPU consumer bytes unchanged");
+            }
             retired_after_submit = true;
         });
         const uint32_t chunk = writing ? 64 : 32;

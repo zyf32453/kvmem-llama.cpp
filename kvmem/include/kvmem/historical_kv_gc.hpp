@@ -14,9 +14,10 @@ namespace kvmem {
 
 // The sole owner of delete decisions for one repository. The policy proposes
 // exact-generation intents; this manager commits retirement and asks the
-// repository to release resources only after its old leases have gone away.
-// This module is host-only. The adapter currently owns it only for the
-// explicitly enabled single-request recency/RAM path.
+// repository to release Host resources after their dependencies have drained.
+// Full slot reuse additionally waits for GPU-only and metadata references.
+// This module is host-only. The adapter currently owns it only for explicitly
+// enabled finite recency/RAM requests in a single-lane capture domain.
 class HistoricalKvGc {
 public:
     enum class Mode { Off, Shadow, Delete };
@@ -43,6 +44,7 @@ public:
         uint64_t retry = 0;
         uint64_t policy_failures = 0;
         uint64_t worker_failures = 0;
+        uint64_t host_released_early = 0; // Host bundle gone, identity/GPU still held.
     };
 
     HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
@@ -92,6 +94,7 @@ private:
     std::atomic<uint64_t> reevaluate_{0}, retry_count_{0};
     std::atomic<uint64_t> policy_failures_{0};
     std::atomic<uint64_t> worker_failures_{0};
+    std::atomic<uint64_t> host_released_early_{0};
     bool policy_failed_ = false;
 };
 

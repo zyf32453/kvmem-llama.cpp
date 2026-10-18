@@ -1557,7 +1557,7 @@ bool llama_memory_kvmem::finish_historical_capture() {
         }
         if (historical_gc_) {
             const auto stats = historical_gc_->stats();
-            LLAMA_LOG_INFO("KVMEM_HISTORICAL_GC finish mode=%s proposed=%llu committed=%llu shadow=%llu reclaimed=%llu deferred=%llu retry=%llu policy_failures=%llu worker_failures=%llu ready=%u payload_bytes=%llu\n",
+            LLAMA_LOG_INFO("KVMEM_HISTORICAL_GC finish mode=%s proposed=%llu committed=%llu shadow=%llu reclaimed=%llu deferred=%llu retry=%llu policy_failures=%llu worker_failures=%llu ready=%u payload_bytes=%llu host_released_early=%llu\n",
                 historical_gc_mode_ == 1 ? "shadow" : "delete",
                 (unsigned long long) stats.proposed, (unsigned long long) stats.committed,
                 (unsigned long long) stats.shadow, (unsigned long long) stats.reclaimed,
@@ -1565,7 +1565,8 @@ bool llama_memory_kvmem::finish_historical_capture() {
                 (unsigned long long) stats.policy_failures,
                 (unsigned long long) stats.worker_failures,
                 historical_capture_->repository()->ready_count(),
-                (unsigned long long) historical_capture_->payload_bytes());
+                (unsigned long long) historical_capture_->payload_bytes(),
+                (unsigned long long) stats.host_released_early);
             if (stats.policy_failures || stats.worker_failures) return false;
         }
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live_observed=%u task_references=0 rows=%u payload_bytes=%llu gpu_deferred=%llu gpu_returned=%llu\n",
@@ -3112,7 +3113,9 @@ bool llama_memory_kvmem::begin_active_ubatch(
         if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Bound) {
             const auto meta = repository->inspect(observation.handle);
             if (meta && meta->life == kvmem::HistoricalKvLife::Live) {
-                requested.push_back({observation.handle, false});
+                // This complete resident GPU allocation covers this ubatch;
+                // it performs no future Host read or H2D of this old span.
+                requested.push_back({observation.handle, false, false, true});
                 requested_ids.push_back(block.block_id);
                 continue;
             }

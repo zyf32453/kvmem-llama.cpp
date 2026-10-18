@@ -439,7 +439,7 @@ std::optional<HistoricalKvRawStore::LayerSnapshot>
 HistoricalKvRawStore::read_layer(
     const HistoricalKvRepository::Lease & reader,
     HistoricalKvHandle handle, uint32_t layer) const {
-    if (!reader || !reader.repository_id() ||
+    if (!reader || !reader.has_host_access() || !reader.repository_id() ||
         !same(reader.handle(), handle) ||
         !handle.incarnation || !handle.generation || handle.slot >= slots_.size() ||
         !required_layer(layer)) return std::nullopt;
@@ -472,7 +472,7 @@ HistoricalKvRawStore::inspect(const HistoricalKvRepository & repository,
 bool HistoricalKvRawStore::copy_mean_k(
     const HistoricalKvRepository::Lease & reader,
     HistoricalKvHandle handle, uint32_t layer, float * output, size_t elements) const {
-    if (!reader || !reader.repository_id() || !same(reader.handle(), handle) ||
+    if (!reader || !reader.has_host_access() || !reader.repository_id() || !same(reader.handle(), handle) ||
         handle.slot >= slots_.size() || !required_layer(layer) || !output ||
         !config_.mean_k_elements || elements != config_.mean_k_elements) return false;
     const Slot & slot = *slots_[handle.slot];
@@ -507,14 +507,14 @@ HistoricalKvRawStore::release(const HistoricalKvRepository & repository,
                 slot.last_released.incarnation == handle.incarnation &&
                 handle.generation <= slot.last_released.generation)
                 return {ReleaseCode::Stale, 0};
-            return repository.is_releasing(handle)
+            return repository.is_host_releasing(handle)
                 ? ReleaseResult{ReleaseCode::Absent, 0}
                 : ReleaseResult{ReleaseCode::Busy, 0};
         }
         if (slot.block->repository_id != repository.repository_id() ||
             !same(slot.block->handle, handle))
             return {ReleaseCode::Stale, 0};
-        if (!repository.is_releasing(handle))
+        if (!repository.is_host_releasing(handle))
             return {ReleaseCode::Busy, 0};
         retired = std::move(slot.block);
         bytes = retired->payload_bytes;

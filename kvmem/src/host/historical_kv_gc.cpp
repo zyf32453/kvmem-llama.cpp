@@ -111,6 +111,7 @@ void HistoricalKvGc::manual_tick() {
                 block.life != HistoricalKvLife::Releasing) continue;
             switch (repository_->try_reclaim(block.handle)) {
             case HistoricalKvRepository::ReclaimResult::Complete: ++reclaimed_; break;
+            case HistoricalKvRepository::ReclaimResult::HostReleased: ++host_released_early_; break;
             case HistoricalKvRepository::ReclaimResult::Deferred: ++deferred_; break;
             case HistoricalKvRepository::ReclaimResult::Stale: break;
             case HistoricalKvRepository::ReclaimResult::Retry: ++retry_count_; break;
@@ -251,7 +252,7 @@ HistoricalKvGc::Stats HistoricalKvGc::stats() const {
     return {ticks_.load(), proposed_.load(), committed_.load(), shadow_.load(),
             reclaimed_.load(), deferred_.load(), stale_.load(),
             reevaluate_.load(), retry_count_.load(), policy_failures_.load(),
-            worker_failures_.load()};
+            worker_failures_.load(), host_released_early_.load()};
 }
 
 } // namespace kvmem
