@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kvmem/historical_kv_repository.hpp"
+#include "kvmem/nvme_kv_allocation.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -8,11 +9,13 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace kvmem {
+class NvmeKvTier;
 
-// RAM-only payload store for the new historical KV repository. Its slot is a
+// Payload store for the historical KV repository, with optional disk copies. Its slot is a
 // physical allocation address, never original_begin / a block size. The
 // repository owns admission and lifetime: callers must hold its writer/read/
 // transfer lease until their use of a payload is complete. In particular,
@@ -27,11 +30,18 @@ struct HistoricalKvRawStoreConfig {
     // Physical attention layer IDs. Empty preserves the all-layers default.
     // Non-attention layers have no payload and do not block publication.
     std::vector<uint32_t> attention_layers;
+    // Optional independent disk copy. Full extents are reserved alongside RAM
+    // before request admission; this does not yet eliminate the RAM copy.
+    // Requires the Linux NVMe tier with working physical preallocation.
+    uint64_t nvme_bytes = 0;
+    std::string nvme_dir;
 };
 
 class HistoricalKvRawStore {
     struct Block;
     struct Accounting;
+    struct DiskAllocation;
+    struct DiskProducer;
 public:
     // Actual K/V/Mean-K allocations prepared before request admission. A
     // prepared payload is private, not historical data and not selectable.
@@ -49,10 +59,31 @@ public:
         uint64_t payload_bytes() const noexcept;
         uint64_t packed_kv_bytes() const noexcept;
         uint64_t mean_k_bytes() const noexcept;
+        uint64_t nvme_bytes() const noexcept;
+        std::shared_ptr<void> writer_resource() const noexcept;
         uint32_t token_capacity() const noexcept;
     private:
         friend class HistoricalKvRawStore;
         std::unique_ptr<Block> block_;
+    };
+    // Move-only permission for one exact disk allocation and historical
+    // identity. It may finish after retirement, and pins no Host payload.
+    class NvmeRead {
+    public:
+        NvmeRead() = default;
+        NvmeRead(NvmeRead &&) noexcept = default;
+        NvmeRead & operator=(NvmeRead &&) noexcept;
+        NvmeRead(const NvmeRead &) = delete;
+        NvmeRead & operator=(const NvmeRead &) = delete;
+        explicit operator bool() const noexcept { return bool(io_); }
+        NvmeAllocationHandle allocation_handle() const noexcept { return io_.handle(); }
+    private:
+        friend class HistoricalKvRawStore;
+        HistoricalKvRepository::Lease identity_;
+        std::shared_ptr<Accounting> accounting_;
+        std::shared_ptr<DiskAllocation> allocation_;
+        NvmeIoLease io_;
+        uint32_t valid_tokens_ = 0;
     };
     struct BlockInfo {
         HistoricalKvHandle handle;
@@ -177,6 +208,11 @@ public:
     bool copy_mean_k(const HistoricalKvRepository::Lease & reader,
                      HistoricalKvHandle handle, uint32_t layer,
                      float * output, size_t elements) const;
+    std::optional<NvmeRead> acquire_nvme_read(HistoricalKvRepository & repository,
+                                             HistoricalKvHandle handle) const;
+    bool read_nvme_layer(const NvmeRead & reader, uint32_t layer,
+                         uint8_t * packed_k, size_t k_bytes,
+                         uint8_t * packed_v, size_t v_bytes) const;
     // Repository identity is required even for metadata observations: an
     // external incarnation can be deliberately reused by another owner.
     std::optional<BlockInfo> inspect(const HistoricalKvRepository & repository,
@@ -199,6 +235,7 @@ public:
         HistoricalKvHandle handle, HistoricalKvRepository::HostResource resource) noexcept;
     // Includes private PreparedPayload allocations as well as installed data.
     uint64_t allocated_payload_bytes() const noexcept;
+    uint64_t allocated_nvme_bytes() const noexcept;
     uint32_t capacity() const noexcept;
     const HistoricalKvRawStoreConfig & config() const noexcept;
 
@@ -232,6 +269,10 @@ private:
         std::shared_ptr<Accounting> accounting;
         bool payload_accounted = false;
         std::vector<Layer> layers;
+        std::shared_ptr<DiskAllocation> disk;
+        std::shared_ptr<DiskProducer> private_disk_producer;
+        DiskProducer * disk_producer = nullptr; // owned by the admitted writer
+        bool nvme_released = false;
     };
     struct Slot {
         mutable std::mutex mu;
@@ -244,9 +285,14 @@ private:
     static bool same(HistoricalKvHandle a, HistoricalKvHandle b) noexcept;
     bool required_layer(uint32_t layer) const noexcept;
     void mark_layer_complete(Block & block, Layer & layer) const noexcept;
+    void write_disk(const HistoricalKvRepository::Lease & writer, Block & block,
+                    uint32_t layer, bool value, uint32_t token_offset,
+                    const uint8_t * bytes, size_t count);
     HistoricalKvRawStoreConfig config_;
     std::shared_ptr<Accounting> accounting_;
     std::vector<std::unique_ptr<Slot>> slots_;
+    std::shared_ptr<NvmeKvTier> nvme_;
+    size_t disk_k_stride_ = 0, disk_layer_stride_ = 0;
 };
 
 } // namespace kvmem

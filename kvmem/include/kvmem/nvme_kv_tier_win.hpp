@@ -52,6 +52,7 @@ struct NvmeKvTierConfig {
     std::string overlay_file_name = "kvmem_overlay.bin";
     bool drop_page_cache = false;
     bool direct_read = false;
+    bool handle_addressed = false;
 };
 
 struct NvmeSlotPlacement {
@@ -116,6 +117,8 @@ public:
     int32_t lru_victim() const { return -1; }
     NvmeAllocationHandle allocation_for_block(uint32_t) const { return {}; }
     NvmeIoLease acquire_io(NvmeAllocationHandle) const noexcept { return {}; }
+    [[noreturn]] NvmeSlotPlacement try_allocate() { unavailable(); }
+    NvmeReleaseResult release_owned_allocation(NvmeAllocationHandle) { return NvmeReleaseResult::Unsupported; }
     NvmeReleaseResult try_release_allocation(NvmeAllocationHandle) { return NvmeReleaseResult::Unsupported; }
     [[noreturn]] void write_allocation(const NvmeIoLease &, uint64_t, const void *, uint64_t) const { unavailable(); }
     [[noreturn]] void read_allocation(const NvmeIoLease &, uint64_t, void *, uint64_t) const { unavailable(); }

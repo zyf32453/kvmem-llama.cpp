@@ -88,6 +88,8 @@ struct NvmeKvTierConfig {
     // continue through the buffered descriptor.  Opening O_DIRECT is best
     // effort so the same archive remains portable across filesystems.
     bool direct_read = false;
+    // Dedicated exact-allocation pool: no logical block placement or LRU.
+    bool handle_addressed = false;
 };
 
 struct NvmeSlotPlacement {
@@ -120,6 +122,7 @@ struct NvmeBatchIoStats {
 class NvmeKvTier {
 public:
     explicit NvmeKvTier(NvmeKvTierConfig cfg) : cfg_(std::move(cfg)) {
+      try {
         if (cfg_.slot_bytes > 0 && cfg_.total_bytes >= cfg_.slot_bytes) {
             if (cfg_.total_bytes / cfg_.slot_bytes > uint64_t(std::numeric_limits<int32_t>::max()) ||
                 cfg_.total_bytes > uint64_t(std::numeric_limits<off_t>::max()))
@@ -130,6 +133,8 @@ public:
         if (slot_count_ == 0 || cfg_.dir.empty()) return;
         if (cfg_.read_only && !cfg_.durable)
             throw std::invalid_argument("read-only NVMe arenas require durable archive ownership");
+        if (cfg_.handle_addressed && (cfg_.durable || cfg_.direct_mapped || cfg_.read_only))
+            throw std::invalid_argument("handle-addressed NVMe requires a private ephemeral arena");
         allocations_ = std::make_unique<NvmeAllocationRegistry>(slot_count_);
         slot_blocks_.resize(slot_count_);
         free_slots_.reserve(slot_count_);
@@ -156,6 +161,10 @@ public:
                 "failed to open NVMe KV tier file: " + path_ + ": " +
                 std::strerror(errno));
         }
+        // Unlink before any subsequent fallible setup, including fallocate.
+        // Constructor failures must not leave large orphaned scratch files.
+        if (!cfg_.durable && ::unlink(path_.c_str()) != 0)
+            throw std::runtime_error("failed to make NVMe KV tier file ephemeral: " + path_);
         if (cfg_.direct_read && cfg_.durable && cfg_.read_only) {
 #if defined(__linux__) && defined(O_DIRECT)
             direct_fd_ = ::open(
@@ -195,7 +204,7 @@ public:
                 rc = ::posix_fallocate(
                     fd_, 0, static_cast<off_t>(cfg_.total_bytes));
             } while (rc == EINTR);
-            if (rc != 0 && rc != EOPNOTSUPP && rc != ENOSYS && rc != EINVAL) {
+            if (rc != 0 && (cfg_.handle_addressed || (rc != EOPNOTSUPP && rc != ENOSYS && rc != EINVAL))) {
                 ::close(fd_);
                 fd_ = -1;
                 throw std::runtime_error(
@@ -216,29 +225,14 @@ public:
                              static_cast<unsigned long long>(cfg_.total_bytes));
             }
 #else
+            if (cfg_.handle_addressed)
+                throw std::runtime_error("physical NVMe reservation is unsupported on this platform");
             std::fprintf(stderr,
                          "[kvmem-io] preallocate_degraded=1 path=%s "
                          "bytes=%llu error=unsupported-platform\n",
                          path_.c_str(),
                          static_cast<unsigned long long>(cfg_.total_bytes));
 #endif
-        }
-        if (!cfg_.durable) {
-            // The backing store is an ephemeral cache, never a recoverable
-            // checkpoint. Unlink it immediately while retaining the open file
-            // descriptor: all positional I/O continues to work, but the
-            // filesystem reclaims the blocks automatically when the process
-            // closes the fd, including abnormal exits and SIGKILL. This also
-            // prevents stale kvmem_nvme.bin files from accumulating across
-            // evaluations.
-            if (::unlink(path_.c_str()) != 0) {
-                const int unlink_error = errno;
-                ::close(fd_);
-                fd_ = -1;
-                throw std::runtime_error(
-                    "failed to make NVMe KV tier file ephemeral: " + path_ +
-                    ": " + std::strerror(unlink_error));
-            }
         }
         if (cfg_.read_only && !cfg_.overlay_dir.empty()) open_overlay();
         if (cfg_.direct_mapped) return;
@@ -247,6 +241,13 @@ public:
             free_slots_.push_back(
                 static_cast<int32_t>(slot_count_ - 1U - i));
         }
+      } catch (...) {
+        // Members remain alive in this ordinary catch inside the constructor.
+        if (direct_fd_ >= 0) ::close(direct_fd_);
+        if (fd_ >= 0) ::close(fd_);
+        if (overlay_fd_ >= 0) ::close(overlay_fd_);
+        throw;
+      }
     }
 
     NvmeKvTier(const NvmeKvTier &) = delete;
@@ -307,11 +308,13 @@ public:
     }
 
     NvmeSlotPlacement place_block(uint32_t block_id) {
+        if (cfg_.handle_addressed) throw std::logic_error("exact NVMe pool has no block-ID placement");
         std::lock_guard<std::mutex> lock(meta_mu_);
         return place_block_locked(block_id);
     }
 
     NvmeSlotPlacement place_block_evicting(uint32_t block_id) {
+        if (cfg_.handle_addressed) throw std::logic_error("exact NVMe pool has no LRU eviction");
         std::lock_guard<std::mutex> lock(meta_mu_);
         NvmeSlotPlacement out = place_block_locked(block_id);
         if (out.slot >= 0 || cfg_.direct_mapped || !free_slots_.empty() ||
@@ -338,6 +341,21 @@ public:
     }
     NvmeIoLease acquire_io(NvmeAllocationHandle handle) const noexcept {
         return allocations_ ? allocations_->acquire(handle) : NvmeIoLease{};
+    }
+    // Reserve actual free capacity during private request preparation. This
+    // never evicts an older allocation or waits for a release callback.
+    NvmeSlotPlacement try_allocate() {
+        std::unique_lock<std::mutex> lock(meta_mu_, std::try_to_lock);
+        if (!lock.owns_lock() || !cfg_.handle_addressed || free_slots_.empty()) return {};
+        return place_block_locked(static_cast<uint32_t>(free_slots_.back()));
+    }
+    // Exact ownership teardown for private, unsubmitted reservations or an
+    // already-quiescent cleanup object. GC must use the try_ form below.
+    NvmeReleaseResult release_owned_allocation(NvmeAllocationHandle handle) {
+        std::lock_guard<std::mutex> lock(meta_mu_);
+        if (!allocations_) return NvmeReleaseResult::Unsupported;
+        const auto result = allocations_->close(handle);
+        return result == NvmeReleaseResult::Released ? release_closed_locked(handle) : result;
     }
     // Nonblocking CPU reclamation. Deferred closes new IO but retains the
     // physical extent; the worker must retry this exact allocation after IO
@@ -936,7 +954,7 @@ private:
     void touch_locked(uint32_t block_id) {
         // A direct-mapped arena never evicts, so maintaining recency would only
         // pay the linear erase below once per access.
-        if (cfg_.direct_mapped) return;
+        if (cfg_.direct_mapped || cfg_.handle_addressed) return;
         erase_lru_locked(block_id);
         lru_.push_back(block_id);
     }
@@ -989,6 +1007,8 @@ public:
     int32_t lru_victim() const { return -1; }
     NvmeAllocationHandle allocation_for_block(uint32_t) const { return {}; }
     NvmeIoLease acquire_io(NvmeAllocationHandle) const noexcept { return {}; }
+    NvmeSlotPlacement try_allocate() { unavailable(); }
+    NvmeReleaseResult release_owned_allocation(NvmeAllocationHandle) { return NvmeReleaseResult::Unsupported; }
     NvmeReleaseResult try_release_allocation(NvmeAllocationHandle) { return NvmeReleaseResult::Unsupported; }
     void write_allocation(const NvmeIoLease &, uint64_t, const void *, uint64_t) const { unavailable(); }
     void read_allocation(const NvmeIoLease &, uint64_t, void *, uint64_t) const { unavailable(); }

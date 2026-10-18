@@ -14,7 +14,7 @@ class HistoricalKvGc;
 
 // A fixed-size lifetime directory; payload ownership stays with its storage
 // binding. ReleaseCallback frees the exact generation's Host bundle; a
-// ResourceRelease separates packed KV, Mean-K, and final storage metadata.
+// ResourceRelease separates packed KV, Mean-K, optional NVMe, and final metadata.
 // Both must tolerate partial retry and must not free GPU allocations or mutate GPU
 // residency: GPU-only execution can still own those resources when it runs.
 // A legacy binding requiring all references to drain can check is_releasing()
@@ -25,13 +25,20 @@ class HistoricalKvRepository {
 public:
     using ReleaseCallback = std::function<bool(const HistoricalKvHandle &)>;
     enum class HostAccess { None, All, PackedKv, MeanK };
-    enum class HostResource { PackedKv, MeanK, Metadata };
+    enum class HostResource { PackedKv, MeanK, Metadata, Nvme };
     struct ResourceRelease {
-        // Metadata runs only after every reference and both payload resources
+        // Metadata runs only after every reference and every payload resource
         // have drained. Each successful resource callback is acknowledged once.
         std::function<bool(const HistoricalKvHandle &, HostResource)> callback;
         uint64_t packed_kv_bytes = 0;
         uint64_t mean_k_bytes = 0;
+        // External allocation owns its own IO admission/refcount protocol.
+        // Nvme callbacks may close/reclaim independently of Host references,
+        // but Metadata/Ready still require successful acknowledgement.
+        uint64_t nvme_bytes = 0;
+        // Prepared before admission and moved into the sole writer lease.
+        // Its destructor returns any unfinished external producer rights.
+        std::shared_ptr<void> writer_resource;
     };
 
     struct RangeObservation {
@@ -43,11 +50,11 @@ public:
     };
 
     enum class RetireResult { Committed, AlreadyRetired, Stale, VersionChanged, Retry };
-    // ResourceReleased means at least one Host component progressed, but the
-    // entire Host bundle is not yet released. HostReleased means the bundle is
-    // gone while identity remains. Neither is a Ready slot or reusable credit.
+    // ResourceReleased means a component progressed without completing the
+    // whole record. HostReleased means the entire Host bundle just completed,
+    // while another dependency remains. Neither grants a Ready slot credit.
     enum class ReclaimResult { Complete, HostReleased, ResourceReleased, Deferred, Stale, Retry };
-    enum class LeaseKind { Writer, Execution, GpuExecution, Read, Transfer, PackedKvRead, PackedKvTransfer, MeanKRead };
+    enum class LeaseKind { Writer, Execution, GpuExecution, Read, Transfer, PackedKvRead, PackedKvTransfer, MeanKRead, ExternalRead };
     enum class CompletionState { Unfinished, Live, Retired };
 
     class Lease {
@@ -69,6 +76,7 @@ public:
         bool has_packed_kv_access() const noexcept;
         bool has_mean_k_access() const noexcept;
         bool has_resource_writer() const noexcept { return shared_ && split_writer_; }
+        const void * writer_resource_identity() const noexcept { return writer_resource_.get(); }
         uint64_t repository_id() const noexcept;
         std::optional<HistoricalKvBlockMeta> metadata() const;
         void reset() noexcept;
@@ -86,6 +94,7 @@ public:
         bool counted_operation_ = false;
         HostAccess access_ = HostAccess::None;
         bool split_writer_ = false;
+        std::shared_ptr<void> writer_resource_;
     };
 
     // Request-private, real physical slots. Reserved slots are neither Ready
@@ -172,6 +181,10 @@ public:
     std::optional<Lease> acquire_packed_kv(HistoricalKvHandle handle);
     std::optional<Lease> acquire_packed_kv_transfer(HistoricalKvHandle handle);
     std::optional<Lease> acquire_mean_k(HistoricalKvHandle handle);
+    // Visibility/identity half of external storage admission. This grants no
+    // payload access: the caller must also acquire the exact allocation lease
+    // before reporting a successful read/transfer admission.
+    std::optional<Lease> acquire_external_read(HistoricalKvHandle handle);
     // When supplied, the content version is checked under the same slot guard
     // as the phase transition. A mismatch leaves the generation Live/Writing.
     RetireResult retire(HistoricalKvHandle handle,

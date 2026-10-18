@@ -1085,7 +1085,7 @@ static void check_access(llama_memory_kvmem & mem) {
     runtime.truncate_to(0);
 }
 
-static void check_managed_async_harvest(llama_memory_kvmem & mem) {
+static void check_managed_async_harvest(llama_memory_kvmem & mem, bool with_nvme = false) {
     using Repository = kvmem::HistoricalKvRepository;
     using Payload = kvmem::HistoricalKvRawStore;
     const auto & legacy_cfg = mem.raw().config();
@@ -1097,6 +1097,12 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
     cfg.packed_v_bytes_per_token = legacy_cfg.v_gpu_row_bytes;
     cfg.mean_k_elements = legacy_cfg.n_embd_k;
     cfg.attention_layers = legacy_cfg.historical_gc_attention_layers;
+    if (with_nvme) {
+        const char * temporary = std::getenv("TMPDIR");
+        cfg.nvme_dir = temporary && *temporary ? temporary : "/tmp";
+        cfg.nvme_bytes = uint64_t(cfg.n_layer) * block *
+            (cfg.packed_k_bytes_per_token + cfg.packed_v_bytes_per_token);
+    }
     auto payload = std::make_shared<Payload>(cfg, 1);
     auto repository = std::make_shared<Repository>(1);
     const std::weak_ptr<Repository> weak_repository = repository;
@@ -1124,7 +1130,7 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                 const auto result = payload->release_resource(*owner, h, resource);
                 return result.code == Payload::ReleaseCode::Released ||
                        result.code == Payload::ReleaseCode::AlreadyReleased;
-            }, kv_bytes, mean_bytes});
+            }, kv_bytes, mean_bytes, prepared.nvme_bytes(), prepared.writer_resource()});
         require(writer.has_value(), "managed harvest slot was not reusable");
         const auto handle = writer->handle();
         require(!round || (handle.slot == previous.slot && handle.generation > previous.generation),
@@ -1231,7 +1237,7 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
                     "in-flight writer retirement failed");
             if (round != 1) require(runtime.unbind_retired_historical_block(0),
                                    "retired writer observation failed");
-            require(reclaim() == Repository::ReclaimResult::Deferred,
+            require(reclaim() == (with_nvme ? Repository::ReclaimResult::Retry : Repository::ReclaimResult::Deferred),
                     "queued DMA writer failed to retain its allocation");
         }
         kvmem_transfer_test_access::commit(mem);
@@ -1252,7 +1258,7 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         } else if (retire_in_flight) {
             // Only 8/32 accepted rows were captured in this decode fixture;
             // an incomplete component must retain its writer's resource claim.
-            require(reclaim() == Repository::ReclaimResult::Deferred,
+            require(reclaim() == (with_nvme ? Repository::ReclaimResult::Retry : Repository::ReclaimResult::Deferred),
                     "partial decode producer released an unfinished component");
         }
         if (round < 2) {
@@ -1348,6 +1354,9 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
             auto kept = keep_mean ? directory.acquire_mean_k(0) : directory.acquire_packed_kv_transfer(0);
             auto gpu = repository->acquire_gpu(handle);
             require(kept && gpu && !kept.lease.has_host_access(), "managed narrow resource admission failed");
+            auto disk_read = with_nvme ? payload->acquire_nvme_read(*repository, handle) :
+                std::optional<Payload::NvmeRead>{};
+            require(!with_nvme || bool(disk_read), "captured NVMe copy could not admit a reader");
             require(repository->retire(handle) == Repository::RetireResult::Committed &&
                     runtime.unbind_retired_historical_block(0), "completed capture retirement failed");
             require(reclaim() == Repository::ReclaimResult::ResourceReleased &&
@@ -1376,6 +1385,18 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
             require(reclaim() == Repository::ReclaimResult::HostReleased && !payload->allocated_payload_bytes() &&
                     !repository->reclaim_completed(handle, repository->repository_id()),
                     "Host completion lost retained GPU identity");
+            if (with_nvme) {
+                require(payload->allocated_nvme_bytes() == cfg.nvme_bytes &&
+                        !payload->acquire_nvme_read(*repository, handle), "retired disk IO lost ownership or admitted a new reader");
+                for (const auto & check : checks) {
+                    std::vector<uint8_t> k(check.k.size()), v(check.v.size());
+                    require(payload->read_nvme_layer(*disk_read, check.il, k.data(), k.size(), v.data(), v.size()) &&
+                            k == check.k && v == check.v, "CUDA-captured disk bytes changed after CPU release");
+                }
+                disk_read.reset();
+                std::printf("PASS captured NVMe: %zu layers read after CPU release, old IO retained %llu bytes\n",
+                            checks.size(), (unsigned long long) cfg.nvme_bytes);
+            }
             gpu.reset();
             std::printf("PASS captured resource split: retained=%s layers=%zu bytes=%llu GPU bytes unchanged\n",
                         keep_mean ? "Mean-K" : "packed-KV", checks.size(),
@@ -1384,7 +1405,7 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem) {
         const bool reclaimed = background_gc
             ? repository->reclaim_completed(handle, repository->repository_id())
             : reclaim() == Repository::ReclaimResult::Complete;
-        require(reclaimed && payload->allocated_payload_bytes() == 0 &&
+        require(reclaimed && payload->allocated_payload_bytes() == 0 && !payload->allocated_nvme_bytes() &&
                 runtime.confirm_reclaimed_historical_block(0), "captured generation did not fully reclaim");
         const auto queued_before = kvmem_transfer_test_access::pending(mem);
         kvmem_transfer_test_access::capture(mem, 0);
@@ -2576,12 +2597,13 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
 }
 
 int main(int argc, char ** argv) {
+    constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 36 : 35;
     if (argc != 2 && argc != 3 && argc != 4) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --scenario 0..34] (requires CUDA)\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --scenario 0..%u] (requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
     }
     try {
-        unsigned first_scenario = 0, end_scenario = 35;
+        unsigned first_scenario = 0, end_scenario = scenario_count;
         bool run_repeated = true, run_reset = true;
         if (argc == 3) {
             const std::string selected = argv[2];
@@ -2592,7 +2614,7 @@ int main(int argc, char ** argv) {
         } else if (argc == 4) {
             require(std::string(argv[2]) == "--scenario", "unknown test selection");
             first_scenario = static_cast<unsigned>(std::stoul(argv[3]));
-            require(first_scenario < 35, "scenario index must be 0..34");
+            require(first_scenario < scenario_count, "scenario index out of range for this build");
             end_scenario = first_scenario + 1;
             run_repeated = false;
             run_reset = false;
@@ -2619,7 +2641,7 @@ int main(int argc, char ** argv) {
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
         for (unsigned scenario = first_scenario; scenario < end_scenario; ++scenario) {
-            if ((scenario >= 3 && scenario <= 12) || scenario >= 30) {
+            if ((scenario >= 3 && scenario <= 12) || (scenario >= 30 && scenario <= 34)) {
                 kp.method = 0;
                 kp.budget = 96;
                 llama_kvmem_set_params(&kp);
@@ -2639,7 +2661,8 @@ int main(int argc, char ** argv) {
             if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
                 mem = hybrid->attn_kvmem();
             require(mem != nullptr, "missing KVMem adapter");
-            if (scenario >= 31) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, false, scenario - 30);
+            if (scenario == 35) check_managed_async_harvest(*mem, true);
+            else if (scenario >= 31) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, false, scenario - 30);
             else if (scenario == 30) check_request_capture(ctx.get(), model.get(), *mem, RetirementPoint::None, true);
             else if (scenario == 13) check_capture_start_failure(*mem);
             else if (scenario >= 14) check_capture_failure(*mem, scenario);
@@ -2658,7 +2681,7 @@ int main(int argc, char ** argv) {
                 check_access(*mem);
             }
             if (scenario == 9) check_context_close_with_paused_worker(ctx, *mem);
-            if (scenario == 12 || scenario >= 32) {
+            if (scenario == 12 || (scenario >= 32 && scenario <= 34)) {
                 std::weak_ptr<kvmem::HistoricalKvRawStore> storage = kvmem_transfer_test_access::capture_storage(*mem);
                 ctx.reset();
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -2667,7 +2690,7 @@ int main(int argc, char ** argv) {
                 require(storage.expired(), "failed real-model domain leaked captured history after checked teardown");
                 std::puts("PASS failed real-model teardown: captured CPU owner released after device cleanup");
             }
-            std::printf("PASS historical model scenario %u/35\n", scenario + 1);
+            std::printf("PASS historical model scenario %u/%u\n", scenario + 1, scenario_count);
         }
         kp.method = 0;
         kp.budget = 96;

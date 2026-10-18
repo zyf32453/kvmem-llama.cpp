@@ -141,7 +141,8 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
                 return released == HistoricalKvRawStore::ReleaseCode::Released ||
                        released == HistoricalKvRawStore::ReleaseCode::AlreadyReleased ||
                        released == HistoricalKvRawStore::ReleaseCode::Absent;
-            }, result->reservation_->ram->payload(i).packed_kv_bytes(), result->reservation_->ram->payload(i).mean_k_bytes()});
+            }, result->reservation_->ram->payload(i).packed_kv_bytes(), result->reservation_->ram->payload(i).mean_k_bytes(),
+               result->reservation_->ram->payload(i).nvme_bytes(), result->reservation_->ram->payload(i).writer_resource()});
         }
         result->domain_->last_use_sequence_ += required;
         result->domain_->request_claimed_ = true;
@@ -215,7 +216,8 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
                 return released == HistoricalKvRawStore::ReleaseCode::Released ||
                        released == HistoricalKvRawStore::ReleaseCode::AlreadyReleased ||
                        released == HistoricalKvRawStore::ReleaseCode::Absent;
-            }, result->reservation_->ram->payload(i).packed_kv_bytes(), result->reservation_->ram->payload(i).mean_k_bytes()});
+            }, result->reservation_->ram->payload(i).packed_kv_bytes(), result->reservation_->ram->payload(i).mean_k_bytes(),
+               result->reservation_->ram->payload(i).nvme_bytes(), result->reservation_->ram->payload(i).writer_resource()});
         }
         return result;
     } catch (const std::bad_alloc &) {

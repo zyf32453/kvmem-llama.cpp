@@ -1,4 +1,9 @@
 #include "kvmem/historical_kv_raw_store.hpp"
+#if defined(_WIN32)
+#include "kvmem/nvme_kv_tier_win.hpp"
+#else
+#include "kvmem/nvme_kv_tier.hpp"
+#endif
 
 #include <algorithm>
 #include <limits>
@@ -32,8 +37,50 @@ size_t payload_bytes(const std::vector<uint8_t> & k,
 
 struct HistoricalKvRawStore::Accounting {
     std::atomic<uint64_t> bytes{0};
+    std::atomic<uint64_t> nvme_bytes{0};
     std::atomic<uint32_t> allocations{0};
 };
+
+struct HistoricalKvRawStore::DiskAllocation {
+    std::shared_ptr<NvmeKvTier> tier;
+    std::shared_ptr<Accounting> accounting;
+    NvmeAllocationHandle handle;
+    uint64_t bytes = 0;
+    std::atomic<bool> returned{false};
+    void return_credit() noexcept {
+        if (!returned.exchange(true, std::memory_order_acq_rel) && accounting)
+            accounting->nvme_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+    }
+    ~DiskAllocation() {
+        // Every IO owner also owns this object and drops its IO lease first.
+        // This is private reservation rollback or already-acknowledged final
+        // metadata cleanup; live GC uses the nonblocking exact callback.
+        if (tier && handle.generation) {
+            const auto result = tier->release_owned_allocation(handle);
+            if (result != NvmeReleaseResult::Released && result != NvmeReleaseResult::AlreadyReleased &&
+                result != NvmeReleaseResult::Stale) std::terminate();
+            return_credit();
+        }
+    }
+};
+struct HistoricalKvRawStore::DiskProducer {
+    std::shared_ptr<DiskAllocation> allocation;
+    NvmeIoLease io;
+};
+
+HistoricalKvRawStore::NvmeRead & HistoricalKvRawStore::NvmeRead::operator=(NvmeRead && other) noexcept {
+    if (this != &other) {
+        // Old IO must drain before its final allocation owner can disappear.
+        io_.reset();
+        allocation_.reset();
+        identity_ = std::move(other.identity_);
+        accounting_ = std::move(other.accounting_);
+        allocation_ = std::move(other.allocation_);
+        io_ = std::move(other.io_);
+        valid_tokens_ = other.valid_tokens_;
+    }
+    return *this;
+}
 
 HistoricalKvRawStore::Block::~Block() {
     // Destroy payload before returning its actual capacity credit. The shared
@@ -59,6 +106,12 @@ uint64_t HistoricalKvRawStore::PreparedPayload::packed_kv_bytes() const noexcept
 }
 uint64_t HistoricalKvRawStore::PreparedPayload::mean_k_bytes() const noexcept {
     return block_ ? block_->mean_k_bytes : 0;
+}
+uint64_t HistoricalKvRawStore::PreparedPayload::nvme_bytes() const noexcept {
+    return block_ && block_->disk ? block_->disk->bytes : 0;
+}
+std::shared_ptr<void> HistoricalKvRawStore::PreparedPayload::writer_resource() const noexcept {
+    return block_ ? block_->private_disk_producer : nullptr;
 }
 uint32_t HistoricalKvRawStore::PreparedPayload::token_capacity() const noexcept {
     return block_ ? block_->valid_tokens : 0;
@@ -116,6 +169,22 @@ HistoricalKvRawStore::HistoricalKvRawStore(HistoricalKvRawStoreConfig config,
     const size_t block_max = multiply(layer_max, config_.n_layer);
     (void) multiply(block_max, capacity);
 
+    if (config_.nvme_bytes) {
+        if (config_.nvme_dir.empty()) throw std::invalid_argument("historical NVMe requires a private directory");
+        disk_k_stride_ = k_max;
+        disk_layer_stride_ = add(k_max, v_max);
+        NvmeKvTierConfig disk;
+        disk.dir = config_.nvme_dir;
+        disk.file_name = "historical-kv.bin";
+        disk.total_bytes = config_.nvme_bytes;
+        disk.slot_bytes = multiply(disk_layer_stride_, config_.n_layer);
+        disk.preallocate = true;
+        disk.drop_page_cache = true;
+        disk.handle_addressed = true;
+        nvme_ = std::make_shared<NvmeKvTier>(disk);
+        if (!nvme_->enabled()) throw std::invalid_argument("historical NVMe budget cannot hold one full extent");
+    }
+
     slots_.reserve(capacity);
     for (uint32_t i = 0; i < capacity; ++i)
         slots_.push_back(std::make_unique<Slot>());
@@ -127,7 +196,9 @@ bool HistoricalKvRawStore::reserve(
     const HistoricalKvRepository::Lease & writer,
     HistoricalKvHandle handle, uint64_t original_begin, uint32_t valid_tokens) {
     const auto meta = writer.metadata();
-    if (!meta || !writer.is_writer() || !same(writer.handle(), handle) ||
+    // Disk writers must be prepared before begin_write_resources so their
+    // original IO ownership can move into the admitted producer.
+    if (nvme_ || !meta || !writer.is_writer() || !same(writer.handle(), handle) ||
         handle.slot >= slots_.size() || !valid_tokens || valid_tokens > config_.max_tokens_per_slot ||
         meta->original_begin != original_begin || meta->valid_tokens != valid_tokens ||
         (meta->life != HistoricalKvLife::Writing && meta->life != HistoricalKvLife::Retired)) return false;
@@ -154,6 +225,22 @@ HistoricalKvRawStore::PreparedPayload HistoricalKvRawStore::prepare_payload(uint
     block->accounting = accounting_;
     block->valid_tokens = token_capacity;
     block->layers.resize(config_.n_layer);
+    if (nvme_) {
+        // Prepare ownership objects before changing allocator capacity. They
+        // roll back exactly if any later RAM preparation fails.
+        block->disk = std::make_shared<DiskAllocation>();
+        block->disk->tier = nvme_;
+        block->disk->bytes = nvme_->slot_bytes();
+        block->private_disk_producer = std::make_shared<DiskProducer>();
+        block->private_disk_producer->allocation = block->disk;
+        const auto placement = nvme_->try_allocate();
+        if (placement.slot < 0) throw std::bad_alloc();
+        block->disk->handle = placement.allocation;
+        block->disk->accounting = accounting_;
+        accounting_->nvme_bytes.fetch_add(block->disk->bytes, std::memory_order_relaxed);
+        block->private_disk_producer->io = nvme_->acquire_io(placement.allocation);
+        if (!block->private_disk_producer->io) throw std::bad_alloc();
+    }
     const size_t k_bytes = multiply(token_capacity, config_.packed_k_bytes_per_token);
     const size_t v_bytes = multiply(token_capacity, config_.packed_v_bytes_per_token);
     for (uint32_t il = 0; il < config_.n_layer; ++il) {
@@ -190,9 +277,11 @@ bool HistoricalKvRawStore::install_payload(
         !valid_tokens || valid_tokens > prepared.token_capacity() ||
         original_begin > std::numeric_limits<uint64_t>::max() - valid_tokens)
         return false;
+    if (prepared.block_->disk && writer.writer_resource_identity() != prepared.block_->private_disk_producer.get())
+        return false;
     const auto meta = writer.metadata();
     if (!meta || meta->original_begin != original_begin ||
-        meta->valid_tokens != valid_tokens ||
+        meta->valid_tokens != valid_tokens || meta->nvme_bytes != prepared.nvme_bytes() ||
         (meta->life != HistoricalKvLife::Writing && meta->life != HistoricalKvLife::Retired)) return false;
 
     Slot & slot = *slots_[handle.slot];
@@ -204,6 +293,8 @@ bool HistoricalKvRawStore::install_payload(
         return false;
 
     auto & block = prepared.block_;
+    block->disk_producer = block->private_disk_producer.get();
+    block->private_disk_producer.reset(); // the admitted writer now owns it
     block->handle = handle;
     block->repository_id = writer.repository_id();
     block->original_begin = original_begin;
@@ -220,6 +311,16 @@ bool HistoricalKvRawStore::install_payload(
     }
     slot.block = std::move(block);
     return true;
+}
+
+void HistoricalKvRawStore::write_disk(const HistoricalKvRepository::Lease & writer, Block & block,
+        uint32_t layer, bool value, uint32_t token_offset, const uint8_t * bytes, size_t count) {
+    if (!block.disk) return;
+    if (writer.writer_resource_identity() != block.disk_producer || !block.disk_producer->io)
+        throw std::logic_error("historical NVMe producer has no original allocation right");
+    const uint64_t offset = uint64_t(layer) * disk_layer_stride_ + (value ? disk_k_stride_ : 0) +
+        uint64_t(token_offset) * (value ? config_.packed_v_bytes_per_token : config_.packed_k_bytes_per_token);
+    block.disk->tier->write_allocation(block.disk_producer->io, offset, bytes, count);
 }
 
 bool HistoricalKvRawStore::write_layer(
@@ -253,6 +354,8 @@ bool HistoricalKvRawStore::write_layer(
         packed_v.size() != target.packed_v.size() ||
         mean_k_sum.size() != target.mean_k_sum.size() ||
         (config_.mean_k_elements == 0 && mean_tokens != 0)) return false;
+    write_disk(writer, *block, layer, false, 0, packed_k.data(), packed_k.size());
+    write_disk(writer, *block, layer, true, 0, packed_v.data(), packed_v.size());
     std::copy(packed_k.begin(), packed_k.end(), target.packed_k.begin());
     std::copy(packed_v.begin(), packed_v.end(), target.packed_v.begin());
     std::copy(mean_k_sum.begin(), mean_k_sum.end(), target.mean_k_sum.begin());
@@ -305,6 +408,8 @@ bool HistoricalKvRawStore::write_slice(
                             config_.packed_k_bytes_per_token;
     const size_t v_offset = static_cast<size_t>(token_offset) *
                             config_.packed_v_bytes_per_token;
+    write_disk(writer, *block, layer, false, token_offset, packed_k.data(), packed_k.size());
+    write_disk(writer, *block, layer, true, token_offset, packed_v.data(), packed_v.size());
     std::copy(packed_k.begin(), packed_k.end(), target.packed_k.begin() + k_offset);
     std::copy(packed_v.begin(), packed_v.end(), target.packed_v.begin() + v_offset);
     for (size_t i = 0; i < mean_k_sum.size(); ++i)
@@ -349,6 +454,7 @@ bool HistoricalKvRawStore::write_packed_k_slice(
                            config_.packed_k_bytes_per_token) return false;
     const size_t offset = static_cast<size_t>(token_offset) *
                           config_.packed_k_bytes_per_token;
+    write_disk(writer, *block, layer, false, token_offset, packed_k, bytes);
     std::copy_n(packed_k, bytes, target.packed_k.begin() + offset);
     target.k_written_tokens += token_count;
     mark_layer_complete(*block, target);
@@ -387,6 +493,7 @@ bool HistoricalKvRawStore::write_packed_v_slice(
                            config_.packed_v_bytes_per_token) return false;
     const size_t offset = static_cast<size_t>(token_offset) *
                           config_.packed_v_bytes_per_token;
+    write_disk(writer, *block, layer, true, token_offset, packed_v, bytes);
     std::copy_n(packed_v, bytes, target.packed_v.begin() + offset);
     target.v_written_tokens += token_count;
     mark_layer_complete(*block, target);
@@ -452,6 +559,10 @@ bool HistoricalKvRawStore::publish_complete(
     const Block * block = slot.block.get();
     if (!block || block->repository_id != repository.repository_id() || !same(block->handle, handle)) return false;
     const auto required = config_.attention_layers.empty() ? config_.n_layer : config_.attention_layers.size();
+    if (block->disk && block->packed_complete_layers == required) {
+        if (writer.writer_resource_identity() != block->disk_producer) return false;
+        block->disk_producer->io.reset();
+    }
     if (writer.has_resource_writer()) {
         if (block->packed_complete_layers == required)
             repository.release_writer_resource(writer, HistoricalKvRepository::HostResource::PackedKv);
@@ -498,6 +609,44 @@ HistoricalKvRawStore::read_packed_kv(const HistoricalKvRepository::Lease & reade
     const auto & source = block->layers[layer];
     if (!source.written) return std::nullopt;
     return LayerSnapshot{source.packed_k, source.packed_v, {}, 0};
+}
+
+std::optional<HistoricalKvRawStore::NvmeRead> HistoricalKvRawStore::acquire_nvme_read(
+        HistoricalKvRepository & repository, HistoricalKvHandle handle) const {
+    if (!nvme_ || handle.slot >= slots_.size()) return std::nullopt;
+    auto identity = repository.acquire_external_read(handle);
+    if (!identity) return std::nullopt;
+    const auto & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    const auto * block = slot.block.get();
+    const auto required = config_.attention_layers.empty() ? config_.n_layer : config_.attention_layers.size();
+    if (!block || block->repository_id != repository.repository_id() || !same(block->handle, handle) ||
+        !block->disk || block->nvme_released || block->written_layers != required) return std::nullopt;
+    auto io = block->disk->tier->acquire_io(block->disk->handle);
+    if (!io) return std::nullopt;
+    // Retirement may have won after the identity pin but before the disk pin.
+    // Refuse that new operation; an already returned read keeps its old rights.
+    const auto meta = identity->metadata();
+    if (!meta || meta->life != HistoricalKvLife::Live) return std::nullopt;
+    NvmeRead result;
+    result.identity_ = std::move(*identity);
+    result.accounting_ = accounting_;
+    result.allocation_ = block->disk;
+    result.io_ = std::move(io);
+    result.valid_tokens_ = block->valid_tokens;
+    return result;
+}
+
+bool HistoricalKvRawStore::read_nvme_layer(const NvmeRead & reader, uint32_t layer,
+        uint8_t * packed_k, size_t k_bytes, uint8_t * packed_v, size_t v_bytes) const {
+    if (!reader || reader.accounting_ != accounting_ || !required_layer(layer) ||
+        !packed_k || !packed_v || k_bytes != size_t(reader.valid_tokens_) * config_.packed_k_bytes_per_token ||
+        v_bytes != size_t(reader.valid_tokens_) * config_.packed_v_bytes_per_token) return false;
+    const auto & allocation = *reader.allocation_;
+    const uint64_t offset = uint64_t(layer) * disk_layer_stride_;
+    allocation.tier->read_allocation(reader.io_, offset, packed_k, k_bytes);
+    allocation.tier->read_allocation(reader.io_, offset + disk_k_stride_, packed_v, v_bytes);
+    return true;
 }
 
 std::optional<HistoricalKvRawStore::BlockInfo>
@@ -563,6 +712,7 @@ HistoricalKvRawStore::release(const HistoricalKvRepository & repository,
             return {ReleaseCode::Stale, 0};
         if (!repository.is_host_releasing(handle))
             return {ReleaseCode::Busy, 0};
+        if (slot.block->disk) return {ReleaseCode::Busy, 0}; // requires independent resource callbacks
         retired = std::move(slot.block);
         bytes = retired->payload_bytes;
         slot.releasing = true;
@@ -588,6 +738,42 @@ HistoricalKvRawStore::ReleaseResult HistoricalKvRawStore::release_resource(
     if (!handle.incarnation || !handle.generation || handle.slot >= slots_.size())
         return {ReleaseCode::Stale, 0};
     auto & slot = *slots_[handle.slot];
+    if (resource == Resource::Nvme) {
+        std::shared_ptr<DiskAllocation> allocation;
+        {
+            std::unique_lock<std::mutex> lock(slot.mu, std::try_to_lock);
+            if (!lock.owns_lock() || slot.releasing) return {ReleaseCode::Busy, 0};
+            if (!slot.block) {
+                if (slot.last_released_repository_id == repository.repository_id() && same(slot.last_released, handle))
+                    return {ReleaseCode::AlreadyReleased, 0};
+                if (slot.last_released_repository_id == repository.repository_id() &&
+                    slot.last_released.incarnation == handle.incarnation && handle.generation <= slot.last_released.generation)
+                    return {ReleaseCode::Stale, 0};
+                // A retired writer may still install its prepared payload.
+                // Only the final no-reference phase can acknowledge absence.
+                return repository.is_releasing(handle) && repository.is_resource_releasing(handle, resource) ?
+                    ReleaseResult{ReleaseCode::Absent, 0} : ReleaseResult{ReleaseCode::Busy, 0};
+            }
+            const auto & block = *slot.block;
+            if (block.repository_id != repository.repository_id() || !same(block.handle, handle))
+                return {ReleaseCode::Stale, 0};
+            if (!repository.is_resource_releasing(handle, resource)) return {ReleaseCode::Busy, 0};
+            if (!block.disk) return {ReleaseCode::Absent, 0};
+            if (block.nvme_released) return {ReleaseCode::AlreadyReleased, 0};
+            allocation = block.disk;
+        }
+        const auto result = allocation->returned.load(std::memory_order_acquire) ? NvmeReleaseResult::AlreadyReleased :
+            allocation->tier->try_release_allocation(allocation->handle);
+        if (result != NvmeReleaseResult::Released && result != NvmeReleaseResult::AlreadyReleased)
+            return {result == NvmeReleaseResult::Stale ? ReleaseCode::Stale : ReleaseCode::Busy, 0};
+        allocation->return_credit();
+        // The repository's release owner retains this exact metadata record.
+        // If its content lock is busy, retry acknowledgement on the next scan.
+        std::unique_lock<std::mutex> lock(slot.mu, std::try_to_lock);
+        if (!lock.owns_lock()) return {ReleaseCode::Busy, 0};
+        slot.block->nvme_released = true;
+        return {ReleaseCode::Released, result == NvmeReleaseResult::Released ? allocation->bytes : 0};
+    }
     std::unique_ptr<Block> metadata;
     Block * block = nullptr;
     {
@@ -607,7 +793,8 @@ HistoricalKvRawStore::ReleaseResult HistoricalKvRawStore::release_resource(
             return {ReleaseCode::Stale, 0};
         if (!repository.is_resource_releasing(handle, resource)) return {ReleaseCode::Busy, 0};
         if (resource == Resource::Metadata) {
-            if (!block->packed_kv_released || !block->mean_k_released || block->payload_bytes)
+            if (!block->packed_kv_released || !block->mean_k_released || block->payload_bytes ||
+                (block->disk && !block->nvme_released))
                 return {ReleaseCode::Busy, 0};
             metadata = std::move(slot.block);
         } else if (resource == Resource::PackedKv ? block->packed_kv_released : block->mean_k_released) {
@@ -660,6 +847,10 @@ HistoricalKvRawStore::ReleaseResult HistoricalKvRawStore::release_resource(
 
 uint64_t HistoricalKvRawStore::allocated_payload_bytes() const noexcept {
     return accounting_->bytes.load(std::memory_order_relaxed);
+}
+
+uint64_t HistoricalKvRawStore::allocated_nvme_bytes() const noexcept {
+    return accounting_->nvme_bytes.load(std::memory_order_relaxed);
 }
 
 uint32_t HistoricalKvRawStore::capacity() const noexcept {
