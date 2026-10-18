@@ -40,6 +40,17 @@ int main() try {
           moved.get_allocator().arena() == &arena && frees == before &&
           arena.used_bytes() <= arena.capacity_bytes(),
           "fixed arena copy/move grew the heap or lost bounded storage");
+    auto reusable = std::make_shared<kvmem::FixedByteArena>(128);
+    auto * first = reusable->allocate(128, alignof(uint64_t));
+    auto reader = reusable;
+    check(!kvmem::FixedByteArena::reset_exclusive(reusable) && reusable->used_bytes() == 128,
+          "arena reset while an old request still owned it");
+    reader.reset();
+    deny_new = true;
+    const bool reset = kvmem::FixedByteArena::reset_exclusive(reusable);
+    auto * second = reusable->allocate(128, alignof(uint64_t));
+    deny_new = false;
+    check(reset && first == second, "quiescent arena did not reuse its original allocation");
     std::puts("PASS fixed byte arena: real storage, no C++ allocation or free during vector growth/copy/move, bounded exhaustion");
 } catch (const std::exception & e) {
     deny_new = false;

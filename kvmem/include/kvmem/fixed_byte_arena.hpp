@@ -34,6 +34,14 @@ public:
     }
     size_t capacity_bytes() const noexcept { return storage_.size() * sizeof(std::max_align_t); }
     size_t used_bytes() const noexcept { return used_; }
+    // The serialized owner may reuse the arena only after all owning users
+    // (including empty containers with retained buffers) have been destroyed.
+    // Every such user must hold a shared owner, as CaptureBatch does.
+    static bool reset_exclusive(const std::shared_ptr<FixedByteArena> & owner) noexcept {
+        if (!owner || owner.use_count() != 1) return false;
+        owner->used_ = 0;
+        return true;
+    }
 
 private:
     std::vector<std::max_align_t> storage_;

@@ -145,6 +145,7 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
         }
         result->domain_->last_use_sequence_ += required;
         result->domain_->request_claimed_ = true;
+        result->owns_domain_claim_ = true;
         return result;
     } catch (const std::bad_alloc &) {
         return {};
@@ -227,7 +228,7 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
 bool HistoricalKvCaptureSession::admit() noexcept {
     if (admitted_ || failed_ || finished_ || !reservation_ || runtime_.pending()) return false;
     if (domain_) {
-        if (!domain_->request_claimed_ || domain_->repository_->closed() ||
+        if (!owns_domain_claim_ || !domain_->request_claimed_ || domain_->repository_->closed() ||
             runtime_.store().total_tokens() != expected_rows_ ||
             runtime_.store().block_count() != expected_blocks_ ||
             runtime_.store().table_revision() != expected_revision_ ||
@@ -248,7 +249,7 @@ HistoricalKvCaptureSession::~HistoricalKvCaptureSession() {
     // Tasks retain their own repository/storage/context. Closing admission
     // does not revoke their existing writer or free their installed payload.
     if (repository_ && !domain_) repository_->close();
-    if (domain_) {
+    if (domain_ && owns_domain_claim_) {
         if (admitted_ && !finished_) domain_->close();
         domain_->request_claimed_ = false;
     }
@@ -267,7 +268,10 @@ void HistoricalKvCaptureSession::release_unused() noexcept {
 void HistoricalKvCaptureSession::fail() noexcept {
     failed_ = true;
     repository_->close();
-    if (domain_) domain_->request_claimed_ = false;
+    if (domain_ && owns_domain_claim_) {
+        domain_->request_claimed_ = false;
+        owns_domain_claim_ = false;
+    }
     producers_.clear();
     writers_.clear();
     release_unused(); // Only unused private allocations, on the CPU worker.
@@ -337,7 +341,10 @@ bool HistoricalKvCaptureSession::finish() {
         }
     }
     release_unused();
-    if (domain_) domain_->request_claimed_ = false;
+    if (domain_ && owns_domain_claim_) {
+        domain_->request_claimed_ = false;
+        owns_domain_claim_ = false;
+    }
     live_blocks_at_finish_ = live;
     finished_ = true;
     return true;

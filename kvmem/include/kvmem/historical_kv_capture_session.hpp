@@ -13,7 +13,8 @@ class HistoricalKvCaptureDomain;
 // the RAM reservation and producer handoff. This is NOT
 // full production request admission: cell/active/backend allocations and
 // additional GPU routes remain fallible; failed sessions drain their
-// tasks. No reset, continuation or streaming is supported.
+// tasks. A domain may admit a new finite request after finish; reset,
+// branching and streaming are not supported by this owner.
 class HistoricalKvCaptureSession {
 public:
     // Prepare private RAM and append metadata without changing the runtime.
@@ -97,6 +98,7 @@ private:
     uint32_t expected_rows_ = 0, expected_blocks_ = 0, reserved_blocks_ = 0;
     uint32_t live_blocks_at_finish_ = 0;
     bool input_ = true, failed_ = false, finished_ = false, admitted_ = false;
+    bool owns_domain_claim_ = false;
 };
 
 // Runtime-scoped ownership of the physical pool and bounded metadata table.

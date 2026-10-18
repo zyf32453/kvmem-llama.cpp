@@ -509,6 +509,7 @@ static void persistent_domain_reuses_capacity_across_requests() {
     const auto table_bytes = runtime.store().allocated_bytes();
     HistoricalKvHandle previous{};
     uint64_t previous_use = 0;
+    std::unique_ptr<HistoricalKvCaptureSession> finished_request;
     for (uint32_t request = 0; request < 24; ++request) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (cleanup.occupied() > 1 && std::chrono::steady_clock::now() < deadline)
@@ -518,6 +519,7 @@ static void persistent_domain_reuses_capacity_across_requests() {
             domain, demand(4, 0, 1), &cleanup);
         check(session && session->reserved_blocks() == 1 && session->admit(),
               "reclaimed Ready slot was not admitted into the next request");
+        finished_request.reset(); // Must not cancel the new request's domain claim.
         check(!HistoricalKvCaptureSession::try_prepare_next(domain, demand(4, 0, 1), &cleanup),
               "a second request bypassed the domain claim");
         check(session->next_use_sequence() > previous_use,
@@ -537,7 +539,7 @@ static void persistent_domain_reuses_capacity_across_requests() {
         task.reset();
         check(session->end_input() && session->finish(),
               "persistent request did not complete its own producers");
-        session.reset();
+        finished_request = std::move(session);
         check(!repository->closed() &&
               runtime.store().block_count() <= 2 &&
               runtime.historical_shadow_directory().size() <= 2 &&
@@ -556,6 +558,7 @@ static void persistent_domain_reuses_capacity_across_requests() {
     check(runtime.store().total_tokens() == 96 && repository->ready_count() == 2 &&
           runtime.store().block_count() == 2,
           "24 requests did not exceed physical capacity by twelvefold");
+    finished_request.reset();
     domain.reset();
     wait_cleanup(cleanup);
     check(repository->closed(), "persistent domain teardown left writer admission open");

@@ -305,6 +305,11 @@ struct kvmem_transfer_test_access {
     static bool capture_domain_unpublished(const llama_memory_kvmem & mem) {
         return !mem.historical_domain_;
     }
+    static std::shared_ptr<kvmem::FixedByteArena> capture_arena(const llama_memory_kvmem & mem) {
+        return mem.capture_arena_;
+    }
+    static const void * row_buffer(const llama_memory_kvmem & mem) { return mem.row_positions_.data(); }
+    static size_t row_capacity(const llama_memory_kvmem & mem) { return mem.row_positions_.capacity(); }
     static bool append_after_failure(llama_memory_kvmem & mem) { return mem.prepare_working_set(1); }
     static uint64_t source_readers(const llama_memory_kvmem & mem) {
         uint64_t total = 0;
@@ -344,6 +349,9 @@ struct kvmem_transfer_test_access {
         mem.historical_gc_->start();
     }
     static void stop_gc(llama_memory_kvmem & mem) { mem.historical_gc_->stop(); }
+    static kvmem::HistoricalKvGc::Stats gc_stats(const llama_memory_kvmem & mem) {
+        return mem.historical_gc_->stats();
+    }
     static void on_submission(llama_memory_kvmem & mem, std::function<void()> hook) {
         mem.historical_submission_test_hook_ = std::move(hook);
     }
@@ -2222,12 +2230,111 @@ static void check_context_close_with_paused_worker(
     std::puts("PASS real context teardown: returned before paused GC resumed, CPU owners retained then released on cleanup worker");
 }
 
+static void check_repeated_requests(llama_context * ctx, llama_model * model,
+                                    llama_memory_kvmem & mem, bool generate) {
+    const auto * vocab = llama_model_get_vocab(model);
+    const std::string text(600, 'a');
+    const int count = -llama_tokenize(vocab, text.c_str(), text.size(), nullptr, 0, true, true);
+    std::vector<llama_token> tokens(count);
+    require(llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(), count, true, true) == count && count >= 64,
+            "repeated request fixture has too few tokens");
+    const uint32_t capacity = generate ? 8 : 6, requests = generate ? 48 : 36;
+    const uint32_t max_output = generate ? 3 : 0, max_appends = 1 + max_output;
+    require(llama_kvmem_historical_capture_begin(ctx, capacity, 64, max_output, max_appends) &&
+            llama_kvmem_historical_gc_start(2, capacity / 2, capacity - 2),
+            "repeated request domain admission failed");
+    const auto repository = kvmem_transfer_test_access::capture_repository(mem);
+    const auto storage = kvmem_transfer_test_access::capture_storage(mem);
+    const auto slot_payload_bytes = storage->allocated_payload_bytes() / (generate ? 5 : 2);
+    const auto row_buffer = kvmem_transfer_test_access::row_buffer(mem);
+    const auto row_capacity = kvmem_transfer_test_access::row_capacity(mem);
+    const auto table_bytes = mem.store().allocated_bytes();
+    const auto arena_address = kvmem_transfer_test_access::capture_arena(mem).get();
+    std::vector<kvmem::HistoricalKvHandle> old_handles;
+    uint32_t total_tokens = 0, total_blocks = 0, output_tokens = 0;
+    for (unsigned request = 0; request < requests; ++request) {
+        // Alternate shapes, end generation early on odd requests, and leave
+        // short immutable tails to exercise unused-reservation cleanup.
+        const uint32_t input = generate && request % 2 ? 48 : 64;
+        const uint32_t output = generate ? (request % 2 ? 1 : 3) : 0;
+        if (request) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            bool admitted = false;
+            do {
+                admitted = llama_kvmem_historical_capture_begin(ctx, capacity, input, max_output, max_appends);
+                if (!admitted) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (!admitted && !repository->closed() && std::chrono::steady_clock::now() < deadline);
+            require(admitted, "next real request could not reuse reclaimed capacity");
+        }
+        require(!llama_kvmem_historical_capture_begin(ctx, capacity, input, max_output, max_appends),
+                "overlapping real request bypassed domain ownership");
+        auto batch = llama_batch_get_one(tokens.data(), input);
+        require(llama_decode(ctx, batch) == 0, "repeated real request failed decoding");
+        llama_synchronize(ctx);
+        mem.end_prefill_capture();
+        for (uint32_t i = 0; i < output; ++i) {
+            const auto * logits = llama_get_logits_ith(ctx, -1);
+            require(logits != nullptr, "repeated generation has no logits");
+            llama_token next = std::max_element(logits, logits + llama_vocab_n_tokens(vocab)) - logits;
+            auto generated = llama_batch_get_one(&next, 1);
+            require(llama_decode(ctx, generated) == 0, "repeated request failed generated decode");
+            llama_synchronize(ctx);
+        }
+        require(llama_kvmem_historical_capture_finish(), "repeated real request failed completion");
+        const auto request_start = total_tokens;
+        total_tokens += input + output;
+        total_blocks += (input + 31) / 32 + output;
+        output_tokens += output;
+        require(mem.store_n_tokens() == total_tokens && mem.store().block_count() <= capacity &&
+                mem.runtime().historical_shadow_directory().size() <= capacity &&
+                mem.store().allocated_bytes() == table_bytes &&
+                kvmem_transfer_test_access::row_buffer(mem) == row_buffer &&
+                kvmem_transfer_test_access::row_capacity(mem) == row_capacity && row_capacity == capacity * 32 &&
+                kvmem_transfer_test_access::capture_arena(mem).get() == arena_address &&
+                storage->allocated_payload_bytes() <= capacity * slot_payload_bytes &&
+                !repository->closed(), "repeated request grew metadata or lost its domain");
+        for (const auto handle : old_handles)
+            if (repository->completion_state(handle) == kvmem::HistoricalKvRepository::CompletionState::Retired)
+                require(!repository->acquire_read(handle), "recycled request revived retired history");
+        for (const auto & block : mem.store().blocks())
+            if (block.n_tokens && block.orig_pos_start >= request_start)
+                old_handles.push_back(mem.runtime().historical_shadow_directory().observe(block.block_id).handle);
+        if (!request) {
+            auto old_capture = kvmem_transfer_test_access::capture_arena(mem);
+            require(!llama_kvmem_historical_capture_begin(ctx, capacity, 64, max_output, max_appends),
+                    "new request reset an arena still owned by an old capture");
+        }
+    }
+    require(total_tokens >= 10 * capacity * 32 && mem.store().block_count() == capacity,
+            "real request trajectory did not reach tenfold physical capacity");
+    kvmem_transfer_test_access::stop_gc(mem); // Outside the final completed request.
+    const auto stats = kvmem_transfer_test_access::gc_stats(mem);
+    require(stats.reclaimed >= total_blocks - capacity && stats.committed >= stats.reclaimed &&
+            !stats.policy_failures && !stats.worker_failures,
+            "repeated model requests did not physically reclaim enough generations");
+    std::printf("PASS real repeated requests: %u requests, %u tokens (%u generated), %u blocks through %u physical slots, reclaimed=%llu, fixed rows/table/arena/payload, stale handles denied\n",
+                requests, total_tokens, output_tokens, total_blocks, capacity,
+                (unsigned long long) stats.reclaimed);
+}
+
 int main(int argc, char ** argv) {
-    if (argc != 2) {
-        std::fprintf(stderr, "Usage: %s model.gguf (requires CUDA)\n", argv[0]);
+    if (argc != 2 && argc != 3 && argc != 4) {
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --scenario 0..34] (requires CUDA)\n", argv[0]);
         return argc == 1 ? 77 : 1;
     }
     try {
+        unsigned first_scenario = 0, end_scenario = 35;
+        bool run_repeated = true;
+        if (argc == 3) {
+            require(std::string(argv[2]) == "--repeated", "unknown test selection");
+            end_scenario = 0;
+        } else if (argc == 4) {
+            require(std::string(argv[2]) == "--scenario", "unknown test selection");
+            first_scenario = static_cast<unsigned>(std::stoul(argv[3]));
+            require(first_scenario < 35, "scenario index must be 0..34");
+            end_scenario = first_scenario + 1;
+            run_repeated = false;
+        }
         llama_backend_init();
         ggml_backend_load_all();
         auto mp = llama_model_default_params();
@@ -2249,7 +2356,7 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario = 0; scenario < 35; ++scenario) {
+        for (unsigned scenario = first_scenario; scenario < end_scenario; ++scenario) {
             if ((scenario >= 3 && scenario <= 12) || scenario >= 30) {
                 kp.method = 0;
                 kp.budget = 96;
@@ -2305,6 +2412,14 @@ int main(int argc, char ** argv) {
         llama_kvmem_set_params(&kp);
         cp.n_ubatch = 16;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
+        for (bool generate : {false, true}) if (run_repeated) {
+            std::unique_ptr<llama_context, decltype(&llama_free)> repeated_ctx(
+                llama_init_from_model(model.get(), cp), llama_free);
+            require(bool(repeated_ctx), "repeated request context init failed");
+            auto * repeated_mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(repeated_ctx.get()));
+            require(repeated_mem != nullptr, "repeated request adapter is missing");
+            check_repeated_requests(repeated_ctx.get(), model.get(), *repeated_mem, generate);
+        }
         std::unique_ptr<llama_context, decltype(&llama_free)> backend_guard_ctx(
             llama_init_from_model(model.get(), cp), llama_free);
         require(bool(backend_guard_ctx), "backend guard context init failed");

@@ -51,9 +51,9 @@ HistoricalKvCleanup::~HistoricalKvCleanup() {
     worker_.join();
 }
 HistoricalKvCleanup & HistoricalKvCleanup::process() {
-    // A production adapter domain may hold three cells (domain metadata,
-    // request-private RAM, adapter teardown), so 64 cells admit at most 21
-    // such domains concurrently. Reuse follows CPU destruction only.
+    // A production adapter domain holds cells for metadata, request-private
+    // RAM and final teardown, plus a transient cell during request handoff.
+    // All admissions share this fixed bound; reuse follows CPU destruction.
     static HistoricalKvCleanup service(64);
     return service;
 }

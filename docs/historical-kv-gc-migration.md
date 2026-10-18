@@ -563,16 +563,38 @@ Linux 宿主 CTest **27/27**、相关 ASan/UBSan **2/2** 通过。TSan 首次受
 
 此轮先把 llama 适配器的**首个**受限请求接到持久域：域和请求 RAM 都在准备阶段保持私有，与现有 GPU、cell、图和输入 workspace 一起检查，最后由请求 `admit` 安装元数据；适配器在关闭时把域与 capture、runtime、GC 一同交给 CPU 清理对象，保证 worker 与销毁顺序。真实模型回归增加断言，确认失败准备不发布域，成功请求的域与 capture 指向同一仓库，`finish` 后仓库仍开放。最终 GGUF/CUDA **35/35** 场景和 backend guard 通过，原始日志为 `/tmp/kvmem-domain-adapter-final-model.log`。recency/RAM delete CLI 真实推理完成 356-token 输入、8-token 输出，`proposed=committed=reclaimed=8`、policy/worker failure 为 0，GPU 延期/归还各 8 次；日志 `/tmp/kvmem-domain-adapter-delete.log`。此外，CPU 清理队列固定 64 格；适配器域最多同时占用域元数据、请求私有 RAM、适配器销毁三个格位，因此最坏同时接纳量不超过 21 个域，耗尽时拒绝新请求而不等待。
 
-适配器目前仍拒绝第二次 `begin`、cached-turn continuation、reset/truncate，server 也未调用多请求入口；因此宿主级 12 倍轨迹还不是生产多请求 P4 验收。下一步需复用或重新预约每次请求的 GPU/cell/图与 capture arena，保留正确的 active/GC 状态，处理跨请求缓存中的物理 ID，再运行真实模型的连续请求长轨迹。已接纳请求的其余构图和后端资源也仍未全部纳入 P3 预算。
+截至首请求接线时，适配器仍拒绝第二次 `begin`、cached-turn continuation、reset/truncate，server 也未调用多请求入口；因此当时宿主级 12 倍轨迹还不是生产多请求 P4 验收。后续同一上下文的有界连续请求见下一节。已接纳请求的其余构图和后端资源仍未全部纳入 P3 预算。
+
+### 同一真实模型上下文的连续请求与固定行元数据（2026-10-18）
+
+适配器现在允许在前一有限请求成功 `finish` 后，使用相同 capacity 和同一个 GC manager 再次 `begin`。新请求沿原始位置继续追加，单独预约其输入、输出和追加次数上界。入口要求没有未执行计划、旧执行租约、采集队列、GPU source reader 或仍使用采集 arena 的对象；Ready 槽位或清理队列不足就返回拒绝，不在入口等待回收。请求失败后域仍关闭，不能以重新 `begin` 恢复半完成的请求。此入口尚未接到 server 的请求调度、缓存命中或分支恢复流程。
+
+`row_positions_` 原来按累计 token 位置增长，现在在域准备阶段按 `capacity × block_tokens` 分配。通过位置索引取得当前物理表项，再定位该项内的行；表项换代后使用新代行数据，旧原始位置不再映射到新代。采集 arena 和 slot/microbatch workspace 同样按域容量一次准备，在所有持有 arena 的旧对象退出后才重置分配游标。`seq_pos_max` 使用域内累计原始位置，避免最后一个 GPU 驻留块退休后把下一请求的位置错误地回退。请求边界只清理已经退休且无设备使用者的 GPU 映射；CPU payload 的释放仍由后台 GC 完成，这不是让 GC worker 驱逐正在执行的 GPU 工作集。
+
+已完成的旧请求对象交给固定容量的 CPU 清理队列销毁。修正了一个域所有权问题：旧请求析构过去会无条件清除 `request_claimed_`，从而可能取消新请求的独占标记；现在每个请求显式记录自己是否仍持有该标记，`finish`/`fail` 后不再改动下一请求的所有权。宿主回归特意在新请求接纳之后才销毁旧请求，再验证第三个重叠请求仍被拒绝。arena 测试则验证旧 owner 存活时拒绝重置，完全退出后在禁止 C++ 分配的区间复用同一地址。清理队列仍固定 64 格，但连续请求会额外暂存旧请求和未用预约；前节首请求的三格估算不能视作连续请求并发容量保证，实际接纳由所有未归还票据共同约束。
+
+真实 GGUF/CUDA 长轨迹现在调用生产 `begin → decode → end_prefill → finish` 入口，始终保留同一个模型上下文和仓库域：
+
+- 36 次请求，每次 64-token 输入，累计 **2,304 token / 72 块**，仅 **6 个物理槽位**，达到 token 容量的 **12 倍**；本次实际回收 70 块。
+- 48 次请求交替使用 64/48-token 输入，分别生成 3/1 token；每次均预约最多 3 个输出，覆盖提前结束、短尾块和未用预约归还。累计 **2,784 token（含 96 个生成 token）/ 192 块**，仅 **8 个物理槽位**，超过 token 容量的 **10 倍**；本次实际回收 191 块。
+- 每轮断言块表与 shadow directory 不超过固定槽数、行 buffer 地址和容量不变、采集 arena 地址不变、实际 payload 字节不超过物理容量，旧代退休句柄不能重新取得读取权。重叠 `begin` 和旧 arena owner 尚存时的 `begin` 必须拒绝。测试在两个已完成请求之间可重试接纳；请求入口本身和已接纳请求不依赖这种等待。
+
+宿主 CTest **27/27**，涉及 arena、capture session 和 shadow directory 的 ASan/UBSan **3/3**、TSan **3/3** 通过。最终版本的真实模型 **35/35** 场景、两条长轨迹和 backend guard 全部通过，日志 `/tmp/kvmem-repeated-confirm-model.log`；两条长轨迹单独运行也通过，日志 `/tmp/kvmem-repeated-generation-model.log`。回收计数随后台执行时序变化：包含生成的轨迹单独运行回收 191 块，完整回归中回收 190 块，均满足至少释放 `192 - 8` 个旧块才能完成整条轨迹的断言。测试程序新增 `--repeated` 和 `--scenario 0..34`，便于单独重现连续请求及故障注入场景。
+
+CLI 兼容性验收也通过：recency/RAM delete 以 capacity=32、Ready low=12/high=16 完成 **356-token 输入、8-token 输出**，`proposed=committed=reclaimed=8`，policy/worker failure 为 0，GPU source 延期与归还各 8 次，日志 `/tmp/kvmem-repeated-pressure-delete.log`。同样容量的默认 low=8/high=16 用例正常推理但没有触发回收（预约后的 Ready 恰为 8），该结果仅计作兼容性检查，日志 `/tmp/kvmem-repeated-final-delete.log`。未启用 historical GC 的普通 retrieval 完成 **420-token prompt eval（含 64-token replay）、8-token 输出**，日志 `/tmp/kvmem-repeated-final-retrieval.log`。所有模型验收均在远程隔离副本 `/tmp/kvmem-gc-99bef27.3CD9MU` 中进行；本地待提交的 10 个源码/测试文件与远程受测文件的 SHA-256 完全一致。
+
+本轮首次完整模型回归曾在旧场景 11/35 的 CUDA stream 同步处报告一次非法访问，日志 `/tmp/kvmem-repeated-model.log`；后续相同场景单独运行和两次完整回归均通过，原因仍未确认。尝试 CUDA memcheck 时，远程 WSL/WDDM 调试接口初始化失败，不能据此声称 GPU 内存检查通过，诊断保留在 `/tmp/kvmem-repeated-stageout-memcheck.log`。这项异常仍需追踪，不能用成功重跑替代根因结论。
+
+上述结果是**单 GPU、单 lane、文本、recency、RAM 的适配器连续请求**验收，证明所列存储和元数据可以跨请求复用；它不是 server 接入、全部 CPU/GPU 内存有界或完整 P3/P4 已完成的证明。其余构图/后端分配、reset/checkpoint、支持组合和效果对照仍在下列待办内。
 
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
-1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；仍需接入 server、多请求生命周期及错误取消。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
+1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。仍需接入 server 调度、缓存命中/分支与错误取消。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
 4. **会话、检查点与支持组合。** reset/truncate/关闭统一结算旧代任务，保证 worker 和存储的销毁顺序；闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到完整生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 
-单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store、宿主预约追加块表以及新增的宿主持久域入口具备固定物理槽位跨请求复用；llama 适配器/server 的多请求生命周期、旧计划引用及相关队列仍需改造。当前结果不证明生产长期总内存有界，也不证明已接纳请求完全不依赖 GC。
+单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store、预约追加块表、宿主持久域以及受限 llama 适配器入口具备固定物理槽位跨请求复用；server 多请求生命周期、跨请求检查点引用及其余队列仍需改造。当前结果不证明生产长期总内存有界，也不证明所有已接纳生产请求都完全不依赖 GC。

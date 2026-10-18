@@ -149,7 +149,7 @@ public:
         return retrieval_pinned_ && method_ == 1 && !replay_;
     }
     void end_prefill_capture();
-    // Finite single-request, recency, RAM capture path. Other combinations
+    // Finite sequential requests on one recency RAM sequence. Other combinations
     // remain unsupported until their execution boundaries are lease-gated.
     bool begin_historical_capture(uint32_t capacity, uint64_t input_tokens,
                                   uint64_t max_output_tokens, uint64_t max_appends);
@@ -236,6 +236,9 @@ public:
     uint64_t host_capacity(uint32_t tokens) const;
 
 private:
+    bool continue_historical_capture(uint32_t capacity, uint64_t input_tokens,
+                                     uint64_t max_output_tokens, uint64_t max_appends);
+    size_t row_metadata_index(uint32_t logical) const;
     friend struct kvmem_transfer_test_access;
     struct SlotBackend : public kvmem::KvMemBackend {
         llama_memory_kvmem * owner = nullptr;
@@ -699,6 +702,7 @@ private:
     std::vector<CaptureBatch> pos_queue_;
     std::shared_ptr<kvmem::FixedByteArena> capture_arena_;
     size_t capture_max_tokens_ = 0;
+    size_t capture_token_capacity_ = 0;
     size_t capture_tokens_used_ = 0;
     CaptureBatch cur_capture_; // synchronous fallback only
     struct CaptureNode {

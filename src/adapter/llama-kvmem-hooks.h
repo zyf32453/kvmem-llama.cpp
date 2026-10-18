@@ -43,14 +43,18 @@ struct llama_kvmem_params {
 LLAMA_API void llama_kvmem_set_params(const struct llama_kvmem_params * params);
 LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 
-// Experimental finite single-request RAM capture path; deletion is OFF unless
+// Experimental finite sequential-request RAM capture path; deletion is OFF unless
 // the caller explicitly starts one shadow/delete manager after admission.
-// Requires an empty recency context, one GPU/lane, flash attention, no MTP,
+// Requires a recency context, one GPU/lane, flash attention, no MTP,
 // hybrid, CPU spill arena or NVMe. It reserves actual historical RAM, not all
 // GPU/backend/metadata resources. Begin refusal leaves an empty context usable;
 // an execution failure after begin is terminal and requires context teardown.
-// Call after context creation and before the first decode. The context must
-// own the currently bound KVMem memory so its batch allocator is reserved
+// The first begin requires an empty context. After a successful finish,
+// begin may reserve another finite request at the next original position;
+// keep the same capacity and GC manager. Insufficient Ready/cleanup capacity
+// refuses entry without waiting. Reset, branching and server integration
+// remain separate lifecycle work. Call before each request's first decode.
+// The context must own the currently bound KVMem memory so its batch allocator is reserved
 // before the capture owner is published. end_prefill_capture
 // separates input and output quotas. finish requires llama_synchronize first.
 LLAMA_API bool llama_kvmem_historical_capture_begin(struct llama_context * ctx, uint32_t capacity,
