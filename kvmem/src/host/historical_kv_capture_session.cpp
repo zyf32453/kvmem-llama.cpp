@@ -330,7 +330,15 @@ bool HistoricalKvCaptureSession::end_input() noexcept {
 }
 
 bool HistoricalKvCaptureSession::finish() {
-    if (!admitted_ || failed_ || finished_ || input_ || !producers_.empty() ||
+    return complete(false);
+}
+
+bool HistoricalKvCaptureSession::cancel() {
+    return complete(true);
+}
+
+bool HistoricalKvCaptureSession::complete(bool cancelled) {
+    if (!admitted_ || failed_ || finished_ || (!cancelled && input_) || !producers_.empty() ||
         repository_->outstanding_operations()) return false;
     uint32_t live = 0;
     for (const auto handle : handles_) {

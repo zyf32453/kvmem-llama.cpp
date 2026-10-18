@@ -11,6 +11,30 @@ static void rejects(const std::function<void()> & fn) {
     throw std::runtime_error("expected invalid_argument");
 }
 int main() {
+    {
+        kvmem_server_options h;
+        auto parse_h = [&](const char * flag, const char * value) {
+            check(h.parse(flag, [&](const char *) { return value; }));
+        };
+        parse_h("--kvmem-historical-gc-mode", "delete");
+        rejects([&] { h.historical.validate(); });
+        parse_h("--kvmem-historical-capture", "8");
+        h.historical.validate();
+        check(h.historical.low == 2 && h.historical.high == 4);
+        parse_h("--kvmem-historical-gc-low", "3");
+        rejects([&] { h.historical.validate(); });
+        parse_h("--kvmem-historical-gc-high", "3");
+        rejects([&] { h.historical.validate(); });
+        parse_h("--kvmem-historical-gc-high", "9");
+        rejects([&] { h.historical.validate(); });
+        parse_h("--kvmem-historical-gc-high", "5");
+        h.historical.validate();
+        parse_h("--kvmem-historical-gc-mode", "off");
+        rejects([&] { h.historical.validate(); });
+        rejects([&] { parse_h("--kvmem-historical-gc-mode", "lru"); });
+        for (const char * bad : {"0", "-1", "3x", "2147483648"})
+            rejects([&] { parse_h("--kvmem-historical-capture", bad); });
+    }
     check(kvmem_cli_gpu_layers("-ngl", "all") == -2);
     check(kvmem_cli_gpu_layers("-ngl", "0") == 0);
     for (const char * value : {"auto", "-1", "1x", "999999999999", "-3", " 1"})

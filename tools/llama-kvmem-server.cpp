@@ -135,6 +135,10 @@ static void print_usage(const char * argv0) {
             "  --kvmem-mtp-state MODE     snapshots, auto or replay (default replay with MTP)\n"
             "  --kvmem-gpu-ratio R        cap slot pool at this fraction of GPU VRAM (default 0.50)\n"
             "  --kvmem-cpu-gb GB          CPU spill arena in GiB (0 = off)\n"
+            "  --kvmem-historical-capture N  finite-request historical RAM slots (opt in)\n"
+            "  --kvmem-historical-gc-mode M  off, shadow or delete (default off)\n"
+            "  --kvmem-historical-gc-low N   Ready low watermark (set with high)\n"
+            "  --kvmem-historical-gc-high N  Ready high watermark\n"
             "  --kvmem-nvme-gb GB         NVMe file in GiB (0 = off)\n"
             "  --kvmem-nvme-dir PATH      NVMe directory (default /tmp/kvmem_nvme)\n"
             "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
@@ -328,6 +332,12 @@ struct ServerState {
     llama_kvmem_params kparams {};
     int n_batch = 512;
     int n_predict_default = -1;
+    kvmem_server_historical_options historical;
+    bool historical_initialized = false;
+    bool historical_request = false;
+    bool historical_cache_valid = false;
+    bool historical_failed = false;
+    size_t historical_prefix = 0;
     json sampling_overrides = json::object();
     int query_last_fallback = 64;
     int query_max_tokens = 512;
@@ -1085,18 +1095,52 @@ static void persist_gdn_ckpt_gen_start(ServerState & st, int eval_end) {
             eval_end, sz, st.gdn_ckpt_pos);
 }
 
-static void commit_cached(ServerState & st, const std::vector<llama_token> & prompt,
+static void historical_finish_request(ServerState & st) noexcept {
+    if (!st.historical_request) return;
+    st.historical_request = false;
+    // Failed/abandoned responses must never become a reusable prompt prefix.
+    st.historical_cache_valid = false;
+    st.cached_tokens.clear();
+    st.cached_prompt.reset();
+    if (!llama_kvmem_historical_capture_cancel(st.ctx)) {
+        st.historical_failed = true;
+        llama_kvmem_historical_capture_fail(st.ctx);
+        LOG_ERR("srv    historical cancellation failed; context requires restart\n");
+    }
+}
+
+static bool commit_cached(ServerState & st, const std::vector<llama_token> & prompt,
                           const std::vector<llama_token> & gen) {
+    if (st.historical.capacity) {
+        bool finished = false;
+        try {
+            llama_synchronize(st.ctx);
+            finished = llama_kvmem_historical_capture_finish();
+        } catch (const std::exception & e) {
+            LOG_ERR("srv    historical completion: %s\n", e.what());
+        }
+        if (!finished) {
+            st.mm_error = "historical request completion failed; context requires restart";
+            st.historical_failed = true;
+            return false;
+        }
+    }
     st.cached_tokens = prompt;
     st.cached_tokens.insert(st.cached_tokens.end(), gen.begin(), gen.end());
     st.last_n_gen = (int) gen.size();
-    if (st.vision || st.query_policy_user) multimodal_commit(st, gen);
+    if (!st.historical.capacity && (st.vision || st.query_policy_user)) multimodal_commit(st, gen);
     else st.cached_prompt = st.active_prompt->with_generated(gen);
+    if (st.historical.capacity) {
+        // Publish only after capture and cache metadata both completed.
+        st.historical_request = false;
+        st.historical_cache_valid = true;
+    }
     const uint32_t stored = llama_kvmem_store_n_tokens();
     conversation_commit(st, stored);
     kvmem_diag("KVMEM_TRACE cache_commit n_prompt=%d n_gen=%d n_cached=%d stored=%u\n",
             (int) prompt.size(), (int) gen.size(), (int) st.cached_tokens.size(),
             stored);
+    return true;
 }
 
 static int decode_span(llama_context * ctx, const llama_token * toks, int pos0, int pos1, int n_batch,
@@ -1148,8 +1192,81 @@ static int decode_span_maybe_spec(ServerState & st, const llama_token * toks, in
 #include "kvmem-multimodal-server.h"
 #include "kvmem-lane-conversations.h"
 
+static bool historical_begin_request(ServerState & st, const std::vector<llama_token> & prompt) {
+    if (!st.historical.capacity) return true;
+    st.mm_error.clear();
+    st.mm_error_status = 503;
+    if (st.historical_failed) {
+        st.mm_error = "historical context failed; server restart required";
+        return false;
+    }
+    if (st.active_prompt->has_media()) {
+        st.mm_error = "historical capture currently supports text requests only";
+        st.mm_error_status = 400;
+        return false;
+    }
+    // Only an exact extension is reusable. Rewinds, an identical prompt (no
+    // logits to evaluate) and cancelled requests require a fresh incarnation.
+    const bool reuse = st.historical_cache_valid && !st.mm_reset_requested &&
+        !st.cached_tokens.empty() && prompt.size() > st.cached_tokens.size() &&
+        llama_kvmem_store_n_tokens() == st.cached_tokens.size() &&
+        std::equal(st.cached_tokens.begin(), st.cached_tokens.end(), prompt.begin());
+    const size_t prefix = reuse ? st.cached_tokens.size() : 0;
+    const uint64_t input = prompt.size() - prefix;
+    const uint64_t output = st.turn_generation_rows;
+    const uint64_t appends = (input + st.n_batch - 1) / st.n_batch + output;
+    const bool reset = st.historical_initialized && !reuse;
+    const bool accepted = reset
+        ? llama_kvmem_historical_capture_reset_begin(st.ctx, st.historical.capacity, input, output, appends)
+        : llama_kvmem_historical_capture_begin(st.ctx, st.historical.capacity, input, output, appends);
+    if (!accepted) {
+        st.mm_error = "historical request reservation unavailable; no decode was started";
+        LOG_WRN("srv    KVMEM_HISTORICAL_HTTP refused input=%llu output=%llu reset=%d\n",
+            (unsigned long long) input, (unsigned long long) output, int(reset));
+        return false;
+    }
+    const bool start_gc = !st.historical_initialized || reset;
+    st.historical_initialized = true;
+    st.historical_request = true;
+    st.historical_cache_valid = false;
+    st.historical_prefix = prefix;
+    st.mm_committed = true; // This path owns no multimodal rollback/checkpoint.
+    if (start_gc && st.historical.mode && !llama_kvmem_historical_gc_start(
+            st.historical.mode, st.historical.low, st.historical.high)) {
+        st.mm_error = "historical GC startup failed; context requires restart";
+        st.historical_failed = true;
+        return false;
+    }
+    LOG_INF("srv    KVMEM_HISTORICAL_HTTP admitted reset=%d cached=%zu input=%llu output_max=%llu\n",
+        int(reset), prefix, (unsigned long long) input, (unsigned long long) output);
+    return true;
+}
+
+static bool run_prefill_historical(ServerState & st, const std::vector<llama_token> & prompt,
+                                   StreamIo * io, int * n_cache_hit) {
+    if (!st.historical_request) return false;
+    st.perf_p_eval = 0;
+    if (n_cache_hit) *n_cache_hit = int(st.historical_prefix);
+    for (size_t pos = st.historical_prefix; pos < prompt.size();) {
+        if (!stream_heartbeat(io)) return false;
+        const auto count = int(std::min<size_t>(st.n_batch, prompt.size() - pos));
+        auto batch = llama_batch_get_one(const_cast<llama_token *>(prompt.data() + pos), count);
+        if (llama_decode(st.ctx, batch)) {
+            st.historical_failed = true;
+            st.mm_error_status = 500;
+            st.mm_error = "historical prefill failed; context requires restart";
+            return false;
+        }
+        pos += count;
+        st.perf_p_eval += count;
+        st.mm_live_row = int(pos);
+    }
+    return true;
+}
+
 static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_token> & prompt,
                                  StreamIo * io = nullptr, int * n_cache_hit = nullptr) {
+    if (st.historical.capacity) return run_prefill_historical(st, prompt, io, n_cache_hit);
     if (st.vision || st.query_policy_user) return run_prefill_multimodal(st, io, n_cache_hit);
     if (!stream_heartbeat(io)) {
         kvmem_diag("KVMEM_TRACE stream_abort phase=prefill_start n_prompt=%d\n",
@@ -2549,6 +2666,16 @@ int main(int argc, char ** argv) {
     }
     requested_conversations = options.conversations;
     options.conversations = std::max(options.conversations, options.parallel);
+    options.historical.validate();
+    st.historical = options.historical;
+    if (st.historical.capacity && (!st.kparams.enabled || st.kparams.method != 0 || st.spec_mtp ||
+            !mmproj_path.empty() || options.parallel != 1 || options.conversations != 1 ||
+            st.kparams.cpu_bytes || st.kparams.nvme_bytes || st.kparams.raw_k_nvme ||
+            options.session_disk_bytes || !options.session_cache_dir.empty() ||
+            (options.flash_attn_set && options.flash_attn == LLAMA_FLASH_ATTN_TYPE_DISABLED))) {
+        throw std::invalid_argument("historical server requires KVMem recency, one lane/conversation, "
+            "text, flash attention, no MTP/CPU spill/NVMe/session disk");
+    }
     st.kparams.sink_tokens = static_cast<uint32_t>(options.sink_tokens);
     // Cross-checks on the two new flags, thrown so they reach the
     // "invalid arguments (source=...)" printer below the way every other
@@ -2761,6 +2888,7 @@ int main(int argc, char ** argv) {
     if (options.threads_batch > 0) cparams.n_threads_batch = options.threads_batch;
     else if (options.threads > 0) cparams.n_threads_batch = options.threads;
     if (options.flash_attn_set) cparams.flash_attn_type = options.flash_attn;
+    if (st.historical.capacity) cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     cparams.n_seq_max = 1;
     cparams.type_k = st.cache_type_k;
     cparams.type_v = st.cache_type_v;
@@ -3021,6 +3149,10 @@ int main(int argc, char ** argv) {
     props["kvmem"]["conversations_requested"] = requested_conversations;
     if (options.parallel > 1) props["kvmem"]["conversations"] = options.conversations;
     props["kvmem"]["conversation_cpu_bytes"] = st.kparams.cpu_bytes;
+    props["kvmem"]["historical"] = {{"capacity", st.historical.capacity},
+        {"mode", st.historical.mode == 2 ? "delete" : st.historical.mode == 1 ? "shadow" : "off"},
+        {"ready_low", st.historical.low}, {"ready_high", st.historical.high},
+        {"admission", st.historical.capacity ? "finite_request" : "disabled"}};
     props["kvmem"]["conversation_bytes_max"] = options.conversation_bytes;
     // The legacy single-lane capability can degrade to one store.
     if (st.conv_limits.max_stores > 1) {
@@ -3376,6 +3508,13 @@ int main(int argc, char ** argv) {
         }
 
         const int force = force_pos_from_substr(st.vocab, toks, cr.force_substr);
+        // Admission happens before committing SSE headers, so both response
+        // transports return HTTP 503 when finite RAM cannot be reserved.
+        if (!historical_begin_request(st, toks)) {
+            res.status = st.mm_error_status;
+            res.set_content(json{{"error", st.mm_error}}.dump(), "application/json");
+            return;
+        }
         st.kparams.query_begin = qbegin;
         st.kparams.query_end = qend;
         st.kparams.force_pos = force;
@@ -3727,7 +3866,13 @@ int main(int argc, char ** argv) {
                                 }
                             }
                             emit_gen_wall((int) gen.size());
-                            commit_cached(st, toks, gen);
+                            if (!commit_cached(st, toks, gen)) {
+                                send(json{{"error", st.mm_error}}.dump());
+                                multimodal_finish_request(st);
+                                slot->unlock();
+                                sink.done();
+                                return true;
+                            }
                             for (const std::string & ev : kvmem_responses_stream_done(
                                          responses->state, responses->prev, request_id, st.model_name,
                                          (int) toks.size(), (int) gen.size(), n_cache_hit)) {
@@ -3753,7 +3898,13 @@ int main(int argc, char ** argv) {
                                 sco.prev.content.size(), sco.prev.reasoning_content.size());
                         llama_kvmem_decode_mean_flush();
                         emit_gen_wall((int) gen.size());
-                        commit_cached(st, toks, gen);
+                        if (!commit_cached(st, toks, gen)) {
+                            send(json{{"error", st.mm_error}}.dump());
+                            multimodal_finish_request(st);
+                            slot->unlock();
+                            sink.done();
+                            return true;
+                        }
                         send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
                         auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
                         usage["timings"] = *timings;
@@ -3780,7 +3931,13 @@ int main(int argc, char ** argv) {
                             }
                         }
                         emit_gen_wall((int) gen.size());
-                        commit_cached(st, toks, gen);
+                        if (!commit_cached(st, toks, gen)) {
+                            send(json{{"error", st.mm_error}}.dump());
+                            multimodal_finish_request(st);
+                            slot->unlock();
+                            sink.done();
+                            return true;
+                        }
                         for (const std::string & ev : kvmem_responses_stream_done(
                                      responses->state, responses->prev, request_id, st.model_name,
                                      (int) toks.size(), (int) gen.size(), n_cache_hit)) {
@@ -3805,7 +3962,13 @@ int main(int argc, char ** argv) {
                             sco.n_tc_delta, finish,
                             sco.prev.content.size(), sco.prev.reasoning_content.size());
                     emit_gen_wall((int) gen.size());
-                    commit_cached(st, toks, gen);
+                    if (!commit_cached(st, toks, gen)) {
+                        send(json{{"error", st.mm_error}}.dump());
+                        multimodal_finish_request(st);
+                        slot->unlock();
+                        sink.done();
+                        return true;
+                    }
                     send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
                     auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
                     usage["timings"] = *timings;
@@ -3832,7 +3995,7 @@ int main(int argc, char ** argv) {
                         (int) toks.size());
                 return;
             }
-            res.status = (st.vision || st.query_policy_user) ? st.mm_error_status : 500;
+            res.status = (st.historical.capacity || st.vision || st.query_policy_user) ? st.mm_error_status : 500;
             res.set_content(json{{"error", st.mm_error.empty() ? "prefill/retrieval failed" : st.mm_error}}.dump(), "application/json");
             return;
         }
@@ -3865,7 +4028,11 @@ int main(int argc, char ** argv) {
             st.mm_live_row = gst.n_past;
             if (io.aborted) return;
             emit_gen_wall((int) gen.size());
-            commit_cached(st, toks, gen);
+            if (!commit_cached(st, toks, gen)) {
+                res.status = 500;
+                res.set_content(json{{"error", st.mm_error}}.dump(), "application/json");
+                return;
+            }
             emit_json(content, (int) gen.size(), (int) gen.size() >= cr.max_tokens);
             return;
         }
@@ -3932,8 +4099,12 @@ int main(int argc, char ** argv) {
         }
         llama_kvmem_decode_mean_flush();
         emit_gen_wall((int) gen.size());
-        commit_cached(st, toks, gen);
         common_sampler_free(smpl);
+        if (!commit_cached(st, toks, gen)) {
+            res.status = 500;
+            res.set_content(json{{"error", st.mm_error}}.dump(), "application/json");
+            return;
+        }
         emit_json(content, (int) gen.size(), !stopped && (int) gen.size() >= cr.max_tokens);
     };
 

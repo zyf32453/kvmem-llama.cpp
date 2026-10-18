@@ -60,7 +60,46 @@ inline int kvmem_cli_gpu_layers(const char * option, const char * value) {
     return kvmem_cli_int(option, value);
 }
 
+struct kvmem_server_historical_options {
+    uint32_t capacity = 0, low = 0, high = 0;
+    int mode = 0;
+    bool mode_set = false, low_set = false, high_set = false;
+    template<typename Need>
+    bool parse(const std::string & arg, const Need & need) {
+        if (arg == "--kvmem-historical-capture") {
+            capacity = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
+        } else if (arg == "--kvmem-historical-gc-mode") {
+            const std::string value = need(arg.c_str());
+            if (value == "off") mode = 0;
+            else if (value == "shadow") mode = 1;
+            else if (value == "delete") mode = 2;
+            else throw std::invalid_argument("historical GC mode must be off, shadow or delete");
+            mode_set = true;
+        } else if (arg == "--kvmem-historical-gc-low" || arg == "--kvmem-historical-gc-high") {
+            const auto value = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
+            if (arg == "--kvmem-historical-gc-low") { low = value; low_set = true; }
+            else { high = value; high_set = true; }
+        } else return false;
+        return true;
+    }
+    void validate() {
+        if (!capacity && (mode_set || low_set || high_set))
+            throw std::invalid_argument("historical GC flags require --kvmem-historical-capture N");
+        if (low_set != high_set || ((low_set || high_set) && !mode))
+            throw std::invalid_argument("historical Ready thresholds require both low and high with shadow/delete");
+        if (!mode) return;
+        if (capacity < 2) throw std::invalid_argument("historical GC requires at least two slots");
+        if (!low_set) {
+            low = std::max(1u, capacity / 4);
+            high = std::max(low + 1, capacity / 2);
+        }
+        if (!low || low >= high || high > capacity)
+            throw std::invalid_argument("historical GC requires 0 < low < high <= capacity");
+    }
+};
+
 struct kvmem_server_options {
+    kvmem_server_historical_options historical;
     int parallel = 1;
     int sink_tokens = 0; // Zero keeps one block; positive values round down to whole blocks.
     // Live host KV stores, time-multiplexed on one GPU working set. One
@@ -160,6 +199,7 @@ struct kvmem_server_options {
 
     template<typename Need>
     bool parse(const std::string & arg, const Need & need) {
+        if (historical.parse(arg, need)) return true;
         if (arg == "--kvmem-sink-tokens") {
             sink_tokens = kvmem_cli_int(arg.c_str(), need(arg.c_str()));
         } else if (arg == "--kvmem-conversations") {

@@ -193,7 +193,7 @@ static void boundary_limit() {
     check(!session->append(8) && runtime.store().total_tokens() == 1 && session->input_remaining() == 8,
           "append budget bypassed by unused token/slot credits");
     session->fail();
-    check(session->failed() && !session->append(0), "failed session reopened");
+    check(session->failed() && !session->append(0) && !session->cancel(), "failed session reopened");
 }
 
 static void cancelled_owner_keeps_tasks() {
@@ -781,7 +781,7 @@ static void unadmitted_rollback_with_stalled_cleanup() {
     }
 }
 
-static void unused_reservation_handoff_with_stalled_cleanup() {
+static void unused_reservation_handoff_with_stalled_cleanup(bool cancel = false) {
     std::promise<void> entered, resume;
     auto entered_signal = entered.get_future();
     auto resume_signal = resume.get_future().share();
@@ -805,18 +805,20 @@ static void unused_reservation_handoff_with_stalled_cleanup() {
     check(entered_signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
           "cleanup stall barrier was not reached");
     KvMemRuntime runtime(runtime_config());
-    auto d = demand(4, 4, 2);
+    auto d = cancel ? demand(8, 0, 2) : demand(4, 4, 2);
     d.private_scratch_bytes = 4096;
     auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 3, d, &cleanup);
     check(session && session->append(4), "stalled cleanup fixture was not admitted");
     auto producer = runtime.historical_shadow_directory().find(0)->writer_context;
     session->producers_captured();
+    if (cancel) check(!session->cancel(), "cancellation ignored an unfinished producer");
     complete(producer, 4);
+    if (cancel) check(!session->cancel(), "cancellation ignored a live task lease");
     producer.reset();
-    check(session->end_input(), "stalled cleanup fixture input did not end");
+    check(session->end_input() != cancel, "partial input was mistaken for completed input");
     const auto frees_before = foreground_frees;
     allocation_budget = 0;
-    const bool finished = session->finish();
+    const bool finished = cancel ? session->cancel() : session->finish();
     allocation_budget = -1;
     check(finished && foreground_frees == frees_before &&
           session->payload_bytes() == 60 && cleanup.occupied() == 2,
@@ -830,6 +832,8 @@ static void unused_reservation_handoff_with_stalled_cleanup() {
           "worker did not return unused payload and slot credits");
     auto access = runtime.historical_shadow_directory().acquire_read(0);
     check(bool(access), "private cleanup released installed history");
+    check(session->finished() && !session->failed() && !session->repository()->closed() &&
+          !session->append(1) && !session->cancel(), "completed/cancelled session reopened");
 }
 
 int main() {
@@ -849,6 +853,7 @@ int main() {
         reserved_metadata_mixes_fresh_and_recycled_slots_atomically();
         unadmitted_rollback_with_stalled_cleanup();
         unused_reservation_handoff_with_stalled_cleanup();
+        unused_reservation_handoff_with_stalled_cleanup(true);
         std::puts("PASS historical capture session: private prepare/admit, immediate rollback, reserved metadata, bounded quotas, publication, cancellation, allocation faults");
     } catch (const std::exception & e) {
         allocation_budget = -1;

@@ -4,7 +4,7 @@
 
 `kvmem-qw3` 的 legacy GC（`include/qw3/kvmem_gc.hpp`、`src/kvmem_gc.cpp`、`docs/kvmem_gc_v1.md`）会在后台选择**单个 historical block**，先在新目录视图中将其逻辑删除，等旧读者与 lease 退出后再释放该块的原始 K/V 权威存储。它是永久缩减可检索历史，并非把 GPU 块挪到 CPU 的缓存淘汰。它的策略也不是纯 LRU：最近使用、指数衰减频率、检索分数、重复/覆盖证据、anchor 和保护状态共同参与决策。
 
-本项目原有的 `PinnedKvTier` LRU 管理 CPU 缓存，session cache 管理整段会话；两者都不会删除任意 historical block。早期移植的 Qwen3 `KvMemGc` 未接入服务器生产删除路径。新的 repository/manager 已有**受限 CLI 显式入口**，可在单请求 recency/RAM 配置下运行 off、shadow 或 delete；默认行为仍是 off。服务器、多请求及其它配置的安全接线尚未完成，不能把这个入口称为整套生产 GC。
+本项目原有的 `PinnedKvTier` LRU 管理 CPU 缓存，session cache 管理整段会话；两者都不会删除任意 historical block。早期移植的 Qwen3 `KvMemGc` 未接入服务器生产删除路径。新的 repository/manager 已有**受限 CLI 与 server 显式入口**，可在 recency/RAM 配置下运行 off、shadow 或 delete；默认行为仍是 off。server 已接入单 lane 文本请求的有限预约、精确前缀延续、新会话和健康取消；跨前缀回退、检查点及其它配置的接线仍未完成，不能把这个入口称为整套生产 GC。
 
 2026-10-17 新增 CLI 的显式实验入口 `--kvmem-historical-capture N`：普通模型请求可以自动预约 RAM、创建按句柄历史块并完成 packed K/V 采集。该参数单独使用时删除关闭；配合 `--kvmem-historical-gc-mode shadow|delete` 才启动新管理器。当前仅支持单请求、单 GPU、单序列文本、recency、flash attention、RAM，不等于整请求资源准入。默认不加该参数时仍走原路径。
 
@@ -601,14 +601,36 @@ server 的普通会话流程会在缓存不匹配或请求取消时调用 clear/
 
 这是 server 接线所需的显式会话切换机制，**不是 server 已启用 historical GC**。普通 `llama_memory_clear`、缓存前缀截断、检查点恢复、多会话绑定和设备故障恢复仍须按各自协议接线；不会因新 reset 用例通过就把它们记成已完成。新旧域在切换期间各自持有实际资源，仍需纳入完整 P3 总预算；固定清理队列只保证待退出域数量受限，不替代总 bytes 预算。
 
+### 单 lane server 的有限请求、HTTP 拒绝与健康取消（2026-10-18）
+
+server 现可显式使用 `--kvmem-historical-capture N` 和 `--kvmem-historical-gc-mode off|shadow|delete`，low/high 的校验与 CLI 相同。开启此入口时要求 recency、单 lane/单会话、文本、flash attention、无 MTP/CPU spill/NVMe/session disk；不支持的组合在模型加载前拒绝。`/props` 返回容量、模式、水位和是否启用有限请求接纳。不加 capture 参数保留原路径。
+
+原 server 默认把文本也交给带 checkpoint 的 multimodal 路径，会在缓存失配或取消时调用 historical 尚不支持的 clear/truncate/restore。本轮增加独立的 historical 请求流程：先按未缓存输入、有限输出上限和追加次数预约 RAM，成功后才能进入 decode。上一轮成功提交的 token 序列只有在新输入**完整包含它且有新后缀**时才继续原域；同样的 prompt、前缀回退、内容变化、显式 `cache_reset` 和取消后的新请求均使用 `reset_begin`，从位置零重新计算。这里是完整重算回退，不是已经实现检查点恢复。
+
+预约在设置 SSE 响应之前执行，因此普通 JSON 和 SSE 请求都能在容量不足时返回 HTTP 503。拒绝不会替换旧 incarnation，原成功请求的缓存仍可供下一次精确延续使用。所有请求都按解析并限制后的 `max_tokens` 取得有限额度；HTTP `stream:true` 只是分批发送响应，**不等于**导师文档中的“依赖后续 GC 补给的分段预约”。后者仍未实现。
+
+新增 `HistoricalKvCaptureSession::cancel` 和 `llama_kvmem_historical_capture_cancel`：在批次边界同步已提交的设备工作、结清采集任务，即使输入配额尚未用完也可安全结束健康请求，将未用预约交给已经预留的 CPU 清理任务；不等待 GC，也不在前台释放其 payload。已安装的历史仍归旧域所有，下一新会话再由 reset 的后台退出协议结清。取消不等于执行错误恢复；设备/执行失败仍关闭上下文，server 对后续请求明确返回需重启的错误。正常响应只有在 capture finish 成功后才发布可复用缓存；所有取消入口共用幂等清理，绕开旧 checkpoint 回滚。
+
+宿主测试覆盖部分输入取消、在途 producer/lease 阻止过早完成、失败请求不能被 cancel 恢复，以及清理线程暂停时取消不分配/不释放前台 RAM、也不提前返还 Ready 信用。宿主 CTest **27/27**、repository/capture session/cleanup 的 ASan/UBSan **3/3**、TSan **3/3** 和 server 参数测试通过。真实模型的 `--reset` 场景新增显式取消及取消后新请求，和 backend guard 一起通过，日志 `/tmp/kvmem-http-reset-model.log`。
+
+新增可重复运行的 `scripts/test_server_historical_gc.py`，只启动其自己的 loopback 服务并保存命令、响应、断言和 server 日志。delete 模式已验证 Chat Completions/Responses 的 JSON 与 SSE、首次请求、精确前缀复用、普通/SSE 预约拒绝、拒绝后复用旧缓存、显式重置、prefill 与生成阶段断线，以及后续新请求。实际 prefill 取消发生在 **385-token 输入只完成 64 token** 时，剩余 321 token；生成取消时已到 6 行、输入配额为零。四次压力请求每次完成 **389-token 输入、1-token 输出**，各有 `committed=14`、完成边界观察到 `reclaimed=13`，policy/worker failure 为 0。剩余释放可继续在后台执行，不能把完成边界计数当作要求前台等待全部 GC。
+
+第一轮脚本使用默认日志级别，HTTP 行为通过但找不到底层完成/取消信息，最终日志断言失败；原因是 pinned llama 的 info 日志映射到 verbosity 4。验收命令现在显式带 `-lv 4`，随后日志断言通过。off、shadow、delete 三种模式的上述 HTTP 生命周期用例均已通过；shadow 四次压力请求各有 `shadow=14`、`committed=reclaimed=0`。原始证据分别保存在 `/tmp/kvmem-http-off/`、`/tmp/kvmem-http-shadow/` 和 `/tmp/kvmem-http-delete-final/`，其中 `command.json`、`results.json`、`server.log` 可复查。自定义纯文本模板用于固定 token 前缀与 grammar 输出，属于生命周期验证，不是模型回答质量评测。
+
+另外使用脚本的 `--native-template` 模式，保留模型原始聊天模板，两轮正常对话及一次压力/reset 请求均通过，证据在 `/tmp/kvmem-http-native/`。本地 12 个源码/测试文件与隔离远程受测副本 SHA-256 一致，清单位于隔离副本的 `historical-http-source.sha256`。
+
+最终完整真实模型回归也通过：原有 **35/35** 场景、新 reset/cancel 场景、36 次/48 次连续请求长轨迹及 backend guard。两条长轨迹本次分别回收 70/190 块，日志 `/tmp/kvmem-http-full-model.log`。本轮未重现前节记录的偶发 CUDA 非法访问，仍不能据此认定其根因已解决。验收原始日志、响应和命令已备份到本地 `build-local/historical-http-validation/`。
+
+此项完成的是受限 server 请求闭环。模型采样器、其余图对象、缓存元数据和新旧域切换期间的总 bytes 仍未全部纳入 P3；GPU/Host 依赖拆分、checkpoint、其它后端组合及策略效果比较也未完成。真实设备错误目前需要重启 server，而不是自动重建 context。不能将这些 HTTP 测试报告为完整生产交付或全内存有界。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
-1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。仍需接入 server 调度、缓存命中/分支与错误取消。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
+1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。server 已接入单 lane 的有限预约、精确前缀延续、新会话与健康取消；仍需扩展缓存分支、设备故障恢复和其它生产路径。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。进一步拆分 Host/GPU/metadata 依赖，GPU 只用独立副本时允许 Host 提前释放，并协调 pinned cache 的槽位失效。
-3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 已拒绝 streaming，生产参数入口也须相同。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
-4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；仍需把它接到 server 的取消/新会话入口，将普通 clear/truncate/关闭统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
-5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到完整生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
+3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 仍拒绝分段 streaming 预约；server 的 SSE 按有限输出整请求预约。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
+4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
+5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI/server 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到其余生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 
-单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store、预约追加块表、宿主持久域以及受限 llama 适配器入口具备固定物理槽位跨请求复用；server 多请求生命周期、跨请求检查点引用及其余队列仍需改造。当前结果不证明生产长期总内存有界，也不证明所有已接纳生产请求都完全不依赖 GC。
+单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store、预约追加块表、宿主持久域以及受限 llama 适配器入口具备固定物理槽位跨请求复用；server 的多 lane/多会话、跨请求检查点引用及其余队列仍需改造。当前结果不证明生产长期总内存有界，也不证明所有已接纳生产请求都完全不依赖 GC。

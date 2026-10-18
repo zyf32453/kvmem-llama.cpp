@@ -13,7 +13,7 @@ class HistoricalKvCaptureDomain;
 // the RAM reservation and producer handoff. This is NOT
 // full production request admission: cell/active/backend allocations and
 // additional GPU routes remain fallible; failed sessions drain their
-// tasks. A domain may admit a new finite request after finish; reset,
+// tasks. A domain may admit a new finite request after finish/cancel; reset,
 // branching and streaming are not supported by this owner.
 class HistoricalKvCaptureSession {
 public:
@@ -58,6 +58,10 @@ public:
     // Unused private allocations are submitted to the pre-reserved cleanup
     // cell. payload_bytes() may still include them until its worker runs.
     bool finish();
+    // Healthy cancellation after submitted work has completed. Partial input
+    // is allowed; installed history stays owned by the domain, unused RAM is
+    // returned by the cleanup worker. This cannot recover a failed session.
+    bool cancel();
     void fail() noexcept;
     bool failed() const noexcept { return failed_; }
     bool finished() const noexcept { return finished_; }
@@ -87,6 +91,7 @@ private:
     HistoricalKvCleanup::Ticket cleanup_ticket_;
     std::unique_ptr<ReservationCleanup> reservation_;
     void release_unused() noexcept;
+    bool complete(bool cancelled);
     std::vector<HistoricalKvRepository::ReleaseCallback> callbacks_;
     std::vector<HistoricalKvRepository::Lease> writers_;
     std::vector<HistoricalKvShadowDirectory::Producer> producers_;

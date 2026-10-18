@@ -109,6 +109,7 @@ static void multimodal_restore(ServerState & st, const MultimodalCheckpoint & ch
 }
 
 static void multimodal_finish_request(ServerState & st) {
+    if (st.historical.capacity) { historical_finish_request(st); return; }
     if (st.mm_committed || !st.mm_rollback) return;
     try {
         llama_kvmem_set_replay(false);
@@ -519,6 +520,12 @@ static void multimodal_commit(ServerState & st, const std::vector<llama_token> &
 static int multimodal_decode_generated(ServerState & st, llama_token id, int row) {
     st.mm_live_checkpoint.reset();
     llama_batch batch = llama_batch_get_one(&id, 1);
+    if (st.historical.capacity) {
+        const int rc = llama_decode(st.ctx, batch);
+        if (rc == 0) st.mm_live_row = row + 1;
+        else st.historical_failed = true;
+        return rc;
+    }
     llama_pos logical = row;
     llama_pos pos = st.active_prompt->model_pos(row);
     batch.logical_pos = &logical;

@@ -157,6 +157,7 @@ public:
                                   uint64_t max_output_tokens, uint64_t max_appends);
     bool start_historical_gc(int mode, uint32_t ready_low, uint32_t ready_high);
     bool finish_historical_capture();
+    bool cancel_historical_capture();
     void fail_historical_capture() noexcept;
     // Next request continues this sequence: flush decode mean, unpin
     // retrieval, harvest mean-K for the suffix. Does not wipe prefix KV.

@@ -1516,6 +1516,28 @@ void llama_memory_kvmem::set_mtp_follower(llama_memory_kvmem_mtp * mtp) {
     mtp_ = mtp;
 }
 
+bool llama_memory_kvmem::cancel_historical_capture() {
+    if (!historical_capture_ || capture_failed_ || historical_capture_->failed()) return false;
+    if (historical_capture_->finished()) return true;
+    try {
+        harvest_flush();
+        harvest_gpu_v_commit();
+        if (historical_batch_context_in_use_ || historical_active_->engaged() || runtime_->pending() ||
+            std::any_of(historical_gpu_readers_.begin(), historical_gpu_readers_.end(),
+                        [](uint32_t n) { return n != 0; }) ||
+            std::any_of(historical_gpu_retired_.begin(), historical_gpu_retired_.end(),
+                        [](uint8_t n) { return n != 0; }) || !historical_capture_->cancel()) return false;
+        prefill_capture_ = false;
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE cancel rows=%u input_remaining=%llu unused_cleanup=queued\n",
+            store_n_tokens(), (unsigned long long) historical_capture_->input_remaining());
+        return true;
+    } catch (const std::exception & e) {
+        capture_fail();
+        LLAMA_LOG_ERROR("historical capture cancel: %s\n", e.what());
+        return false;
+    }
+}
+
 bool llama_memory_kvmem::finish_historical_capture() {
     if (!historical_capture_) return false;
     try {
@@ -6262,6 +6284,18 @@ bool llama_kvmem_historical_capture_reset_begin(llama_context * ctx, uint32_t ca
 bool llama_kvmem_historical_capture_finish(void) {
     auto * mem = kvmem_capture_active();
     return mem && mem->finish_historical_capture();
+}
+
+bool llama_kvmem_historical_capture_cancel(llama_context * ctx) {
+    auto * mem = kvmem_capture_active();
+    if (!mem || !ctx || ctx->get_memory() != mem) return false;
+    try {
+        llama_synchronize(ctx);
+        return mem->cancel_historical_capture();
+    } catch (...) {
+        mem->fail_historical_capture();
+        return false;
+    }
 }
 
 void llama_kvmem_historical_capture_fail(llama_context * ctx) {

@@ -2339,7 +2339,18 @@ static void check_reset_request(llama_context * ctx, llama_model * model, llama_
     require(llama_kvmem_historical_capture_finish() && mem.store_n_tokens() == 32 &&
             mem.runtime().historical_shadow_directory().observe(0).handle.incarnation != completed_incarnation,
             "completed-request reset lost its new incarnation or position zero");
-    std::puts("PASS real reset: partial-input cancellation, allocation/cleanup refusal rollback, paused old GC, old reader isolation, background final release, finished-request reset, reused GPU/backend workspace");
+    require(llama_kvmem_historical_capture_reset_begin(ctx, 6, 64, 0, 2), "cancel fixture reset failed");
+    decode(32);
+    auto cancelled_repository = kvmem_transfer_test_access::capture_repository(mem);
+    require(!llama_kvmem_historical_capture_finish() && llama_kvmem_historical_capture_cancel(ctx) &&
+            llama_kvmem_historical_capture_cancel(ctx) && !cancelled_repository->closed(),
+            "healthy partial cancellation closed its domain or was not idempotent");
+    cancelled_repository.reset();
+    require(llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 0, 1), "request after cancellation refused");
+    decode(32);
+    mem.end_prefill_capture();
+    require(llama_kvmem_historical_capture_finish(), "request after cancellation did not finish");
+    std::puts("PASS real reset: partial-input cancellation, allocation/cleanup refusal rollback, paused old GC, old reader isolation, background final release, finished-request reset, explicit cancel, reused GPU/backend workspace");
 }
 
 static void check_repeated_requests(llama_context * ctx, llama_model * model,
