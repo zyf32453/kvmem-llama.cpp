@@ -265,6 +265,28 @@ int main() {
     CHECK(hgot[0] == 0.0f);
 
 #if KVMEM_ENABLE_NVME
+    {
+        // One disk slot fits K but cannot admit the following V flush. Refusal
+        // must happen before losing V's RAM copy or queuing an unbacked job.
+        kvmem::RawKvStoreConfig small;
+        small.n_layer = 1;
+        small.n_embd_k = small.n_embd_v = small.block_tokens = 4;
+        small.nvme_bytes = 32;
+        small.nvme_dir = (std::filesystem::temp_directory_path() / "kvmem_raw_full_test").string();
+        kvmem::RawKvStore bounded(small);
+        std::vector<float> keys(16, 2.f), values(16, 3.f), output(16);
+        bool refused = false;
+        try { bounded.write_layer_tokens(0, 4, 0, keys.data(), values.data()); }
+        catch (const std::runtime_error &) { refused = true; }
+        CHECK(refused);
+        bounded.wait_writes();
+        CHECK(bounded.copy_k(0, 0, output.data()) && output == keys);
+        CHECK(bounded.copy_v(0, 0, output.data()) && output == values);
+        bounded.clear();
+        bounded.write_layer_tokens(0, 4, 0, keys.data(), nullptr);
+        bounded.wait_writes();
+        CHECK(bounded.copy_k(0, 0, output.data()) && output == keys);
+    }
     kvmem::RawKvStoreConfig ncfg = cfg;
     ncfg.nvme_dir = (std::filesystem::temp_directory_path() / "kvmem_raw_k_test").string();
     ncfg.nvme_file = "raw.bin";

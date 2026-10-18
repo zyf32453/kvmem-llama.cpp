@@ -270,6 +270,9 @@ void RawKvStore::enqueue_flush(uint32_t key, std::vector<uint8_t> && data,
                                uint64_t bytes, uint32_t block_id, uint32_t il,
                                bool is_v) {
     IoJob job;
+    const auto placement = nvme_->place_block(key);
+    job.allocation = nvme_->acquire_io(placement.allocation);
+    if (!job.allocation) throw std::runtime_error("NVMe flush allocation unavailable before submission");
     job.key = key;
     job.block_id = block_id;
     job.il = il;
@@ -307,13 +310,13 @@ void RawKvStore::maybe_flush_k(uint32_t block_id, uint32_t il) {
         lb.k_on_nvme = true;
         return;
     }
-    lb.k_flushing = true;
     std::vector<uint8_t> blob(nbytes);
     std::memcpy(blob.data(), lb.k.data(), nbytes);
-    lb.k.clear();
-    lb.k.shrink_to_fit();
     enqueue_flush(nvme_key(block_id, il, false), std::move(blob), nbytes,
                   block_id, il, false);
+    lb.k_flushing = true;
+    lb.k.clear();
+    lb.k.shrink_to_fit();
 }
 
 void RawKvStore::maybe_flush_v(uint32_t block_id, uint32_t il) {
@@ -348,23 +351,23 @@ void RawKvStore::maybe_flush_v(uint32_t block_id, uint32_t il) {
         lb.v_on_nvme = true;
         return;
     }
-    lb.v_flushing = true;
     std::vector<uint8_t> blob;
     if (gpu) {
-        blob = std::move(lb.v_gpu);
+        blob = lb.v_gpu;
         if (blob.size() > nbytes) {
             blob.resize(nbytes);
         }
     } else {
         blob.assign(nbytes, 0);
         std::memcpy(blob.data(), lb.v.data(), nbytes);
-        lb.v.clear();
-        lb.v.shrink_to_fit();
     }
-    lb.v_gpu.clear();
-    lb.v_gpu.shrink_to_fit();
     enqueue_flush(nvme_key(block_id, il, true), std::move(blob), nbytes,
                   block_id, il, true);
+    lb.v_flushing = true;
+    lb.v.clear();
+    lb.v.shrink_to_fit();
+    lb.v_gpu.clear();
+    lb.v_gpu.shrink_to_fit();
 }
 
 void RawKvStore::io_loop() {
@@ -388,12 +391,9 @@ void RawKvStore::io_loop() {
         spans.reserve(batch.size());
         uint64_t slab_bytes = 0;
         for (auto & job : batch) {
-            auto p = nvme_->place_block(job.key);
-            if (p.slot < 0) {
-                continue;
-            }
             NvmeIoSpan sp;
-            sp.slot = p.slot;
+            sp.slot = job.allocation.handle().slot;
+            sp.authorization = &job.allocation;
             sp.buffer_offset = slab_bytes;
             sp.bytes = job.bytes;
             spans.push_back(sp);
@@ -441,6 +441,9 @@ void RawKvStore::io_loop() {
                     nvme_k_bytes_ += job.bytes;
                 }
             }
+            // wait_writes/clear may proceed as soon as inflight_ becomes zero.
+            // Drop disk ownership before publishing that completion boundary.
+            for (auto & job : batch) job.allocation.reset();
             inflight_ = 0;
             cv_.notify_all();
         }

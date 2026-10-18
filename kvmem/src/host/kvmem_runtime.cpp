@@ -182,9 +182,12 @@ void KvMemRuntime::start_prefetch() {
         prefetch_buf_[id] = buf;
         NvmeKvTier *tier = nvme_tier_.get();
         const uint64_t nbytes = slot_bytes_;
+        auto allocation = tier->acquire_io(tier->allocation_for_block(id));
+        if (!allocation) throw std::runtime_error("NVMe prefetch allocation unavailable before submission");
         prefetch_futs_.push_back(std::async(std::launch::async,
-            [tier, id, buf, nbytes]() {
-                tier->read_block(id, buf->data(), nbytes);
+            [tier, id, buf, nbytes, allocation = std::move(allocation)]() {
+                tier->read_allocation(allocation, 0, buf->data(), nbytes);
+                tier->touch(id);
             }));
     }
     if (trace_ && !prefetch_buf_.empty()) {
@@ -225,7 +228,8 @@ bool KvMemRuntime::spill_bytes_to_nvme(uint32_t block_id, const void *data) {
         trace_tier("nvme_evict", static_cast<uint32_t>(np.evicted_block), -1);
     }
     if (data && cfg_.store.select_method == KvMemMethod::Retrieval) {
-        nvme_tier_->write_slot(np.slot, data, slot_bytes_);
+        auto allocation = nvme_tier_->acquire_io(np.allocation);
+        nvme_tier_->write_allocation(allocation, 0, data, slot_bytes_);
     }
     store_.set_block_ssd_backing(block_id, np.slot, true);
     trace_tier("stage_out_nvme", block_id, np.slot);

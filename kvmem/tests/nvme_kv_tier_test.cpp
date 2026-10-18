@@ -4,11 +4,14 @@
 #include "kvmem/nvme_kv_tier.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <future>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <unistd.h>
@@ -209,6 +212,202 @@ static void test_concurrent_positional_batches() {
             static_cast<std::ptrdiff_t>(a.size())));
 }
 
+static void test_exact_allocation_reclamation_with_delayed_io() {
+    NvmeKvTierConfig cfg;
+    cfg.dir = temp_dir();
+    cfg.slot_bytes = 65536;
+    cfg.total_bytes = 2 * cfg.slot_bytes;
+    NvmeKvTier tier(cfg);
+    const auto a = tier.place_block(1), b = tier.place_block(2);
+    auto lease = tier.acquire_io(a.allocation);
+    CHECK(lease && tier.free_slots() == 0);
+    std::vector<uint8_t> input(cfg.slot_bytes, 0x73);
+    std::promise<void> first_half, continue_io;
+    auto gate = continue_io.get_future();
+    auto started = first_half.get_future();
+    // An actual multi-part file write is admitted before retirement. Keep its
+    // lease through the second write, readback and completion, even while the
+    // allocation is closed to all new jobs.
+    auto job = std::async(std::launch::async,
+        [&, ownership = std::move(lease), gate = std::move(gate)]() mutable {
+            try {
+                tier.write_allocation(ownership, 0, input.data(), input.size() / 2);
+            } catch (...) { first_half.set_exception(std::current_exception()); throw; }
+            first_half.set_value();
+            gate.get();
+            tier.write_allocation(ownership, input.size() / 2,
+                                  input.data() + input.size() / 2, input.size() / 2);
+            std::vector<uint8_t> output(input.size());
+            std::vector<NvmeIoSpan> spans{{a.slot, 0, cfg.slot_bytes, &ownership}};
+            tier.read_spans(spans, output.data(), output.size());
+            ownership.reset();
+            return output == input;
+        });
+    started.get();
+    CHECK(tier.try_release_allocation(a.allocation) == NvmeReleaseResult::Deferred);
+    CHECK(!tier.acquire_io(a.allocation));
+    CHECK(tier.place_block(1).slot == -1 && tier.place_block_evicting(1).slot == -1);
+    CHECK(tier.free_slots() == 0);
+    // Independent allocations remain reclaimable/reusable during the old IO.
+    CHECK(tier.try_release_allocation(b.allocation) == NvmeReleaseResult::Released);
+    const auto c = tier.place_block(3);
+    CHECK(c.slot == b.slot && c.allocation.generation > b.allocation.generation);
+    auto protect_c = tier.acquire_io(c.allocation);
+    CHECK(tier.place_block_evicting(4).slot == -1);
+    bool rejected = false;
+    try { tier.release_block(1); } catch (const std::runtime_error &) { rejected = true; }
+    CHECK(rejected && tier.free_slots() == 0);
+    CHECK(tier.try_release_allocation(b.allocation) == NvmeReleaseResult::Stale);
+    continue_io.set_value();
+    CHECK(job.get());
+    CHECK(tier.try_release_allocation(a.allocation) == NvmeReleaseResult::Released);
+    CHECK(tier.try_release_allocation(a.allocation) == NvmeReleaseResult::AlreadyReleased);
+    CHECK(tier.free_slots() == 1);
+    const auto next = tier.place_block(4);
+    CHECK(next.slot == a.slot && next.allocation.generation > a.allocation.generation);
+    CHECK(tier.try_release_allocation(a.allocation) == NvmeReleaseResult::Stale);
+    CHECK(!tier.acquire_io(a.allocation) && tier.free_slots() == 0);
+    auto current = tier.acquire_io(next.allocation);
+    tier.write_allocation(current, 0, input.data(), input.size());
+    NvmeKvTier unrelated(cfg);
+    CHECK(unrelated.try_release_allocation(next.allocation) == NvmeReleaseResult::Stale);
+    CHECK(!unrelated.acquire_io(next.allocation));
+    rejected = false;
+    try { unrelated.write_allocation(current, 0, input.data(), input.size()); }
+    catch (const std::runtime_error &) { rejected = true; }
+    CHECK(rejected);
+    // clear cannot make either old allocation reusable while jobs own it.
+    rejected = false;
+    try { tier.clear(); } catch (const std::runtime_error &) { rejected = true; }
+    CHECK(rejected && tier.free_slots() == 0 && !tier.acquire_io(next.allocation));
+    current.reset();
+    protect_c.reset();
+    tier.clear();
+    CHECK(tier.free_slots() == 2);
+    const auto after_clear = tier.place_block(4);
+    CHECK(!tier.acquire_io(next.allocation));
+    CHECK(after_clear.allocation.generation > 1);
+    std::puts("PASS NVMe delayed real IO, independent release, stale/cross-arena handles and clear");
+}
+
+static void test_concurrent_admission_retirement_and_reuse() {
+    NvmeKvTierConfig cfg;
+    cfg.dir = temp_dir();
+    cfg.slot_bytes = cfg.total_bytes = 256;
+    NvmeKvTier tier(cfg);
+    NvmeAllocationHandle previous;
+    for (uint32_t cycle = 0; cycle < 64; ++cycle) {
+        const auto p = tier.place_block(cycle);
+        CHECK(p.slot == 0 && p.allocation.generation == cycle + 1);
+        CHECK(!tier.acquire_io(previous));
+        auto writer = tier.acquire_io(p.allocation);
+        std::vector<uint8_t> bytes(256, uint8_t(cycle));
+        tier.write_allocation(writer, 0, bytes.data(), bytes.size());
+        writer.reset();
+        std::atomic<bool> stop{false}, failed{false}, read_once{false};
+        std::thread reader([&] {
+            std::vector<uint8_t> output(256);
+            while (!stop.load()) {
+                auto read = tier.acquire_io(p.allocation);
+                if (!read) { std::this_thread::yield(); continue; }
+                tier.read_allocation(read, 0, output.data(), output.size());
+                if (output != bytes) failed = true;
+                read_once = true;
+            }
+        });
+        while (!read_once.load()) std::this_thread::yield();
+        auto result = tier.try_release_allocation(p.allocation);
+        CHECK(result == NvmeReleaseResult::Released || result == NvmeReleaseResult::Deferred ||
+              result == NvmeReleaseResult::Retry);
+        stop = true;
+        reader.join();
+        result = tier.try_release_allocation(p.allocation);
+        CHECK(result == NvmeReleaseResult::Released || result == NvmeReleaseResult::AlreadyReleased);
+        CHECK(tier.free_slots() == 1 && !failed && !tier.acquire_io(p.allocation));
+        previous = p.allocation;
+    }
+    std::puts("PASS NVMe 64 generations through one physical extent with concurrent real readers");
+}
+
+static void test_concurrent_arenas_have_independent_files() {
+    NvmeKvTierConfig cfg;
+    cfg.dir = temp_dir();
+    cfg.slot_bytes = cfg.total_bytes = 4096;
+    std::vector<std::future<std::unique_ptr<NvmeKvTier>>> workers;
+    for (unsigned i = 0; i < 16; ++i) {
+        workers.push_back(std::async(std::launch::async, [cfg, i] {
+            auto tier = std::make_unique<NvmeKvTier>(cfg);
+            std::vector<uint8_t> input(4096, uint8_t(i));
+            tier->write_block(0, input.data(), input.size());
+            return tier;
+        }));
+    }
+    std::set<std::string> paths;
+    std::vector<std::unique_ptr<NvmeKvTier>> arenas;
+    for (auto & worker : workers) arenas.push_back(worker.get());
+    for (unsigned i = 0; i < arenas.size(); ++i) {
+        CHECK(paths.insert(arenas[i]->path()).second);
+        std::vector<uint8_t> output(4096);
+        arenas[i]->read_block(0, output.data(), output.size());
+        CHECK(std::all_of(output.begin(), output.end(), [i](uint8_t v) { return v == i; }));
+    }
+    std::puts("PASS NVMe simultaneous arenas use independent anonymous files");
+}
+
+static void test_direct_mapped_overlay_reuse() {
+    NvmeKvTierConfig cfg;
+    cfg.dir = temp_dir();
+    cfg.file_name = "allocation-archive.bin";
+    cfg.slot_bytes = cfg.total_bytes = 4096;
+    cfg.durable = cfg.direct_mapped = true;
+    const std::vector<uint8_t> base(4096, 0x13);
+    {
+        NvmeKvTier archive(cfg);
+        archive.write_block(0, base.data(), base.size());
+    }
+    cfg.read_only = true;
+    cfg.overlay_dir = cfg.dir;
+    {
+        std::vector<std::future<std::unique_ptr<NvmeKvTier>>> workers;
+        for (unsigned i = 0; i < 8; ++i) {
+            workers.push_back(std::async(std::launch::async, [cfg, i] {
+                auto tier = std::make_unique<NvmeKvTier>(cfg);
+                tier->mark_present_range(0, 1);
+                auto lease = tier->acquire_io(tier->allocation_for_block(0));
+                const uint8_t byte = uint8_t(i + 32);
+                tier->write_allocation(lease, 10, &byte, 1);
+                return tier;
+            }));
+        }
+        std::vector<std::unique_ptr<NvmeKvTier>> overlays;
+        for (auto & worker : workers) overlays.push_back(worker.get());
+        for (unsigned i = 0; i < overlays.size(); ++i) {
+            auto & tier = *overlays[i];
+            auto old = tier.allocation_for_block(0);
+            std::vector<uint8_t> output(4096);
+            tier.read_block(0, output.data(), output.size());
+            auto expected = base;
+            expected[10] = uint8_t(i + 32);
+            CHECK(output == expected);
+            CHECK(tier.try_release_allocation(old) == NvmeReleaseResult::Released);
+            const auto fresh = tier.place_block(0);
+            CHECK(fresh.allocation.generation > old.generation && !tier.acquire_io(old));
+            // Closing a session-local overlay allocation cannot carry its old
+            // bytes into a fresh binding to the immutable base archive.
+            tier.read_block(0, output.data(), output.size());
+            CHECK(output == base);
+        }
+        cfg.overlay_dir.clear();
+        NvmeKvTier archive(cfg);
+        archive.mark_present_range(0, 1);
+        std::vector<uint8_t> output(4096);
+        archive.read_block(0, output.data(), output.size());
+        CHECK(output == base);
+    }
+    CHECK(::unlink((cfg.dir + "/" + cfg.file_name).c_str()) == 0);
+    std::puts("PASS NVMe independent overlays, generation reset and unchanged archive");
+}
+
 int main() {
     test_disabled();
     test_write_read_release();
@@ -216,6 +415,10 @@ int main() {
     test_evicting_place();
     test_coalesced_batch_io();
     test_concurrent_positional_batches();
+    test_exact_allocation_reclamation_with_delayed_io();
+    test_concurrent_admission_retirement_and_reuse();
+    test_concurrent_arenas_have_independent_files();
+    test_direct_mapped_overlay_reuse();
 
     if (g_fail != 0) {
         std::printf("FAILED: %d check(s)\n", g_fail);

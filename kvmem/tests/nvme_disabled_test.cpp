@@ -26,5 +26,7 @@ int main() {
         !rejects([&] { kvmem::RawKvStore x(raw); })) return 1;
     kvmem::NvmeKvTier inactive({});
     if (inactive.enabled() || !rejects([&] { inactive.write_block(0, nullptr, 0); })) return 1;
+    if (inactive.acquire_io({}) || inactive.try_release_allocation({}) != kvmem::NvmeReleaseResult::Unsupported ||
+        !rejects([&] { inactive.read_allocation({}, 0, nullptr, 0); })) return 1;
     std::puts("NVMe requests rejected; memory-only tests run separately");
 }

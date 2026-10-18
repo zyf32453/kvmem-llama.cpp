@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "kvmem/historical_kv_repository.hpp"
+#include "kvmem/nvme_kv_allocation.hpp"
 
 namespace kvmem {
 
@@ -126,8 +127,9 @@ public:
     // non-attention layers must remain empty. If configured, Mean-K must also
     // cover the whole block. The writer must have
     // finished all incremental writes before seal.
-    // Only RAM stores are accepted: async NVMe jobs have no generation identity
-    // in this legacy format. Partial/nonaligned blocks and shared positional
+    // Only RAM stores are accepted: although NVMe jobs pin exact allocations,
+    // this legacy bridge has no per-resource historical binding or budget for
+    // disk ownership. Partial/nonaligned blocks and shared positional
     // blocks require the new handle-addressed store instead. In particular,
     // a writer cancelled while still partial cannot be reclaimed through this
     // bridge; policy deletion of such blocks must not use this callback.
@@ -206,6 +208,7 @@ private:
         bool is_v = false;
         uint64_t bytes = 0;
         std::vector<uint8_t> data;
+        NvmeIoLease allocation;
     };
 
     RawKvStoreConfig cfg_;

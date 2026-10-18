@@ -35,6 +35,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "kvmem/nvme_kv_allocation.hpp"
 
 namespace kvmem {
 
@@ -56,12 +57,14 @@ struct NvmeKvTierConfig {
 struct NvmeSlotPlacement {
     int32_t slot = -1;
     int32_t evicted_block = -1;
+    NvmeAllocationHandle allocation;
 };
 
 struct NvmeIoSpan {
     int32_t slot = -1;
     uint64_t buffer_offset = 0;
     uint64_t bytes = 0;
+    const NvmeIoLease * authorization = nullptr;
 };
 
 struct NvmeBatchIoStats {
@@ -111,6 +114,11 @@ public:
     }
     int32_t block_slot(uint32_t) const { return -1; }
     int32_t lru_victim() const { return -1; }
+    NvmeAllocationHandle allocation_for_block(uint32_t) const { return {}; }
+    NvmeIoLease acquire_io(NvmeAllocationHandle) const noexcept { return {}; }
+    NvmeReleaseResult try_release_allocation(NvmeAllocationHandle) { return NvmeReleaseResult::Unsupported; }
+    [[noreturn]] void write_allocation(const NvmeIoLease &, uint64_t, const void *, uint64_t) const { unavailable(); }
+    [[noreturn]] void read_allocation(const NvmeIoLease &, uint64_t, void *, uint64_t) const { unavailable(); }
 
     NvmeSlotPlacement place_block(uint32_t) { return NvmeSlotPlacement{}; }
     NvmeSlotPlacement place_block_evicting(uint32_t) { return NvmeSlotPlacement{}; }

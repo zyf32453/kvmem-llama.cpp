@@ -22,6 +22,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <limits>
@@ -32,6 +33,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "kvmem/nvme_kv_allocation.hpp"
 
 #if KVMEM_ENABLE_NVME
 #include <fcntl.h>
@@ -91,12 +93,16 @@ struct NvmeKvTierConfig {
 struct NvmeSlotPlacement {
     int32_t slot = -1;
     int32_t evicted_block = -1;
+    NvmeAllocationHandle allocation;
 };
 
 struct NvmeIoSpan {
     int32_t slot = -1;
     uint64_t buffer_offset = 0;
     uint64_t bytes = 0;
+    // Queued jobs supply their original lease. Null retains synchronous legacy
+    // slot lookup; it must not be used to authorize delayed work after reuse.
+    const NvmeIoLease * authorization = nullptr;
 };
 
 struct NvmeBatchIoStats {
@@ -115,10 +121,20 @@ class NvmeKvTier {
 public:
     explicit NvmeKvTier(NvmeKvTierConfig cfg) : cfg_(std::move(cfg)) {
         if (cfg_.slot_bytes > 0 && cfg_.total_bytes >= cfg_.slot_bytes) {
+            if (cfg_.total_bytes / cfg_.slot_bytes > uint64_t(std::numeric_limits<int32_t>::max()) ||
+                cfg_.total_bytes > uint64_t(std::numeric_limits<off_t>::max()))
+                throw std::overflow_error("NVMe arena exceeds supported slot/offset range");
             slot_count_ = static_cast<uint32_t>(
                 cfg_.total_bytes / cfg_.slot_bytes);
         }
         if (slot_count_ == 0 || cfg_.dir.empty()) return;
+        if (cfg_.read_only && !cfg_.durable)
+            throw std::invalid_argument("read-only NVMe arenas require durable archive ownership");
+        allocations_ = std::make_unique<NvmeAllocationRegistry>(slot_count_);
+        slot_blocks_.resize(slot_count_);
+        free_slots_.reserve(slot_count_);
+        lru_.reserve(slot_count_);
+        block_to_slot_.reserve(slot_count_);
 
         ensure_dir(cfg_.dir);
         if (cfg_.file_name.empty() ||
@@ -134,7 +150,7 @@ public:
             flags |= O_CREAT | O_RDWR;
             if (!cfg_.durable) flags |= O_TRUNC;
         }
-        fd_ = ::open(path_.c_str(), flags, 0644);
+        fd_ = cfg_.durable ? ::open(path_.c_str(), flags, 0644) : open_ephemeral(path_);
         if (fd_ < 0) {
             throw std::runtime_error(
                 "failed to open NVMe KV tier file: " + path_ + ": " +
@@ -262,7 +278,8 @@ public:
         }
         std::lock_guard<std::mutex> lock(meta_mu_);
         for (uint32_t id = begin; id < end && id < slot_count_; ++id) {
-            block_to_slot_[id] = static_cast<int32_t>(id);
+            if (place_block_locked(id).slot < 0)
+                throw std::runtime_error("NVMe archive allocation is closing");
         }
     }
 
@@ -297,49 +314,71 @@ public:
     NvmeSlotPlacement place_block_evicting(uint32_t block_id) {
         std::lock_guard<std::mutex> lock(meta_mu_);
         NvmeSlotPlacement out = place_block_locked(block_id);
-        if (out.slot >= 0 || !free_slots_.empty()) return out;
-        if (lru_.empty()) return out;
-        const uint32_t victim = lru_.front();
-        auto vit = block_to_slot_.find(victim);
-        if (vit == block_to_slot_.end()) {
-            erase_lru_locked(victim);
+        if (out.slot >= 0 || cfg_.direct_mapped || !free_slots_.empty() ||
+            block_to_slot_.count(block_id)) return out;
+        for (uint32_t victim : lru_) {
+            const auto vit = block_to_slot_.find(victim);
+            if (vit == block_to_slot_.end()) continue;
+            const auto handle = allocations_->handle(vit->second);
+            // Never evict an allocation with admitted or queued IO. This is
+            // cache placement policy, not historical retirement.
+            if (allocations_->close(handle, true) != NvmeReleaseResult::Released) continue;
+            release_closed_locked(handle);
+            out = place_block_locked(block_id);
+            out.evicted_block = static_cast<int32_t>(victim);
             return out;
         }
-        const int32_t slot = vit->second;
-        block_to_slot_.erase(vit);
-        erase_lru_locked(victim);
-        block_to_slot_[block_id] = slot;
-        touch_locked(block_id);
-        out.slot = slot;
-        out.evicted_block = static_cast<int32_t>(victim);
         return out;
+    }
+
+    NvmeAllocationHandle allocation_for_block(uint32_t block_id) const {
+        std::lock_guard<std::mutex> lock(meta_mu_);
+        const auto it = block_to_slot_.find(block_id);
+        return it == block_to_slot_.end() ? NvmeAllocationHandle{} : allocations_->handle(it->second);
+    }
+    NvmeIoLease acquire_io(NvmeAllocationHandle handle) const noexcept {
+        return allocations_ ? allocations_->acquire(handle) : NvmeIoLease{};
+    }
+    // Nonblocking CPU reclamation. Deferred closes new IO but retains the
+    // physical extent; the worker must retry this exact allocation after IO
+    // drains. Released means reusable allocator capacity, not a smaller file.
+    NvmeReleaseResult try_release_allocation(NvmeAllocationHandle handle) {
+        std::unique_lock<std::mutex> lock(meta_mu_, std::try_to_lock);
+        if (!lock.owns_lock()) return NvmeReleaseResult::Retry;
+        if (!allocations_) return NvmeReleaseResult::Unsupported;
+        const auto result = allocations_->close(handle);
+        return result == NvmeReleaseResult::Released ? release_closed_locked(handle) : result;
     }
 
     void release_block(uint32_t block_id) {
         std::lock_guard<std::mutex> lock(meta_mu_);
         auto it = block_to_slot_.find(block_id);
         if (it == block_to_slot_.end()) return;
-        if (!cfg_.direct_mapped) free_slots_.push_back(it->second);
-        block_to_slot_.erase(it);
-        erase_lru_locked(block_id);
+        const auto handle = allocations_->handle(it->second);
+        // Legacy synchronous owners must already have drained their jobs.
+        // Fail without reuse instead of silently freeing an active extent.
+        if (allocations_->close(handle, true) != NvmeReleaseResult::Released)
+            throw std::runtime_error("NVMe release_block has outstanding IO; use exact allocation retry");
+        release_closed_locked(handle);
     }
 
     void clear() {
         std::lock_guard<std::mutex> lock(meta_mu_);
-        free_slots_.clear();
-        if (!cfg_.direct_mapped) {
-            for (uint32_t i = 0; i < slot_count_; ++i) {
-                free_slots_.push_back(
-                    static_cast<int32_t>(slot_count_ - 1U - i));
-            }
+        // Close all admissions first. A pending clear never makes old IO's
+        // extents reusable; legacy callers drain jobs before invoking clear.
+        bool pending = false;
+        for (const auto & entry : block_to_slot_) {
+            const auto result = allocations_->close(allocations_->handle(entry.second));
+            if (result != NvmeReleaseResult::Released) pending = true;
         }
-        block_to_slot_.clear();
-        lru_.clear();
+        if (pending) throw std::runtime_error("NVMe clear has outstanding IO; retry after completion");
+        while (!block_to_slot_.empty()) release_closed_locked(allocations_->handle(block_to_slot_.begin()->second));
     }
 
     void touch(uint32_t block_id) {
         std::lock_guard<std::mutex> lock(meta_mu_);
-        touch_locked(block_id);
+        const auto it = block_to_slot_.find(block_id);
+        if (it != block_to_slot_.end() && allocations_->live(it->second)) touch_locked(block_id);
     }
 
     int32_t lru_victim() const {
@@ -353,28 +392,43 @@ public:
         if (p.slot < 0) {
             throw std::runtime_error("NVMe KV tier is full");
         }
-        write_slot(p.slot, data, bytes);
+        auto lease = acquire_io(p.allocation);
+        write_allocation(lease, 0, data, bytes);
         touch(block_id);
     }
 
     void read_block(uint32_t block_id, void *data, uint64_t bytes) {
         validate_io(data, bytes, "read");
-        const int32_t slot = block_slot(block_id);
-        if (slot < 0) {
+        auto lease = acquire_io(allocation_for_block(block_id));
+        if (!lease) {
             throw std::runtime_error("NVMe block is not resident");
         }
-        read_slot(slot, data, bytes);
+        read_allocation(lease, 0, data, bytes);
         touch(block_id);
     }
 
-    // The slot must already have been reserved with place_block(). These raw
-    // positional methods do not touch metadata and are safe on worker threads.
+    // Synchronous legacy slot APIs capture current ownership at entry. Queued
+    // work must capture acquire_io(placement.allocation) before submission and
+    // use read/write_allocation, never re-resolve a slot in the worker.
     void write_slot(int32_t slot, const void *data, uint64_t bytes) const {
         write_slot_range(slot, 0, data, bytes);
     }
 
     void write_slot_range(int32_t slot, uint64_t slot_byte_offset,
                           const void *data, uint64_t bytes) const {
+        auto lease = acquire_slot(slot);
+        write_allocation(lease, slot_byte_offset, data, bytes);
+    }
+
+    void write_allocation(const NvmeIoLease & lease, uint64_t slot_byte_offset,
+                          const void * data, uint64_t bytes) const {
+        validate_lease(lease);
+        write_slot_range_unchecked(lease.handle().slot, slot_byte_offset, data, bytes);
+    }
+
+private:
+    void write_slot_range_unchecked(int32_t slot, uint64_t slot_byte_offset,
+                                    const void *data, uint64_t bytes) const {
         if (read_only()) {
             throw std::runtime_error(
                 "NVMe KV tier is attached read-only: " + path_);
@@ -397,12 +451,21 @@ public:
         }
     }
 
+public:
     void read_slot(int32_t slot, void *data, uint64_t bytes) const {
         read_slot_range(slot, 0, data, bytes);
     }
 
     void read_slot_range(int32_t slot, uint64_t slot_byte_offset,
                          void *data, uint64_t bytes) const {
+        auto lease = acquire_slot(slot);
+        read_allocation(lease, slot_byte_offset, data, bytes);
+    }
+
+    void read_allocation(const NvmeIoLease & lease, uint64_t slot_byte_offset,
+                         void *data, uint64_t bytes) const {
+        validate_lease(lease);
+        const auto slot = lease.handle().slot;
         validate_slot_range_io(
             slot, slot_byte_offset, data, bytes, "read");
         const uint64_t offset = slot_offset(slot) + slot_byte_offset;
@@ -431,6 +494,41 @@ public:
     }
 
 private:
+    static int open_ephemeral(std::string & path) {
+        // Two simultaneous contexts must never open/truncate the same inode
+        // between open and unlink, even when their debug basename is identical.
+        path += ".XXXXXX";
+        std::vector<char> pattern(path.begin(), path.end());
+        pattern.push_back('\0');
+        const int fd = ::mkstemp(pattern.data());
+        if (fd < 0) return fd;
+        path.assign(pattern.data());
+        if (::fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+            const int error = errno;
+            ::close(fd);
+            ::unlink(path.c_str());
+            errno = error;
+            return -1;
+        }
+        return fd;
+    }
+    NvmeIoLease acquire_slot(int32_t slot) const {
+        std::lock_guard<std::mutex> lock(meta_mu_);
+        return allocations_ ? acquire_io(allocations_->handle(slot)) : NvmeIoLease{};
+    }
+    void validate_lease(const NvmeIoLease & lease) const {
+        if (!allocations_ || !lease || !allocations_->owns(lease))
+            throw std::runtime_error("NVMe IO requires this arena's original allocation lease");
+    }
+    NvmeReleaseResult release_closed_locked(NvmeAllocationHandle handle) {
+        if (!allocations_->finish(handle)) return NvmeReleaseResult::Deferred;
+        const auto block = slot_blocks_[handle.slot];
+        block_to_slot_.erase(block);
+        erase_lru_locked(block);
+        if (overlay_fd_ >= 0) overlay_valid_[handle.slot].store(kOverlayBase, std::memory_order_release);
+        if (!cfg_.direct_mapped) free_slots_.push_back(handle.slot);
+        return NvmeReleaseResult::Released;
+    }
     static void ensure_dir(const std::string &dir) {
         struct stat st {};
         if (stat(dir.c_str(), &st) == 0) {
@@ -483,24 +581,22 @@ private:
 
     NvmeSlotPlacement place_block_locked(uint32_t block_id) {
         NvmeSlotPlacement out;
-        if (cfg_.direct_mapped) {
-            // Identity placement. No free list, no LRU, and therefore no slot
-            // table to persist: a reader recovers the mapping from block_id.
-            if (block_id >= slot_count_) return out;
-            block_to_slot_[block_id] = static_cast<int32_t>(block_id);
-            out.slot = static_cast<int32_t>(block_id);
-            return out;
-        }
+        if (!allocations_) return out;
         auto it = block_to_slot_.find(block_id);
         if (it != block_to_slot_.end()) {
+            if (!allocations_->live(it->second)) return out;
             out.slot = it->second;
+            out.allocation = allocations_->handle(it->second);
             touch_locked(block_id);
             return out;
         }
-        if (free_slots_.empty()) return out;
-        const int32_t slot = free_slots_.back();
-        free_slots_.pop_back();
-        block_to_slot_[block_id] = slot;
+        if (cfg_.direct_mapped ? block_id >= slot_count_ : free_slots_.empty()) return out;
+        const int32_t slot = cfg_.direct_mapped ? static_cast<int32_t>(block_id) : free_slots_.back();
+        block_to_slot_.emplace(block_id, slot); // allocate map node before publishing ownership
+        out.allocation = allocations_->allocate(slot);
+        if (!out.allocation.generation) { block_to_slot_.erase(block_id); return out; }
+        if (!cfg_.direct_mapped) free_slots_.pop_back();
+        slot_blocks_[slot] = block_id;
         touch_locked(block_id);
         out.slot = slot;
         return out;
@@ -513,10 +609,9 @@ private:
             throw std::runtime_error(
                 "NVMe KV tier overlay_file_name must be a non-empty basename");
         }
-        const std::string overlay_path =
+        std::string overlay_path =
             cfg_.overlay_dir + "/" + cfg_.overlay_file_name;
-        overlay_fd_ = ::open(overlay_path.c_str(),
-                             O_CLOEXEC | O_CREAT | O_RDWR | O_TRUNC, 0644);
+        overlay_fd_ = open_ephemeral(overlay_path);
         if (overlay_fd_ < 0) {
             throw std::runtime_error(
                 "failed to open NVMe KV tier overlay file: " + overlay_path +
@@ -648,6 +743,24 @@ private:
         if (spans.empty()) return;
         if (!buffer) throw std::runtime_error("NVMe batch I/O null buffer");
         uint8_t *base = static_cast<uint8_t *>(buffer);
+        // Admit/validate the whole batch before the first syscall. Explicit
+        // authorizations remain valid after retirement; no fresh IO is derived
+        // from an old slot number. Legacy calls keep local leases until return.
+        std::vector<NvmeIoLease> legacy;
+        legacy.reserve(spans.size());
+        for (const auto & span : spans) {
+            if (span.buffer_offset > buffer_bytes || span.bytes > buffer_bytes - span.buffer_offset)
+                throw std::runtime_error("NVMe batch span exceeds buffer");
+            validate_slot_io(span.slot, base + span.buffer_offset, span.bytes, write ? "write" : "read");
+            if (span.authorization) {
+                validate_lease(*span.authorization);
+                if (span.authorization->handle().slot != span.slot)
+                    throw std::runtime_error("NVMe batch allocation/slot mismatch");
+            } else {
+                legacy.push_back(acquire_slot(span.slot));
+                validate_lease(legacy.back());
+            }
+        }
         // Writes to a CoW arena need per-slot copy-up semantics when a span is
         // shorter than the physical record. Overlay traffic is only the live
         // suffix of an attached archive; retain coalescing for the much larger
@@ -658,7 +771,7 @@ private:
                     throw std::runtime_error(
                         "NVMe batch span exceeds buffer");
                 }
-                write_slot_range(span.slot, /*slot_byte_offset=*/0,
+                write_slot_range_unchecked(span.slot, /*slot_byte_offset=*/0,
                                  base + span.buffer_offset, span.bytes);
                 if (stats) {
                     stats->bytes += span.bytes;
@@ -855,6 +968,8 @@ private:
     std::vector<int32_t> free_slots_;
     std::unordered_map<uint32_t, int32_t> block_to_slot_;
     std::vector<uint32_t> lru_;
+    std::unique_ptr<NvmeAllocationRegistry> allocations_;
+    std::vector<uint32_t> slot_blocks_;
 };
 
 #else
@@ -872,6 +987,11 @@ public:
     uint32_t used_slots() const { return 0; }
     int32_t block_slot(uint32_t) const { return -1; }
     int32_t lru_victim() const { return -1; }
+    NvmeAllocationHandle allocation_for_block(uint32_t) const { return {}; }
+    NvmeIoLease acquire_io(NvmeAllocationHandle) const noexcept { return {}; }
+    NvmeReleaseResult try_release_allocation(NvmeAllocationHandle) { return NvmeReleaseResult::Unsupported; }
+    void write_allocation(const NvmeIoLease &, uint64_t, const void *, uint64_t) const { unavailable(); }
+    void read_allocation(const NvmeIoLease &, uint64_t, void *, uint64_t) const { unavailable(); }
     void release_block(uint32_t) {}
     void clear() {}
     void touch(uint32_t) {}

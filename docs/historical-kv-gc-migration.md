@@ -673,6 +673,26 @@ server 现可显式使用 `--kvmem-historical-capture N` 和 `--kvmem-historical
 
 本轮仍以 packed K/V 为一个资源组，并保留完成检查和存储内容同步；这不是每条 DMA job 都各自分配新 writer，也不是完整前台无等待或全资源预算证明。NVMe、pinned cache、其它 active 入口、检查点/多会话及策略效果验收仍需继续完成。
 
+### NVMe allocation 代际身份与真实 IO 生命周期（2026-10-18）
+
+原 `NvmeKvTier` 只按 block ID / 物理槽位定位，`RawKvStore::IoJob` 直到 worker 执行才分配磁盘位置，runtime 预取也在线程开始后重新查 block ID。本轮给每个 arena 分配独立身份，每个固定物理槽位保存不回绕的 generation；placement 返回 `NvmeAllocationHandle {arena, generation, slot}`。`NvmeIoLease` 在同一个原子 phase/refcount 中取得使用权，最多尝试 16 次，取得后复核 generation；旧句柄和其它 arena 的句柄不能授权 IO。它保护 allocation 生命周期，不代替内容版本、读写顺序或 tier 对象自身的存活保证。
+
+新增 `try_release_allocation(handle)`：CPU worker 尝试取得元数据锁，忙时返回 Retry；关闭后拒绝新 IO，已有读写继续完成，未退出时返回 Deferred，最后归还物理槽位并返回 Released。重复确认返回 AlreadyReleased，已复用旧代返回 Stale，不重复返还容量。未完成的 allocation 不作为 free slot；legacy LRU 也不能驱逐有 IO 的槽位。按 block ID 的 `release_block` 只允许已排空的同步 owner 使用，`clear` 先关闭各 allocation，若仍有 IO 则拒绝复用并要求稍后重试。归还的是文件内 allocator 容量，不承诺文件大小或磁盘占用立即缩小。
+
+真实异步写回现在在入队前分配并捕获 IO lease，worker 使用原 allocation 批量写，不重新解析 block ID；IO 结束并处理完成状态后，先归还 lease，再发布 `inflight=0`，避免 `wait_writes/clear` 先行。runtime 预取也在提交线程前捕获 allocation。磁盘无槽位时，写回在入队前拒绝，RAM 原数据保留；新增单槽磁盘用例验证 K 已写入、V 无空间时仍能读取两者，clear 后可再写。legacy raw store 仍使用位置式 metadata 和已有错误传播协议，因此 historical GC bridge 继续拒绝 NVMe，不能据此认为新历史域已经支持磁盘回收。
+
+自查发现旧的同名临时文件 `open → unlink` 有并发窗口：两个 arena 可能打开同一个 inode。临时主文件及 overlay 改为 `mkstemp` 创建唯一文件后再 unlink，归档主文件保持原路径。测试同时建立 16 个同名 arena 及 8 个共享只读归档的独立 overlay，逐个读回不同数据；overlay allocation 释放再绑定后不继承旧 overlay 字节，原始归档保持不变。read-only arena 必须显式使用 durable 归档模式。
+
+真实文件测试还覆盖分段写到一半时关闭 allocation、另一 allocation 独立释放、旧任务继续写完并按字节读回、旧/跨 arena 句柄失效、clear 与 IO 重叠，以及 **1 个物理槽位连续 64 代**读取/关闭/复用。Linux `KVMEM_ENABLE_NVME=ON` 宿主 **27/27**、相关 ASan/UBSan **5/5**、TSan **5/5** 通过，独立 OFF 构建 **27/27** 通过。首次测试因其它用户拥有固定 `/tmp` 测试目录而拒绝访问；改用各构建独立 TMPDIR 后通过，没有更改这些既有目录。
+
+Windows OFF 构建成功，23 个测试分项复验全部通过。最初沙箱临时目录拒绝文件操作；改用项目专用临时目录后 snapshot/transfer 通过，生命周期测试在允许其创建测试链接和管理子进程的环境复验。另修复测试脚本将系统本地编码错误信息一律按 UTF-8 严格解码的问题：现在保留非 UTF-8 字节的转义表示，错误路径和失败重试断言保持不变；Windows 及 Linux 生命周期测试随后通过。
+
+隔离 CUDA 构建已开启 `KVMEM_ENABLE_NVME=ON`。最终真实模型回归 **35/35**、reset/cancel、36 次/48 次连续请求及 backend guard 通过；两条长轨迹回收 **69/190** 块。实际 retrieval CLI 使用 128 MiB NVMe、raw-K/V 磁盘写回，完成 **420-token prompt eval（含 64-token replay）及 8-token 输出**。delete HTTP 回归 **33/33** 通过，四次压力请求均 `committed=14`、完成边界 `reclaimed=13`，policy/worker failure 为零；分量释放事件为 12/12/10/12。HTTP 仍运行受限 recency/RAM 路径，这一结果验证开启 NVMe 编译能力后既有 GC 行为未回归，不代表 HTTP historical GC 已开始回收磁盘。此前偶发 CUDA 非法访问本轮未重现，根因仍待确认。
+
+额外用相同 CLI 参数开启已有 `KVMEM_PERF=1` 计数器，采集摘要实际记录 **1,441,792 bytes / 3 次 NVMe syscall**，证明模型路径发生了磁盘写回；这个异步采集区间的计数不作为整次请求的完整 IO 总量或性能改善结论。最终受测源码逐文件 SHA-256 与本地一致，构建、失败记录、sanitizer 详细输出、模型和 HTTP 响应及完整命令备份在 `build-local/historical-nvme-allocation-validation/`。
+
+这一层完成的是磁盘分配与旧 IO 的安全隔离。它仍需与 historical handle 的资源绑定、内容版本、请求预算和完成回调整合；pinned cache 的失效与其它 active 路径尚未完成。元数据 map/LRU 和 legacy 查询仍使用锁，不能把 worker 的 try_lock 或 IO lease 的有界 CAS 当作完整前台无 GC 等待证明。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
@@ -680,7 +700,7 @@ server 现可显式使用 `--kvmem-historical-capture N` 和 `--kvmem-historical
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。server 已接入单 lane 的有限预约、精确前缀延续、新会话与健康取消；仍需扩展缓存分支、设备故障恢复和其它生产路径。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
 2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 的读取、已完成 writer 分量及回收已独立结算。还需完成 NVMe 等资源依赖及 pinned cache 槽位失效，并扩展到其余入口，验证内容同步不会引入前台 GC 等待。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 仍拒绝分段 streaming 预约；server 的 SSE 按有限输出整请求预约。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
-4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe allocation/IO、MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
+4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe tier 已有 allocation generation、提交前 IO lease 和精确释放入口，但尚未完成 historical 资源绑定及请求预算；MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI/server 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到其余生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 
 单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store、预约追加块表、宿主持久域以及受限 llama 适配器入口具备固定物理槽位跨请求复用；server 的多 lane/多会话、跨请求检查点引用及其余队列仍需改造。当前结果不证明生产长期总内存有界，也不证明所有已接纳生产请求都完全不依赖 GC。

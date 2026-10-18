@@ -43,7 +43,11 @@ class Lifecycle(unittest.TestCase):
     def spawn(self, mode="hold", start=True):
         process = subprocess.Popen([WORKER, str(self.root), mode], stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   text=True, encoding="utf-8")
+                                   # Windows filesystem diagnostics may contain
+                                   # local-codepage bytes beside UTF-8 paths.
+                                   # Preserve those bytes in failure output;
+                                   # they must not crash subprocess readers.
+                                   text=True, encoding="utf-8", errors="backslashreplace")
         self.processes.append(process)
         if start:
             self.send(process, "start")
