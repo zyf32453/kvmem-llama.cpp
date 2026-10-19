@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kvmem/historical_kv_repository.hpp"
+#include "kvmem/historical_kv_payload_budget.hpp"
 #include "kvmem/nvme_kv_allocation.hpp"
 #include "kvmem/pinned_kv_tier.hpp"
 
@@ -43,6 +44,9 @@ struct HistoricalKvRawStoreConfig {
     // Full physical extents are allocated before request admission.
     uint64_t pinned_bytes = 0;
     std::function<std::shared_ptr<uint8_t>(size_t)> allocate_pinned;
+    // Optional common quota across successive incarnations. Shared ownership
+    // is copied by reset; a retained old payload still spends this same quota.
+    std::shared_ptr<HistoricalKvPayloadBudget> payload_budget;
 };
 
 class HistoricalKvRawStore {
@@ -284,14 +288,20 @@ public:
     uint64_t allocated_payload_bytes() const noexcept;
     uint64_t allocated_nvme_bytes() const noexcept;
     uint64_t allocated_pinned_bytes() const noexcept;
+    static uint64_t max_payload_bytes(const HistoricalKvRawStoreConfig & config, uint32_t capacity);
     uint32_t capacity() const noexcept;
     const HistoricalKvRawStoreConfig & config() const noexcept;
 
 private:
+    template <class T> using PayloadVector = std::vector<T, HistoricalKvPayloadAllocator<T>>;
     struct Layer {
-        std::vector<uint8_t> packed_k;
-        std::vector<uint8_t> packed_v;
-        std::vector<float> mean_k_sum;
+        explicit Layer(const std::shared_ptr<HistoricalKvPayloadBudget> & budget = {})
+            : packed_k(HistoricalKvPayloadAllocator<uint8_t>(budget)),
+              packed_v(HistoricalKvPayloadAllocator<uint8_t>(budget)),
+              mean_k_sum(HistoricalKvPayloadAllocator<float>(budget)) {}
+        PayloadVector<uint8_t> packed_k;
+        PayloadVector<uint8_t> packed_v;
+        PayloadVector<float> mean_k_sum;
         uint32_t mean_tokens = 0;
         uint32_t k_written_tokens = 0;
         uint32_t v_written_tokens = 0;

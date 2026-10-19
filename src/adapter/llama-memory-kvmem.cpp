@@ -1156,6 +1156,13 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         cfg.packed_k_bytes_per_token = ggml_row_size(type_k_, n_embd_k_);
         cfg.packed_v_bytes_per_token = ggml_row_size(type_v_, n_embd_v_);
         cfg.attention_layers = raw_cfg_.historical_gc_attention_layers;
+        // One full current domain plus one full replacement. Further resets
+        // share this budget and can be refused while old CPU users retain
+        // payloads. Never turn retirement or a queued cleanup into free bytes.
+        const auto domain_payload_bytes = kvmem::HistoricalKvRawStore::max_payload_bytes(cfg, capacity);
+        if (domain_payload_bytes > UINT64_MAX / 2)
+            throw std::invalid_argument("historical shared payload budget overflow");
+        cfg.payload_budget = std::make_shared<kvmem::HistoricalKvPayloadBudget>(2 * domain_payload_bytes);
         cfg.pinned_bytes = kvmem_current_execution().params.historical_pinned_bytes;
         if (cfg.pinned_bytes) {
             cfg.allocate_pinned = [](size_t bytes) -> std::shared_ptr<uint8_t> {
@@ -1333,6 +1340,9 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             (unsigned long long) max_appends, historical_capture_->metadata_remaining(),
             historical_active_->capacity(), historical_active_->capacity_bytes() + historical_active_workspace_.capacity_bytes(),
             cell_workspace_.capacity_bytes());
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_PAYLOAD_BUDGET begin used=%llu limit=%llu\n",
+            (unsigned long long) cfg.payload_budget->used_bytes(),
+            (unsigned long long) cfg.payload_budget->limit_bytes());
         return true;
     } catch (const std::exception & e) {
         LLAMA_LOG_ERROR("historical capture begin: %s\n", e.what());
@@ -1355,7 +1365,19 @@ bool llama_memory_kvmem::continue_historical_capture(uint32_t capacity, uint64_t
         std::any_of(historical_gpu_readers_.begin(), historical_gpu_readers_.end(), [](uint32_t n) { return n != 0; }) ||
         std::any_of(historical_gpu_retired_.begin(), historical_gpu_retired_.end(), [](uint8_t n) { return n != 0; }) ||
         input_tokens > capture_token_capacity_ || max_output_tokens > capture_token_capacity_ - input_tokens) {
-        LLAMA_LOG_ERROR("historical capture: next request requires a completed request and available domain resources\n");
+        LLAMA_LOG_ERROR("historical capture: next request requires a completed request and available domain resources; finished=%d failed=%d closed=%d capacity=%u/%u batch_context=%d active=%d pending=%d operations=%llu arena_refs=%ld queues=%zu/%zu/%zu/%zu/%zu gpu_readers=%zu gpu_retired=%zu input=%llu output=%llu token_capacity=%zu\n",
+            historical_capture_ ? int(historical_capture_->finished()) : -1,
+            int(capture_failed_ || (historical_capture_ && historical_capture_->failed())),
+            historical_domain_ ? int(historical_domain_->repository()->closed()) : -1,
+            capacity, historical_domain_ ? historical_domain_->repository()->capacity() : 0,
+            int(historical_batch_context_in_use_), historical_active_ ? int(historical_active_->engaged()) : -1,
+            int(runtime_->pending()), (unsigned long long) (historical_domain_ ?
+                historical_domain_->repository()->outstanding_operations() : 0), capture_arena_.use_count(),
+            pos_queue_.size(), cur_capture_.positions.size(), decode_mean_pending_batch_.positions.size(),
+            harvest_v_jobs_.size(), harvest_v_pending_.jobs.size(),
+            size_t(std::count_if(historical_gpu_readers_.begin(), historical_gpu_readers_.end(), [](uint32_t n) { return n != 0; })),
+            size_t(std::count_if(historical_gpu_retired_.begin(), historical_gpu_retired_.end(), [](uint8_t n) { return n != 0; })),
+            (unsigned long long) input_tokens, (unsigned long long) max_output_tokens, capture_token_capacity_);
         return false;
     }
     try {
@@ -1484,6 +1506,10 @@ bool llama_memory_kvmem::reset_historical_capture(uint32_t capacity, uint64_t in
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE reset capacity=%u reserved=%u input=%llu output_max=%llu gc=off\n",
             capacity, historical_capture_->reserved_blocks(),
             (unsigned long long) input_tokens, (unsigned long long) max_output_tokens);
+        const auto budget = historical_domain_->storage()->config().payload_budget;
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_PAYLOAD_BUDGET reset used=%llu limit=%llu refusals=%llu\n",
+            (unsigned long long) budget->used_bytes(), (unsigned long long) budget->limit_bytes(),
+            (unsigned long long) budget->refusals());
         return true;
     } catch (const std::exception & e) {
         if (replacing) capture_fail();

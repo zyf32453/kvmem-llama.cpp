@@ -13,6 +13,8 @@
 // Fault injection is local to the calling thread. It checks every ordinary
 // allocation boundary at admission, and forbids allocation during consumption.
 static thread_local int64_t allocation_budget = -1;
+static std::atomic<void *> delayed_free{nullptr};
+static std::atomic<bool> free_entered{false}, allow_free{false}, free_timed_out{false};
 void * operator new(size_t size) {
     if (allocation_budget == 0) throw std::bad_alloc();
     if (allocation_budget > 0) --allocation_budget;
@@ -20,10 +22,20 @@ void * operator new(size_t size) {
     throw std::bad_alloc();
 }
 void * operator new[](size_t size) { return ::operator new(size); }
-void operator delete(void * p) noexcept { std::free(p); }
-void operator delete[](void * p) noexcept { std::free(p); }
-void operator delete(void * p, size_t) noexcept { std::free(p); }
-void operator delete[](void * p, size_t) noexcept { std::free(p); }
+static void test_free(void * p) noexcept {
+    if (p && delayed_free.load(std::memory_order_acquire) == p) {
+        free_entered.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!allow_free.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        if (!allow_free.load(std::memory_order_acquire)) free_timed_out.store(true);
+    }
+    std::free(p);
+}
+void operator delete(void * p) noexcept { test_free(p); }
+void operator delete[](void * p) noexcept { test_free(p); }
+void operator delete(void * p, size_t) noexcept { test_free(p); }
+void operator delete[](void * p, size_t) noexcept { test_free(p); }
 struct AllocationBudget {
     explicit AllocationBudget(int64_t count) { allocation_budget = count; }
     ~AllocationBudget() { allocation_budget = -1; }
@@ -131,7 +143,9 @@ static void demand_bounds() {
 
 static void admission_failure_rollback() {
     auto repo = std::make_shared<Repo>(3);
-    auto storage = std::make_shared<Storage>(config(), 3);
+    auto cfg = config();
+    cfg.payload_budget = std::make_shared<HistoricalKvPayloadBudget>(Storage::max_payload_bytes(cfg, 3));
+    auto storage = std::make_shared<Storage>(cfg, 3);
     std::atomic<unsigned> releases{0};
     auto history = repo->begin_write(9, 90, 1, 1, 0, release_to(repo, storage, releases));
     check(history && storage->reserve(*history, history->handle(), 90, 1), "history setup failed");
@@ -156,6 +170,7 @@ static void admission_failure_rollback() {
             request.reset();
         } else ++failed_allocations;
         check(repo->ready_count() == 2 && storage->allocated_payload_bytes() == before &&
+              cfg.payload_budget->used_bytes() == before &&
               repo->inspect(existing)->life == HistoricalKvLife::Writing && releases == 0,
               "failed admission leaked credits or reclaimed existing history");
         if (succeeded) break;
@@ -165,6 +180,112 @@ static void admission_failure_rollback() {
     repo->retire(existing);
     history.reset();
     check(repo->try_reclaim(existing) == Repo::ReclaimResult::Complete, "history cleanup");
+    check(cfg.payload_budget->used_bytes() == 0, "allocation failure sweep leaked shared budget");
+}
+
+static void shared_payload_budget_across_incarnations() {
+    auto cfg = config();
+    const auto unit = Storage::max_payload_bytes(cfg, 1);
+    check(unit == 56, "shared budget fixture size");
+    cfg.payload_budget = std::make_shared<HistoricalKvPayloadBudget>(2 * unit);
+    auto old_repo = std::make_shared<Repo>(2), next_repo = std::make_shared<Repo>(2);
+    auto old_store = std::make_shared<Storage>(cfg, 2), next_store = std::make_shared<Storage>(cfg, 2);
+    std::atomic<unsigned> releases{0};
+    auto old = Ram::try_reserve(old_repo, old_store, demand(1, 1));
+    check(old && cfg.payload_budget->used_bytes() == unit, "old domain reservation");
+    auto writer = old_repo->begin_reserved_write(old->slots(), 1, 0, 1, 1, unit,
+                                                 release_to(old_repo, old_store, releases));
+    check(bool(writer), "old writer creation");
+    const auto handle = writer->handle();
+    check(old_store->install_payload(*writer, handle, 0, 1, old->payload(0)), "old install");
+    for (unsigned layer = 0; layer < 2; ++layer)
+        check(old_store->write_layer(*writer, handle, layer, {1, 2, 3}, {4, 5}, {6, 7}, 1), "old write");
+    check(old_store->publish_complete(*old_repo, *writer, handle), "old publish");
+    auto reader = old_repo->acquire_read(handle);
+    check(bool(reader), "old reader");
+    old_repo->retire(handle);
+    old_repo->close();
+    writer.reset(); old.reset();
+    check(old_repo->try_reclaim(handle) == Repo::ReclaimResult::Deferred, "old reader lost payload");
+    auto next = Ram::try_reserve(next_repo, next_store, demand(1, 1));
+    check(next && cfg.payload_budget->used_bytes() == 2 * unit, "replacement did not share old quota");
+    check(!Ram::try_reserve(next_repo, next_store, demand(1, 1)) &&
+          next_repo->ready_count() == 1 && cfg.payload_budget->used_bytes() == 2 * unit,
+          "third payload exceeded common quota or lost rollback credit");
+    next.reset();
+    // First payload fits, second fails. Partial preparation must return every
+    // byte and slot, without clearing the retained old conversation.
+    check(!Ram::try_reserve(next_repo, next_store, demand(2, 2)) &&
+          next_repo->ready_count() == 2 && next_store->allocated_payload_bytes() == 0 &&
+          cfg.payload_budget->used_bytes() == unit && old_store->read_layer(*reader, handle, 0),
+          "partial cross-domain admission damaged old history or leaked credit");
+    reader.reset();
+    check(!Ram::try_reserve(next_repo, next_store, demand(2, 2)), "future GC release counted as free bytes");
+    check(old_repo->try_reclaim(handle) == Repo::ReclaimResult::Complete && releases == 1 &&
+          cfg.payload_budget->used_bytes() == 0, "old physical release did not return shared quota");
+    for (unsigned generation = 0; generation < 64; ++generation) {
+        auto request = Ram::try_reserve(next_repo, next_store, demand(2, 2));
+        check(request && cfg.payload_budget->used_bytes() == 2 * unit, "shared quota was not reusable");
+    }
+    check(cfg.payload_budget->used_bytes() == 0 && cfg.payload_budget->refusals() >= 3,
+          "cross-domain retries lost accounting");
+    Storage::PreparedPayload orphan;
+    { Storage temporary(cfg, 1); orphan = temporary.prepare_payload(4); }
+    check(cfg.payload_budget->used_bytes() == unit, "store teardown returned a still-owned payload's credit");
+    orphan = {};
+    check(cfg.payload_budget->used_bytes() == 0, "orphan payload lost its shared budget owner");
+}
+
+static void payload_budget_returns_after_physical_free() {
+    auto budget = std::make_shared<HistoricalKvPayloadBudget>(64);
+    HistoricalKvPayloadAllocator<uint8_t> allocator(budget);
+    auto * data = allocator.allocate(64);
+    delayed_free.store(data, std::memory_order_release);
+    std::thread worker([&] { allocator.deallocate(data, 64); });
+    struct Finish {
+        std::thread & worker;
+        ~Finish() {
+            allow_free.store(true, std::memory_order_release);
+            if (worker.joinable()) worker.join();
+            delayed_free.store(nullptr, std::memory_order_release);
+        }
+    } finish{worker};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!free_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    check(free_entered && budget->used_bytes() == 64, "slow physical deleter returned quota early");
+    bool refused = false;
+    try { auto * unexpected = allocator.allocate(1); allocator.deallocate(unexpected, 1); }
+    catch (const std::bad_alloc &) { refused = true; }
+    check(refused, "new domain reused memory while deallocation was still blocked");
+    allow_free.store(true, std::memory_order_release);
+    worker.join();
+    check(!free_timed_out && budget->used_bytes() == 0, "physical free did not return exact credit");
+}
+
+static void concurrent_payload_budget() {
+    auto budget = std::make_shared<HistoricalKvPayloadBudget>(128);
+    std::atomic<bool> failed{false};
+    std::atomic<unsigned> completed{0};
+    auto actor = [&] {
+        HistoricalKvPayloadAllocator<uint8_t> allocator(budget);
+        for (unsigned i = 0; i < 80; ++i) {
+            uint8_t * data = nullptr;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            do {
+                try { data = allocator.allocate(64); } catch (const std::bad_alloc &) {}
+                if (!data) std::this_thread::yield();
+            } while (!data && std::chrono::steady_clock::now() < deadline);
+            if (!data) { failed = true; return; }
+            if (budget->used_bytes() > budget->limit_bytes()) failed = true;
+            std::fill_n(data, 64, 0x5a);
+            allocator.deallocate(data, 64);
+            ++completed;
+        }
+    };
+    std::thread a(actor), b(actor), c(actor), d(actor);
+    a.join(); b.join(); c.join(); d.join();
+    check(!failed && completed == 320 && budget->used_bytes() == 0, "concurrent payload quota leaked or overspent");
 }
 
 static void paused_reclaimer_and_allocation_free_consumption() {
@@ -311,6 +432,9 @@ int main() {
         slot_entitlements();
         demand_bounds();
         admission_failure_rollback();
+        shared_payload_budget_across_incarnations();
+        payload_budget_returns_after_physical_free();
+        concurrent_payload_budget();
         paused_reclaimer_and_allocation_free_consumption();
         prepared_payload_validation_and_moves();
         concurrent_reservations_and_observation();

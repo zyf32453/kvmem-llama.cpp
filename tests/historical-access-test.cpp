@@ -2735,6 +2735,59 @@ static void check_reset_request(llama_context * ctx, llama_model * model, llama_
     mem.end_prefill_capture();
     require(llama_kvmem_historical_capture_finish(), "request after cancellation did not finish");
     std::puts("PASS real reset: partial-input cancellation, allocation/cleanup refusal rollback, paused old GC, old reader isolation, background final release, finished-request reset, explicit cancel, reused GPU/backend workspace");
+
+    // Retain actual captured Host readers across enough resets to exhaust the
+    // common payload quota. The old context must survive a refused reset.
+    const auto budget = kvmem_transfer_test_access::capture_storage(mem)->config().payload_budget;
+    const auto unit = kvmem::HistoricalKvRawStore::max_payload_bytes(
+        kvmem_transfer_test_access::capture_storage(mem)->config(), 1);
+    require(budget && budget->limit_bytes() == 12 * unit, "reset common payload quota missing");
+    const auto initial_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (budget->used_bytes() != unit && std::chrono::steady_clock::now() < initial_deadline)
+        std::this_thread::yield();
+    require(budget->used_bytes() == unit, "prior reset cleanup did not settle for pressure fixture");
+    std::vector<kvmem::HistoricalKvRepository::Lease> retained_readers;
+    retained_readers.reserve(16);
+    bool quota_refused = false;
+    unsigned accepted_resets = 0;
+    for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        auto repository = kvmem_transfer_test_access::capture_repository(mem);
+        auto storage = kvmem_transfer_test_access::capture_storage(mem);
+        const auto handle = mem.runtime().historical_shadow_directory().observe(0).handle;
+        auto reader = repository->acquire_read(handle);
+        require(bool(reader), "reset quota fixture lost current reader");
+        retained_readers.push_back(std::move(*reader));
+        if (!llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 0, 1)) {
+            require(budget->used_bytes() == budget->limit_bytes() && budget->refusals() &&
+                    kvmem_transfer_test_access::capture_repository(mem) == repository &&
+                    !repository->closed() && mem.store_n_tokens() == 32 &&
+                    storage->read_layer(retained_readers.back(), handle, layer_id).has_value(),
+                    "reset refusal was not quota exhaustion or damaged old history");
+            quota_refused = true;
+            break;
+        }
+        require(kvmem_transfer_test_access::capture_storage(mem)->config().payload_budget == budget &&
+                budget->used_bytes() <= budget->limit_bytes(), "reset bypassed common quota");
+        decode(32);
+        mem.end_prefill_capture();
+        require(llama_kvmem_historical_capture_finish(), "quota-admitted replacement did not finish");
+        ++accepted_resets;
+    }
+    require(quota_refused && accepted_resets == 11, "retained reset history exceeded two-domain payload bound");
+    const auto before_reader_release = foreground_cpp_frees;
+    retained_readers.clear();
+    require(foreground_cpp_frees == before_reader_release, "quota fixture freed old payload on the foreground");
+    const auto released_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (budget->used_bytes() != unit && std::chrono::steady_clock::now() < released_deadline)
+        std::this_thread::yield();
+    require(budget->used_bytes() == unit &&
+            llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 0, 1),
+            "old physical cleanup did not restore shared admission capacity");
+    decode(32);
+    mem.end_prefill_capture();
+    require(llama_kvmem_historical_capture_finish(), "replacement after shared quota release failed");
+    std::printf("PASS real reset payload quota: %u retained old domains, limit=%llu, refused before reset, old data readable, background credit returned, new request completed\n",
+        accepted_resets, (unsigned long long) budget->limit_bytes());
 }
 
 static void check_repeated_requests(llama_context * ctx, llama_model * model,
@@ -2759,6 +2812,9 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
     const auto table_bytes = mem.store().allocated_bytes();
     const auto arena_address = kvmem_transfer_test_access::capture_arena(mem).get();
     const auto backend = ctx->get_historical_backend_status();
+    const auto payload_budget = storage->config().payload_budget;
+    require(payload_budget && payload_budget->limit_bytes() == 2 * capacity * slot_payload_bytes,
+            "repeated request missing common payload quota");
     // The observer must not itself retain every generation during a soak.
     // Keep the oldest generation plus a rotating sample of recent handles.
     const size_t handle_limit = soak_seconds ? 2 * capacity : minimum_requests * (2 + max_output);
@@ -2799,6 +2855,7 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
             "\"repository_id\":%llu,\"admission_refusals\":%llu,\"reclaimed\":%llu,"
             "\"committed\":%llu,\"policy_failures\":%llu,\"worker_failures\":%llu,"
             "\"ready\":%u,\"payload_bytes\":%llu,\"payload_bound_bytes\":%llu,"
+            "\"shared_payload_bytes\":%llu,\"shared_payload_limit\":%llu,\"shared_payload_refusals\":%llu,"
             "\"table_bytes\":%zu,\"directory_entries\":%zu,\"row_capacity\":%zu,"
             "\"arena_bytes\":%zu,\"backend_output_bytes\":%zu,\"graph_meta_bytes\":%zu,"
             "\"cleanup_occupied\":%u,\"cleanup_capacity\":%u,\"sampled_handles\":%zu,"
@@ -2811,7 +2868,10 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
             (unsigned long long) stats.reclaimed, (unsigned long long) stats.committed,
             (unsigned long long) stats.policy_failures, (unsigned long long) stats.worker_failures,
             repository->ready_count(), (unsigned long long) storage->allocated_payload_bytes(),
-            (unsigned long long) (capacity * slot_payload_bytes), table_bytes,
+            (unsigned long long) (capacity * slot_payload_bytes),
+            (unsigned long long) payload_budget->used_bytes(),
+            (unsigned long long) payload_budget->limit_bytes(),
+            (unsigned long long) payload_budget->refusals(), table_bytes,
             size_t(mem.runtime().historical_shadow_directory().size()), row_capacity,
             kvmem_transfer_test_access::capture_arena(mem)->capacity_bytes(),
             backend.output_bytes, backend.graph_meta_bytes,
@@ -2864,6 +2924,7 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
                 kvmem_transfer_test_access::row_capacity(mem) == row_capacity && row_capacity == capacity * 32 &&
                 kvmem_transfer_test_access::capture_arena(mem).get() == arena_address &&
                 storage->allocated_payload_bytes() <= capacity * slot_payload_bytes &&
+                payload_budget->used_bytes() <= payload_budget->limit_bytes() &&
                 !repository->closed(), "repeated request grew metadata or lost its domain");
         const auto backend_after = ctx->get_historical_backend_status();
         require(backend_after.scheduler == backend.scheduler &&

@@ -713,7 +713,9 @@ static void test_host_payload_releases_before_gpu_identity() {
 static void test_mean_and_kv_release_independently() {
     using Repo = HistoricalKvRepository;
     using Resource = Repo::HostResource;
-    HistoricalKvRawStore store({2, 4, 2, 3, 1, {}}, 1);
+    HistoricalKvRawStoreConfig cfg{2, 4, 2, 3, 1, {}};
+    cfg.payload_budget = std::make_shared<HistoricalKvPayloadBudget>(48);
+    HistoricalKvRawStore store(cfg, 1);
     Repo repo(1);
     HistoricalKvHandle previous{};
     for (bool hold_mean : {true, false}) {
@@ -782,7 +784,8 @@ static void test_mean_and_kv_release_independently() {
         check(reader_ok, "concurrent resource release corrupted the unrelated reader");
         const auto meta = repo.inspect(handle);
         check(first == Repo::ReclaimResult::Retry && second == Repo::ReclaimResult::ResourceReleased &&
-              store.allocated_payload_bytes() == retained && store.inspect(repo, handle)->payload_bytes == retained &&
+              store.allocated_payload_bytes() == retained && cfg.payload_budget->used_bytes() == retained &&
+              store.inspect(repo, handle)->payload_bytes == retained &&
               meta && meta->payload_bytes == retained && !meta->host_released &&
               meta->packed_kv_released == hold_mean && meta->mean_k_released != hold_mean &&
               !repo.ready_count() && !repo.acquire_mean_k(handle) && !repo.acquire_packed_kv(handle),
@@ -803,7 +806,8 @@ static void test_mean_and_kv_release_independently() {
             DenyPackedAllocations deny;
             check(repo.try_reclaim(handle) == Repo::ReclaimResult::HostReleased, "Host did not release before GPU");
         }
-        check(!store.allocated_payload_bytes() && !store.inspect(repo, handle) && !metadata_calls &&
+        check(!store.allocated_payload_bytes() && !cfg.payload_budget->used_bytes() &&
+              !store.inspect(repo, handle) && !metadata_calls &&
               !repo.ready_count() && physically_released == total,
               "Host completion retained bytes or freed metadata too soon");
         bool denied = false;

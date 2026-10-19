@@ -27,9 +27,8 @@ size_t add(size_t a, size_t b) {
     return a + b;
 }
 
-size_t payload_bytes(const std::vector<uint8_t> & k,
-                     const std::vector<uint8_t> & v,
-                     const std::vector<float> & mean) {
+template <class Bytes, class Floats>
+size_t payload_bytes(const Bytes & k, const Bytes & v, const Floats & mean) {
     return add(add(k.capacity(), v.capacity()),
                multiply(mean.capacity(), sizeof(float)));
 }
@@ -201,6 +200,15 @@ void HistoricalKvRawStore::mark_layer_complete(Block & block,
     ++block.written_layers;
 }
 
+uint64_t HistoricalKvRawStore::max_payload_bytes(const HistoricalKvRawStoreConfig & config,
+                                               uint32_t capacity) {
+    const auto layers = config.attention_layers.empty() ? config.n_layer : config.attention_layers.size();
+    const auto packed = multiply(config.max_tokens_per_slot,
+                                add(config.packed_k_bytes_per_token, config.packed_v_bytes_per_token));
+    const auto per_layer = add(packed, multiply(config.mean_k_elements, sizeof(float)));
+    return multiply(multiply(per_layer, layers), capacity);
+}
+
 HistoricalKvRawStore::HistoricalKvRawStore(HistoricalKvRawStoreConfig config,
                                            uint32_t capacity)
     : config_(config), accounting_(std::make_shared<Accounting>()) {
@@ -292,7 +300,9 @@ HistoricalKvRawStore::PreparedPayload HistoricalKvRawStore::prepare_payload(uint
     }
     block->accounting = accounting_;
     block->valid_tokens = token_capacity;
-    block->layers.resize(config_.n_layer);
+    block->layers.reserve(config_.n_layer);
+    for (uint32_t il = 0; il < config_.n_layer; ++il)
+        block->layers.emplace_back(config_.payload_budget);
     if (nvme_) {
         // Prepare ownership objects before changing allocator capacity. They
         // roll back exactly if any later RAM preparation fails.
@@ -706,8 +716,9 @@ HistoricalKvRawStore::read_layer(
         !same(block->handle, handle) || block->packed_kv_released || block->mean_k_released) return std::nullopt;
     const Layer & source = block->layers[layer];
     if (!source.written) return std::nullopt;
-    return LayerSnapshot{source.packed_k, source.packed_v,
-                         source.mean_k_sum, source.mean_tokens};
+    return LayerSnapshot{{source.packed_k.begin(), source.packed_k.end()},
+                         {source.packed_v.begin(), source.packed_v.end()},
+                         {source.mean_k_sum.begin(), source.mean_k_sum.end()}, source.mean_tokens};
 }
 
 std::optional<HistoricalKvRawStore::LayerSnapshot>
@@ -723,7 +734,8 @@ HistoricalKvRawStore::read_packed_kv(const HistoricalKvRepository::Lease & reade
         !same(block->handle, handle) || block->packed_kv_released) return std::nullopt;
     const auto & source = block->layers[layer];
     if (!source.written) return std::nullopt;
-    return LayerSnapshot{source.packed_k, source.packed_v, {}, 0};
+    return LayerSnapshot{{source.packed_k.begin(), source.packed_k.end()},
+                         {source.packed_v.begin(), source.packed_v.end()}, {}, 0};
 }
 
 bool HistoricalKvRawStore::copy_packed_kv(const HistoricalKvRepository::Lease & reader,
@@ -1041,8 +1053,8 @@ HistoricalKvRawStore::ReleaseResult HistoricalKvRawStore::release_resource(
     for (size_t layer = 0; layer < config_.n_layer; ++layer) {
         uint64_t bytes = 0;
         {
-            std::vector<uint8_t> k, v;
-            std::vector<float> mean;
+            PayloadVector<uint8_t> k, v;
+            PayloadVector<float> mean;
             {
                 std::lock_guard<std::mutex> lock(slot.mu);
                 auto & source = block->layers[layer];
