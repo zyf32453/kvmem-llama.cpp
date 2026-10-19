@@ -36,6 +36,7 @@ struct llama_kvmem_params {
     bool     raw_k_nvme;           // put raw-K/V authority on NVMe (qw3-style)
     bool     harvest_v;            // prefill D2H V with K (default off; not implied by raw_k_nvme)
     int32_t  mtp_state;            // 0 snapshots, 1 auto, 2 replay
+    uint64_t historical_pinned_bytes; // independent historical page-locked pool
 };
 
 // Call before llama_init_from_model. A null pointer resets to defaults
@@ -43,10 +44,12 @@ struct llama_kvmem_params {
 LLAMA_API void llama_kvmem_set_params(const struct llama_kvmem_params * params);
 LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 
-// Experimental finite sequential-request RAM capture path; deletion is OFF unless
+// Experimental finite sequential-request historical capture path; deletion is OFF unless
 // the caller explicitly starts one shadow/delete manager after admission.
 // Requires a recency context, one GPU/lane, flash attention, no MTP,
-// hybrid, CPU spill arena or NVMe. It reserves actual historical RAM, not all
+// hybrid, legacy CPU spill arena or NVMe. An independent historical pinned
+// budget may be set in params; it is backed by cudaMallocHost and reserved
+// before admission. This still does not reserve all
 // GPU/backend/metadata resources. Begin refusal leaves an empty context usable;
 // an execution failure after begin is terminal and requires context teardown.
 // The first begin requires an empty context. After a successful finish,

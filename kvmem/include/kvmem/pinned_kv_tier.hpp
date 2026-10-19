@@ -90,7 +90,24 @@ public:
         const auto result = allocations_.close(h);
         return result == PinnedReleaseResult::Released ? finish_locked(h) : result;
     }
+    // Historical owners that allocate page-locked buffers per extent split
+    // close from reuse: first drain IO, then free the physical buffer, and
+    // only then publish the slot as free to new request admission.
+    PinnedReleaseResult try_close_allocation(PinnedAllocationHandle h) {
+        std::unique_lock<std::mutex> lock(mu_, std::try_to_lock);
+        return lock.owns_lock() ? allocations_.close(h) : PinnedReleaseResult::Retry;
+    }
+    PinnedReleaseResult try_finish_closed_allocation(PinnedAllocationHandle h) {
+        std::unique_lock<std::mutex> lock(mu_, std::try_to_lock);
+        if (!lock.owns_lock()) return PinnedReleaseResult::Retry;
+        return allocations_.closed(h.slot) && allocations_.finish(h) ? finish_bookkeeping_locked(h) :
+            PinnedReleaseResult::Retry;
+    }
     // Request rollback/normal owner boundary; GC uses the try-lock entry above.
+    PinnedReleaseResult close_owned_allocation(PinnedAllocationHandle h) {
+        std::lock_guard<std::mutex> lock(mu_);
+        return allocations_.close(h);
+    }
     PinnedReleaseResult release_owned_allocation(PinnedAllocationHandle h) {
         std::lock_guard<std::mutex> lock(mu_);
         const auto result = allocations_.close(h);
@@ -226,6 +243,9 @@ private:
     }
     PinnedReleaseResult finish_locked(PinnedAllocationHandle h) {
         if (!allocations_.finish(h)) return PinnedReleaseResult::Retry;
+        return finish_bookkeeping_locked(h);
+    }
+    PinnedReleaseResult finish_bookkeeping_locked(PinnedAllocationHandle h) {
         if (owners_[h.slot] >= 0) {
             const auto id = uint32_t(owners_[h.slot]);
             block_to_slot_.erase(id); erase_lru(id); owners_[h.slot] = -1;

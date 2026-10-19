@@ -25,7 +25,7 @@ class HistoricalKvRepository {
 public:
     using ReleaseCallback = std::function<bool(const HistoricalKvHandle &)>;
     enum class HostAccess { None, All, PackedKv, MeanK };
-    enum class HostResource { PackedKv, MeanK, Metadata, Nvme };
+    enum class HostResource { PackedKv, MeanK, Metadata, Nvme, Pinned };
     struct ResourceRelease {
         // Metadata runs only after every reference and every payload resource
         // have drained. Each successful resource callback is acknowledged once.
@@ -39,6 +39,10 @@ public:
         // Prepared before admission and moved into the sole writer lease.
         // Its destructor returns any unfinished external producer rights.
         std::shared_ptr<void> writer_resource;
+        // An independent, exact-generation pinned allocation. Its own IO
+        // leases drain before physical memory is returned; it is not a Host
+        // packed-KV reference and cannot delay release of the RAM copy.
+        uint64_t pinned_bytes = 0;
     };
 
     struct RangeObservation {

@@ -410,6 +410,7 @@ struct kvmem_transfer_test_access {
     }
     static bool stagein_engaged(const llama_memory_kvmem & mem) { return mem.historical_stagein_.engaged; }
     static bool stagein_disk(const llama_memory_kvmem & mem) { return mem.historical_stagein_.source.from_nvme(); }
+    static bool stagein_pinned(const llama_memory_kvmem & mem) { return mem.historical_stagein_.source.from_pinned(); }
     static const void * stagein_buffer(const llama_memory_kvmem & mem) { return mem.historical_stagein_.k.data(); }
     static void capture(llama_memory_kvmem & mem, uint32_t id) { mem.harvest_gpu_v(id); }
     static void capture_current(llama_memory_kvmem & mem) {
@@ -1430,7 +1431,10 @@ static void check_managed_async_harvest(llama_memory_kvmem & mem, bool with_nvme
 static void check_historical_stagein(llama_memory_kvmem & mem, unsigned scenario) {
     using Repo = kvmem::HistoricalKvRepository;
     using Store = kvmem::HistoricalKvRawStore;
-    const bool disk = scenario != 37, failure = scenario != 36, unconfirmed = scenario == 39;
+    const bool pinned = scenario >= 40;
+    const bool disk = scenario != 37 && !pinned;
+    const bool failure = scenario != 36 && scenario != 40;
+    const bool unconfirmed = scenario == 39 || scenario == 42;
     const auto & raw = mem.raw().config();
     const uint32_t count = 3, block = mem.block_tokens();
     auto & runtime = mem.runtime();
@@ -1450,6 +1454,16 @@ static void check_historical_stagein(llama_memory_kvmem & mem, unsigned scenario
         cfg.nvme_dir = tmp && *tmp ? tmp : "/tmp";
         cfg.nvme_bytes = uint64_t(cfg.n_layer) * block * (cfg.packed_k_bytes_per_token + cfg.packed_v_bytes_per_token);
     }
+    if (pinned) {
+        cfg.pinned_bytes = uint64_t(cfg.n_layer) * block *
+            (cfg.packed_k_bytes_per_token + cfg.packed_v_bytes_per_token);
+        cfg.allocate_pinned = [](size_t bytes) -> std::shared_ptr<uint8_t> {
+            uint8_t * p = nullptr;
+            require(cudaMallocHost(reinterpret_cast<void **>(&p), bytes) == cudaSuccess,
+                    "real historical pinned allocation failed");
+            return {p, [](uint8_t * memory) { (void) cudaFreeHost(memory); }};
+        };
+    }
     auto repo = std::make_shared<Repo>(1);
     auto storage = std::make_shared<Store>(cfg, 1);
     auto payload = storage->prepare_payload(block);
@@ -1459,7 +1473,8 @@ static void check_historical_stagein(llama_memory_kvmem & mem, unsigned scenario
             if (!owner) return false;
             auto code = storage->release_resource(*owner, h, resource).code;
             return code == Store::ReleaseCode::Released || code == Store::ReleaseCode::AlreadyReleased;
-        }, payload.packed_kv_bytes(), payload.mean_k_bytes(), payload.nvme_bytes(), payload.writer_resource()});
+        }, payload.packed_kv_bytes(), payload.mean_k_bytes(), payload.nvme_bytes(), payload.writer_resource(),
+           payload.pinned_bytes()});
     require(bool(writer), "stage-in fixture writer missing");
     const auto handle = writer->handle();
     require(storage->install_payload(*writer, handle, 0, count, payload), "stage-in fixture install failed");
@@ -1482,11 +1497,13 @@ static void check_historical_stagein(llama_memory_kvmem & mem, unsigned scenario
     bool admitted = false;
     kvmem_transfer_test_access::stagein_hook(mem, [&] {
         require(kvmem_transfer_test_access::stagein_engaged(mem) &&
-                kvmem_transfer_test_access::stagein_disk(mem) == disk, "stage-in chose the wrong storage source");
+                kvmem_transfer_test_access::stagein_disk(mem) == disk &&
+                kvmem_transfer_test_access::stagein_pinned(mem) == pinned,
+                "stage-in chose the wrong storage source");
         require(repo->retire(handle) == Repo::RetireResult::Committed, "stage-in source retirement failed");
         repo->try_reclaim(handle);
         require(!runtime.historical_shadow_directory().acquire_stage_in(0), "retirement admitted another stage-in");
-        require((storage->allocated_payload_bytes() == 0) == disk && !repo->ready_count(),
+        require((storage->allocated_payload_bytes() == 0) == (disk || pinned) && !repo->ready_count(),
                 "stage-in retained the wrong resource or released identity early");
         admitted = true;
     });
@@ -1501,7 +1518,8 @@ static void check_historical_stagein(llama_memory_kvmem & mem, unsigned scenario
             if (!f.fired && point == f.point) { f.fired = true; return true; }
             return false;
         }
-    } fault{scenario == 38 ? KvmemHistoricalStageInPoint::CopyResult : KvmemHistoricalStageInPoint::Wait, unconfirmed};
+    } fault{scenario == 38 || scenario == 41 ? KvmemHistoricalStageInPoint::CopyResult :
+        KvmemHistoricalStageInPoint::Wait, unconfirmed};
     // Keep the fault seam alive until all assertions/cleanup have completed.
     struct ClearHooks {
         llama_memory_kvmem & mem;
@@ -1527,8 +1545,9 @@ static void check_historical_stagein(llama_memory_kvmem & mem, unsigned scenario
         if (unconfirmed) {
             bool blocked = false;
             try { kvmem_transfer_test_access::capture_shutdown(mem); } catch (const std::runtime_error &) { blocked = true; }
-            require(blocked && kvmem_transfer_test_access::stagein_engaged(mem) && storage->allocated_nvme_bytes(),
-                    "unconfirmed device completion discarded disk source rights");
+            require(blocked && kvmem_transfer_test_access::stagein_engaged(mem) &&
+                    (pinned ? storage->allocated_pinned_bytes() : storage->allocated_nvme_bytes()),
+                    "unconfirmed device completion discarded external source rights");
         }
         kvmem_historical_stagein_test_fault(nullptr, nullptr);
         kvmem_transfer_test_access::capture_shutdown(mem);
@@ -1551,10 +1570,11 @@ static void check_historical_stagein(llama_memory_kvmem & mem, unsigned scenario
         }
     }
     require(repo->try_reclaim(handle) == Repo::ReclaimResult::Complete && !storage->allocated_payload_bytes() &&
-            !storage->allocated_nvme_bytes() && runtime.confirm_reclaimed_historical_block(0),
+            !storage->allocated_nvme_bytes() && !storage->allocated_pinned_bytes() &&
+            runtime.confirm_reclaimed_historical_block(0),
             "completed/cancelled stage-in did not return its exact resources");
     std::printf("PASS historical stage-in: scenario=%u source=%s retired_after_admission=1 failure=%d unconfirmed=%d layers=%zu\n",
-                scenario, disk ? "nvme" : "ram", failure, unconfirmed, expected.size());
+                scenario, pinned ? "pinned" : disk ? "nvme" : "ram", failure, unconfirmed, expected.size());
 }
 
 static void check_partial_rollover(llama_memory_kvmem & mem) {
@@ -2804,7 +2824,7 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
 }
 
 int main(int argc, char ** argv) {
-    constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 40 : 35;
+    constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 43 : 35;
     if (argc != 2 && argc != 3 && argc != 4) {
         std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --scenario 0..%u] (requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;

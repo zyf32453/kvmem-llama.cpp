@@ -2,10 +2,12 @@
 
 #include "kvmem/historical_kv_repository.hpp"
 #include "kvmem/nvme_kv_allocation.hpp"
+#include "kvmem/pinned_kv_tier.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -35,6 +37,12 @@ struct HistoricalKvRawStoreConfig {
     // Requires the Linux NVMe tier with working physical preallocation.
     uint64_t nvme_bytes = 0;
     std::string nvme_dir;
+    // Optional independent pinned copy. The allocator must return actual
+    // page-locked memory of at least the requested size with sole ownership
+    // in the returned shared_ptr. No pageable fallback is permitted.
+    // Full physical extents are allocated before request admission.
+    uint64_t pinned_bytes = 0;
+    std::function<std::shared_ptr<uint8_t>(size_t)> allocate_pinned;
 };
 
 class HistoricalKvRawStore {
@@ -42,6 +50,8 @@ class HistoricalKvRawStore {
     struct Accounting;
     struct DiskAllocation;
     struct DiskProducer;
+    struct PinnedAllocation;
+    struct PinnedProducer;
 public:
     // Actual K/V/Mean-K allocations prepared before request admission. A
     // prepared payload is private, not historical data and not selectable.
@@ -60,6 +70,7 @@ public:
         uint64_t packed_kv_bytes() const noexcept;
         uint64_t mean_k_bytes() const noexcept;
         uint64_t nvme_bytes() const noexcept;
+        uint64_t pinned_bytes() const noexcept;
         std::shared_ptr<void> writer_resource() const noexcept;
         uint32_t token_capacity() const noexcept;
     private:
@@ -85,6 +96,23 @@ public:
         NvmeIoLease io_;
         uint32_t valid_tokens_ = 0;
     };
+    class PinnedRead {
+    public:
+        PinnedRead() = default;
+        PinnedRead(PinnedRead &&) noexcept = default;
+        PinnedRead & operator=(PinnedRead &&) noexcept;
+        PinnedRead(const PinnedRead &) = delete;
+        PinnedRead & operator=(const PinnedRead &) = delete;
+        explicit operator bool() const noexcept { return bool(io_); }
+        PinnedAllocationHandle allocation_handle() const noexcept { return io_.handle(); }
+    private:
+        friend class HistoricalKvRawStore;
+        HistoricalKvRepository::Lease identity_;
+        std::shared_ptr<Accounting> accounting_;
+        std::shared_ptr<PinnedAllocation> allocation_;
+        PinnedIoLease io_;
+        uint32_t valid_tokens_ = 0;
+    };
     struct BlockInfo {
         HistoricalKvHandle handle;
         uint64_t original_begin = 0;
@@ -100,6 +128,13 @@ public:
         std::vector<uint8_t> packed_v;
         std::vector<float> mean_k_sum;
         uint32_t mean_tokens = 0;
+    };
+
+    struct PinnedLayerView {
+        const uint8_t * packed_k = nullptr;
+        const uint8_t * packed_v = nullptr;
+        size_t k_bytes = 0;
+        size_t v_bytes = 0;
     };
 
     struct WriteProgress {
@@ -217,6 +252,14 @@ public:
     bool read_nvme_layer(const NvmeRead & reader, uint32_t layer,
                          uint8_t * packed_k, size_t k_bytes,
                          uint8_t * packed_v, size_t v_bytes) const;
+    std::optional<PinnedRead> acquire_pinned_read(HistoricalKvRepository & repository,
+                                                 HistoricalKvHandle handle) const;
+    bool read_pinned_layer(const PinnedRead & reader, uint32_t layer,
+                          uint8_t * packed_k, size_t k_bytes,
+                          uint8_t * packed_v, size_t v_bytes) const;
+    // Borrowed page-locked addresses. Keep PinnedRead alive until the GPU
+    // transfer has *completed*, not merely until it has been submitted.
+    std::optional<PinnedLayerView> pinned_layer(const PinnedRead & reader, uint32_t layer) const;
     // Repository identity is required even for metadata observations: an
     // external incarnation can be deliberately reused by another owner.
     std::optional<BlockInfo> inspect(const HistoricalKvRepository & repository,
@@ -240,6 +283,7 @@ public:
     // Includes private PreparedPayload allocations as well as installed data.
     uint64_t allocated_payload_bytes() const noexcept;
     uint64_t allocated_nvme_bytes() const noexcept;
+    uint64_t allocated_pinned_bytes() const noexcept;
     uint32_t capacity() const noexcept;
     const HistoricalKvRawStoreConfig & config() const noexcept;
 
@@ -277,6 +321,11 @@ private:
         std::shared_ptr<DiskProducer> private_disk_producer;
         DiskProducer * disk_producer = nullptr; // owned by the admitted writer
         bool nvme_released = false;
+        std::shared_ptr<PinnedAllocation> pinned;
+        std::shared_ptr<PinnedProducer> private_pinned_producer;
+        PinnedProducer * pinned_producer = nullptr; // owned by the admitted writer
+        bool pinned_released = false;
+        bool pinned_filled = false;
     };
     struct Slot {
         mutable std::mutex mu;
@@ -297,6 +346,8 @@ private:
     std::vector<std::unique_ptr<Slot>> slots_;
     std::shared_ptr<NvmeKvTier> nvme_;
     size_t disk_k_stride_ = 0, disk_layer_stride_ = 0;
+    std::shared_ptr<PinnedKvTier> pinned_;
+    size_t pinned_k_stride_ = 0, pinned_layer_stride_ = 0;
 };
 
 } // namespace kvmem

@@ -8,6 +8,7 @@ request up front. It does not test incremental/streaming RAM reservations.
 import argparse
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -25,7 +26,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=["off", "shadow", "delete"], default="delete")
     parser.add_argument("--native-template", action="store_true", help="smoke-test the model's normal chat template")
+    parser.add_argument("--pinned-gb", type=float, default=0, help="reserve independent page-locked historical copies")
     args = parser.parse_args()
+    if not math.isfinite(args.pinned_gb) or not 0 <= args.pinned_gb <= 1048576:
+        parser.error("--pinned-gb must be finite and between 0 and 1048576")
     server, model = args.server.resolve(strict=True), args.model.resolve(strict=True)
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -61,6 +65,8 @@ def main():
         "--reasoning-effort", "none", "--kvmem-trace", "-lv", "4"]
     if not args.native_template:
         command += ["--chat-template-file", str(template)]
+    if args.pinned_gb:
+        command += ["--kvmem-historical-pinned-gb", str(args.pinned_gb)]
     if args.mode != "off":
         command += ["--kvmem-historical-gc-low", "20", "--kvmem-historical-gc-high", "26"]
     (out / "command.json").write_text(json.dumps(command, indent=2), encoding="utf-8")
@@ -114,7 +120,8 @@ def main():
             status, raw = call("/props")
             config = json.loads(raw)["kvmem"]["historical"]
             check("published historical configuration", status == 200 and config["capacity"] == 32 and
-                  config["mode"] == args.mode and config["admission"] == "finite_request")
+                  config["mode"] == args.mode and config["admission"] == "finite_request" and
+                  config["pinned_bytes"] == int(args.pinned_gb * 1024 ** 3))
             if args.native_template:
                 first = turn("native chat template first turn", "Write Z.")
                 continuation = body("Write Z again.")
@@ -189,6 +196,10 @@ def main():
                 turn(f"pressure request {cycle}", f"Cycle {cycle}.\n" + " p" * 384 + "\n", cache_reset=True)
             idle()
             text = log_path.read_text(encoding="utf-8", errors="replace")
+            if args.pinned_gb:
+                pinned_allocations = re.findall(r"KVMEM_HISTORICAL_CAPTURE begin .*?pinned_bytes=(\d+)", text)
+                check("real pinned request reservations", bool(pinned_allocations) and
+                      all(0 < int(value) <= int(args.pinned_gb * 1024 ** 3) for value in pinned_allocations))
             cancelled = re.findall(r"KVMEM_HISTORICAL_CAPTURE cancel rows=(\d+) input_remaining=(\d+)", text)
             check("unused reservations queued on both cancellations", len(cancelled) >= 2)
             check("partial input and generation cancellation reached",

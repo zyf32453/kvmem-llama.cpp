@@ -1156,6 +1156,22 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         cfg.packed_k_bytes_per_token = ggml_row_size(type_k_, n_embd_k_);
         cfg.packed_v_bytes_per_token = ggml_row_size(type_v_, n_embd_v_);
         cfg.attention_layers = raw_cfg_.historical_gc_attention_layers;
+        cfg.pinned_bytes = kvmem_current_execution().params.historical_pinned_bytes;
+        if (cfg.pinned_bytes) {
+            cfg.allocate_pinned = [](size_t bytes) -> std::shared_ptr<uint8_t> {
+                uint8_t * memory = nullptr;
+                if (cudaMallocHost(reinterpret_cast<void **>(&memory), bytes) != cudaSuccess)
+                    throw std::bad_alloc();
+                return {memory, [](uint8_t * p) {
+                    const auto result = cudaFreeHost(p);
+                    if (result != cudaSuccess) {
+                        LLAMA_LOG_ERROR("historical pinned release failed: %s; capacity cannot be reused\n",
+                                        cudaGetErrorString(result));
+                        std::terminate();
+                    }
+                }};
+            };
+        }
         // Recency needs the packed KV only. Mean-K/retrieval joins this owner
         // after replay and execution admission are integrated.
         int storage_device = -1;
@@ -1309,9 +1325,10 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             harvest_v_job_limit_, workspace.device_bytes, workspace.pinned_bytes,
             workspace.host_bytes + (harvest_v_jobs_.capacity() + harvest_v_pending_.jobs.capacity()) * sizeof(HarvestVJob),
             harvest_v_fallback_.size(), workspace.layout_bytes, n_slots_, layout_workspace_.capacity_bytes());
-        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu input=%llu output_max=%llu appends_max=%llu metadata_slots=%u active_slots=%zu active_bytes=%zu cell_scratch_bytes=%zu\n",
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE begin capacity=%u reserved=%u payload_bytes=%llu pinned_bytes=%llu input=%llu output_max=%llu appends_max=%llu metadata_slots=%u active_slots=%zu active_bytes=%zu cell_scratch_bytes=%zu\n",
             capacity, historical_capture_->reserved_blocks(),
             (unsigned long long) historical_capture_->payload_bytes(),
+            (unsigned long long) historical_capture_->storage()->allocated_pinned_bytes(),
             (unsigned long long) input_tokens, (unsigned long long) max_output_tokens,
             (unsigned long long) max_appends, historical_capture_->metadata_remaining(),
             historical_active_->capacity(), historical_active_->capacity_bytes() + historical_active_workspace_.capacity_bytes(),
@@ -1580,9 +1597,10 @@ bool llama_memory_kvmem::finish_historical_capture() {
                 (unsigned long long) stats.partial_resource_releases);
             if (stats.policy_failures || stats.worker_failures) return false;
         }
-        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live_observed=%u task_references=0 rows=%u payload_bytes=%llu gpu_deferred=%llu gpu_returned=%llu\n",
+        LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live_observed=%u task_references=0 rows=%u payload_bytes=%llu pinned_bytes=%llu gpu_deferred=%llu gpu_returned=%llu\n",
             historical_capture_->created_blocks(), historical_capture_->live_blocks_at_finish(), store_n_tokens(),
             (unsigned long long) historical_capture_->payload_bytes(),
+            (unsigned long long) historical_capture_->storage()->allocated_pinned_bytes(),
             (unsigned long long) historical_gpu_deferred_,
             (unsigned long long) historical_gpu_returned_);
         LLAMA_LOG_INFO("KVMEM_CAPTURE_ARENA finish used_bytes=%zu capacity_bytes=%zu captured_tokens=%zu max_tokens=%zu\n",
@@ -5460,9 +5478,20 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) try {
         }
         const int64_t t_copy = ggml_time_us();
         bool have_k = false, have_v = false;
+        const uint8_t * k_source = kpack.data();
+        const uint8_t * v_source = vpack.data();
         if (source.host.storage) {
-            if (!source.copy_layer(il, kpack.data(), kpack.size(), vpack.data(), vpack.size()))
+            if (source.from_pinned()) {
+                const auto pinned = source.pinned_layer(il);
+                if (!pinned || pinned->k_bytes != kpack.size() || pinned->v_bytes != vpack.size())
+                    throw std::runtime_error("historical pinned stage-in payload does not match the admitted block");
+                // The StageInAccess member owns the exact pinned IO lease
+                // through checked H2D completion (or failure cleanup).
+                k_source = pinned->packed_k;
+                v_source = pinned->packed_v;
+            } else if (!source.copy_layer(il, kpack.data(), kpack.size(), vpack.data(), vpack.size())) {
                 throw std::runtime_error("historical stage-in payload does not match the admitted block");
+            }
             have_k = true;
             have_v = !v_trans_;
         } else {
@@ -5480,15 +5509,16 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) try {
         uint8_t * kbase = multi_gpu_ ? nullptr : kvmem_cuda_tensor_ptr(kt);
         uint8_t * vbase = multi_gpu_ ? nullptr : (vt && !v_trans_) ? kvmem_cuda_tensor_ptr(vt) : nullptr;
         if (have_k) {
-            write_packed(kt, kbase, kpack.data(), krow, krow * (size_t) nt);
+            write_packed(kt, kbase, k_source, krow, krow * (size_t) nt);
         }
         if (have_v) {
-            write_packed(vt, vbase, vpack.data(), vrow, vrow * (size_t) nt);
+            write_packed(vt, vbase, v_source, vrow, vrow * (size_t) nt);
         }
     }
     if (trace_) {
-        kvmem_diag("KVMEM_TRACE stage_in_packed block=%u slot=%d n=%u orig=%u\n",
-                block_id, blk.gpu_slot, nt, blk.orig_pos_start);
+        kvmem_diag("KVMEM_TRACE stage_in_packed block=%u slot=%d n=%u orig=%u source=%s\n",
+                block_id, blk.gpu_slot, nt, blk.orig_pos_start,
+                source.from_pinned() ? "pinned" : source.from_nvme() ? "nvme" : managed ? "ram" : "legacy");
     }
     if (managed) {
         historical_stagein_.source = {};

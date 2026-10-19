@@ -18,9 +18,11 @@ HistoricalKvRamReservation::HistoricalKvRamReservation(HistoricalKvRamReservatio
     : repository_(std::move(other.repository_)), storage_(std::move(other.storage_)),
       slots_(std::move(other.slots_)), payloads_(std::move(other.payloads_)),
       scratch_(std::move(other.scratch_)), reserved_payload_bytes_(other.reserved_payload_bytes_),
-      reserved_nvme_bytes_(other.reserved_nvme_bytes_) {
+      reserved_nvme_bytes_(other.reserved_nvme_bytes_),
+      reserved_pinned_bytes_(other.reserved_pinned_bytes_) {
     other.reserved_payload_bytes_ = 0;
     other.reserved_nvme_bytes_ = 0;
+    other.reserved_pinned_bytes_ = 0;
 }
 
 HistoricalKvRamReservation & HistoricalKvRamReservation::operator=(HistoricalKvRamReservation && other) noexcept {
@@ -37,6 +39,7 @@ HistoricalKvRamReservation & HistoricalKvRamReservation::operator=(HistoricalKvR
         swap(scratch_, replacement.scratch_);
         swap(reserved_payload_bytes_, replacement.reserved_payload_bytes_);
         swap(reserved_nvme_bytes_, replacement.reserved_nvme_bytes_);
+        swap(reserved_pinned_bytes_, replacement.reserved_pinned_bytes_);
     }
     return *this;
 }
@@ -81,6 +84,7 @@ std::optional<HistoricalKvRamReservation> HistoricalKvRamReservation::try_reserv
             auto payload = result.storage_->prepare_payload(result.storage_->config().max_tokens_per_slot);
             result.reserved_payload_bytes_ = add_checked(result.reserved_payload_bytes_, payload.payload_bytes());
             result.reserved_nvme_bytes_ = add_checked(result.reserved_nvme_bytes_, payload.nvme_bytes());
+            result.reserved_pinned_bytes_ = add_checked(result.reserved_pinned_bytes_, payload.pinned_bytes());
             result.payloads_.push_back(std::move(payload));
         }
         result.scratch_.resize(static_cast<size_t>(demand.private_scratch_bytes));

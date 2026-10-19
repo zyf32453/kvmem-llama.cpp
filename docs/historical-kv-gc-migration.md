@@ -743,14 +743,36 @@ runtime 的 CPU 缓存写入及恢复现持有精确 allocation lease，恢复�
 
 **阶段边界：** 本项为实际 CPU cache/runtime 路径建立槽位生命周期协议，还没有把每个 historical handle 的 pinned 副本接进 repository 的独立资源回收确认。`PinnedKvTier` 本身不拥有或注册 page-locked 内存；runtime 现有 `cpu_arena_` 仍是普通 Host vector，不能凭类型名称报告为真实 pinned 内存。公开 historical capture 入口仍未启用该缓存；后续须接内容版本、存储 owner、实际 pinned arena 预算、缓存命中与回收失效，并验证完整请求路径。
 
+### Historical pinned 副本的独立生命周期（2026-10-19）
+
+本轮把上一阶段的 CPU cache allocation 协议接到 historical handle。`HistoricalKvRawStore` 可选配独立 pinned 副本，每块在请求接纳前取得完整物理 extent；公开 CUDA 入口使用 `cudaMallocHost`，由存储 owner 持有真实 page-locked 内存。新增 `--kvmem-historical-pinned-gb`，CLI/server 均要求同时开启 historical capture；它与原有 `--kvmem-cpu-gb` 是不同资源。预算不足或 allocator 失败时，整次预约失败并归还已经取得的资源，不等待后续 GC。短尾仍按完整 extent 计费。
+
+producer 在预约阶段取得原始 pinned IO 许可，并随唯一 writer 交接。因此 Writing 块即使在安装前或写入中退休，已经承诺的 packed K/V 复制仍能完成；退休不会重新开放读者。packed K/V 全部完成后归还 pinned producer 许可，不必等待 Mean-K；半写取消则在最后一个 producer 退出时归还。这个许可与后续 stage-in reader 分开，不能在退休后临时重新申请写入权。
+
+repository 增加独立 pinned 释放确认。退休先关闭新 IO，已有读者保留原 allocation generation；其间 RAM packed K/V 与 Mean-K 可以独立释放。最后一个 pinned 使用者退出后，后台先实际释放 page-locked 内存，再返还 pinned 槽位；完整 metadata/Ready 仍等待其余身份与资源结清。请求预约回退遵守相同顺序，避免慢 deleter 尚未完成时新请求复用容量。CUDA 释放报错时停止执行，不将未确认释放的容量记作可用；这属于设备失败后的 fail-stop 行为，没有实现设备故障自动恢复。
+
+受管理 stage-in 可直接借用 pinned 地址，持有来源许可直到检查过的 H2D 完成；提交失败或完成状态不确定时沿用已建立的保留/清理协议。GC 不修改 GPU 工作集。当前仍保留普通 RAM 副本，这不是 Live RAM 压力卸载；同时配置独立 NVMe 与 pinned 副本明确拒绝，未验证组合不静默接纳。
+
+自查修正了两处旧草稿的缺口：预约回退曾先返还槽位再调用实际内存 deleter；pinned producer 曾在发布时才申请 IO。新增受控并发测试在 deleter 尚未结束时尝试新预约，分别覆盖 GC 和私有预约回退；另覆盖安装前退休、半写取消、packed 完成后 Mean-K 延续、一个槽位连续 32 代、实际 allocator 失败和整请求回退。Host 单元测试使用可控普通内存模拟 allocator，只证明生命周期与记账；真实 page-locked/H2D 证据来自 CUDA 测试。
+
+最终 Linux NVMe ON **29/29**、OFF **28/28**；Windows 原有 23 项加新增 pinned 项均通过分项复验。Windows 首轮生命周期测试因沙箱禁止创建测试链接失败，在允许该测试操作的环境复验通过。历史 GC 的 ASan/UBSan **14/14**、TSan **14/14** 通过，最后仅调整测试屏障后 pinned 用例再次通过 ASan/UBSan 和 Windows。上述统计不包含工作树中另一个未提交的 GC 演示目标。
+
+TSan 首次遇到本机地址映射冲突，使用已有的进程级 `setarch x86_64 -R` 方式复验；随后条件变量测试屏障出现 double-lock 告警。独立的两线程最小程序（不包含项目代码）复现了同样告警，故将测试屏障改为有超时的原子握手，没有关闭 TSan 检测或忽略告警。首次失败、最小复现及最终通过日志均保留。
+
+最终真实模型 **43/43** 场景、reset/cancel、两条连续请求及 backend guard 通过；两条长轨迹分别回收 **70/190** 块。新增三个 pinned stage-in 场景分别验证正常 H2D、真实提交后注入失败、无法确认完成，每个场景逐层核对 **48 层**。这些 stage-in 是确定性构造的实际设备路径；先前普通 CLI 请求虽发生 pinned 分配和 GC，但没有触发 pinned stage-in，不能把该 CLI 结果当成自然缓存命中率或性能改善证据。此前偶发 CUDA 非法访问本轮未重现，根因仍未确认。
+
+开启 256 MiB historical pinned 预算的 delete HTTP 回归 **34/34** 断言通过，覆盖 Chat Completions/Responses、JSON/SSE、精确前缀延续、容量拒绝、reset、prefill/生成取消和后续压力请求。四次压力请求均 `committed=14`、完成边界 `reclaimed=13`，policy/worker failure 为零；begin 日志记录实际 pinned 分配，`/props` 返回预算。测试脚本新增 `--pinned-gb`，可使用相同流程复验。预算当前按 historical domain 计，新旧域切换时的全局总 bytes 仍是待办；这些 HTTP 请求没有证明自然 pinned stage-in 命中或性能收益。
+
+本轮受测源码指纹、构建与测试日志放在 `artifacts/historical-pinned-binding/`；远程仍只使用 `/tmp/kvmem-gc-99bef27.3CD9MU` 隔离副本。完整交付仍需下列生产接入与验收。优先完成所有 active 入口、统一请求预算及长期有界证据，避免继续扩展可选存储组合挤占核心验收；该顺序不删除 P5/P6 或质量验收要求。用户已确认导师指定 DeepSWE，但尚未配置运行环境，后续需核对模型、运行入口和评测工具，不能用本节模型/HTTP 生命周期测试代替实际任务质量。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的交付项，不是当前已支持功能：
 
 1. **生产身份创建与请求 owner。** packed K/V、Mean-K D2H capture、同步 fallback 和 decode accumulator 已使用执行前捕获的同代 writer/范围，最后一个必需分量写完后自动发布；短尾块、非对齐范围和批量身份登记已有接线。CLI 的单请求 recency 路径现能自动预约 RAM、创建身份、向任务交接 producer，并显式运行 shadow/delete；适配器也已支持同一域的有限连续请求。server 已接入单 lane 的有限预约、精确前缀延续、新会话与健康取消；仍需扩展缓存分支、设备故障恢复和其它生产路径。这个受限入口没有承诺整请求的全部资源，更未覆盖所有调用路径。
-2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 的读取、已完成 writer 分量及回收已独立结算。独立 NVMe 来源已接到受管理 stage-in；CPU cache 已有槽位 generation/IO 协议，仍需与 historical 内容版本、pinned arena owner 及回收确认绑定。通用异步搬运与其余入口也未完成；仍须验证内容同步不会引入前台 GC 等待。
+2. **所有 active 与资源依赖。** 给 reselect、prefill、same-query、all-fit、commit-resident、keep-selected、attach 等入口建立新的 ActiveId/ExecLease；保护已经提交的 GPU 输入到实际完成。真实执行才更新 LRU；评分、预取与单纯选中不计实际使用。受限 recency/RAM 路径已拆分 Host 与 GPU/metadata；packed K/V 和 Mean-K 的读取、已完成 writer 分量及回收已独立结算。独立 NVMe 与 pinned 来源均已接到受管理 stage-in；historical pinned 副本已有精确代际、producer/reader 许可、真实内存 owner 及独立回收确认。legacy CPU cache 与新历史域的通用整合、批量异步搬运和其余 active 入口仍未完成；仍须验证内容同步不会引入前台 GC 等待。
 3. **请求预约与长期有界。** RAM 槽位、payload、scratch、slot_info、微批次数据、受限输入整理、单个解码上下文对象、后端输出 buffer 和图结果元数据的预约及碎片上界已有资源组件；还需在请求进入 active 前统一取得 GPU、其余后端与构图对象、元数据和 rollback 等全部资源，并落实额度约束及失败处理。不能等 GC 补给；RAM API 仍拒绝分段 streaming 预约；server 的 SSE 按有限输出整请求预约。将生产 dense block 表及版本、评分事件、墓碑、pending decisions 一并改为有界；累计追加至少 10×仓库容量验证完整链路复用与计数守恒。
-4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe tier 的 allocation generation、提交前 IO lease、独立 historical 副本绑定、真实 extent 预约及受管理 stage-in 来源已接通；仍需完成公开入口配置、pinned/批量搬运依赖和统一预算。MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
+4. **会话、检查点与支持组合。** 显式 reset/new-begin 已能切换独立 incarnation 并后台结清旧域；已接到受限 server 的取消/新会话入口；仍需将普通 clear/truncate/关闭、前缀回退统一到相应所有权协议。闲置 checkpoint 失效不能复活历史，已承诺 rollback 保留实际依赖。NVMe tier 的 allocation generation、提交前 IO lease、独立 historical 副本绑定、真实 extent 预约及受管理 stage-in 来源已接通；pinned 独立副本也已接到受限公开入口。仍需完成 NVMe 公开配置、批量搬运依赖、新旧域共同的总预算及相应验收。MTP、hybrid、query replay、refresh、多 lane 等按实际使用组合逐项接入与验收，未验证组合明确列出。
 5. **策略开关、观测与效果。** 已有 predicate 策略模板和版本条件原子提交；仍需实现独立冗余策略，并将受限 CLI/server 已有的 off/shadow/delete、LRU 压力与 pending credit 扩展到其余生产入口。策略决定不受 manager 隐含年龄/驻留/引用门槛限制。保存 retirement/release/ActiveId/延期原因 trace、allocator 与 metadata 长轨迹、入口拒绝和前台 GC 等待计数；补完整生产组合的 TSan 结果。固定模型、seed、任务和容量，对 off/shadow/delete 及 LRU/新增策略做延迟、吞吐和真实 agent 质量对照，保留原始日志。质量阈值未约定时只提交比较结果，不宣称通过。
 
 单 GPU、单 lane、文本、RAM、MTP off 是首个生产闭环的阶段验收范围，不是完整交付的替代定义。目前 repository、按句柄 payload store、预约追加块表、宿主持久域以及受限 llama 适配器入口具备固定物理槽位跨请求复用；server 的多 lane/多会话、跨请求检查点引用及其余队列仍需改造。当前结果不证明生产长期总内存有界，也不证明所有已接纳生产请求都完全不依赖 GC。

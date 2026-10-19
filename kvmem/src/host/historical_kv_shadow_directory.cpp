@@ -439,6 +439,11 @@ HistoricalKvShadowDirectory::StageInAccess HistoricalKvShadowDirectory::acquire_
     const auto & entry = it->second;
     if (entry.state != State::Bound || !entry.repository ||
         entry.repository->repository_id() != entry.repository_id) return {};
+    if (entry.storage && entry.storage->config().pinned_bytes) {
+        auto pinned = entry.storage->acquire_pinned_read(*entry.repository, entry.binding.handle);
+        if (!pinned) return {};
+        return {{Access::Status::Acquired, {}, entry.storage}, {}, std::move(pinned)};
+    }
     if (entry.storage && entry.storage->config().nvme_bytes) {
         auto disk = entry.storage->acquire_nvme_read(*entry.repository, entry.binding.handle);
         if (!disk) return {};
@@ -450,8 +455,14 @@ HistoricalKvShadowDirectory::StageInAccess HistoricalKvShadowDirectory::acquire_
 bool HistoricalKvShadowDirectory::StageInAccess::copy_layer(uint32_t layer,
         uint8_t * k, size_t k_bytes, uint8_t * v, size_t v_bytes) const {
     if (!*this || !host.storage) return false;
-    return disk ? host.storage->read_nvme_layer(*disk, layer, k, k_bytes, v, v_bytes) :
+    return pinned ? host.storage->read_pinned_layer(*pinned, layer, k, k_bytes, v, v_bytes) :
+        disk ? host.storage->read_nvme_layer(*disk, layer, k, k_bytes, v, v_bytes) :
         host.storage->copy_packed_kv(host.lease, host.lease.handle(), layer, k, k_bytes, v, v_bytes);
+}
+
+std::optional<HistoricalKvRawStore::PinnedLayerView>
+HistoricalKvShadowDirectory::StageInAccess::pinned_layer(uint32_t layer) const {
+    return pinned && host.storage ? host.storage->pinned_layer(*pinned, layer) : std::nullopt;
 }
 
 bool HistoricalKvShadowDirectory::unbind_retired(uint32_t block_id) {

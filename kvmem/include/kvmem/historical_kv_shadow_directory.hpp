@@ -126,9 +126,12 @@ public:
     struct StageInAccess {
         Access host;
         std::optional<HistoricalKvRawStore::NvmeRead> disk;
-        explicit operator bool() const { return disk ? bool(*disk) : bool(host); }
+        std::optional<HistoricalKvRawStore::PinnedRead> pinned;
+        explicit operator bool() const { return pinned ? bool(*pinned) : disk ? bool(*disk) : bool(host); }
         bool managed() const noexcept { return host.status == Access::Status::Acquired; }
         bool from_nvme() const noexcept { return disk.has_value(); }
+        bool from_pinned() const noexcept { return pinned.has_value(); }
+        std::optional<HistoricalKvRawStore::PinnedLayerView> pinned_layer(uint32_t layer) const;
         bool copy_layer(uint32_t layer, uint8_t * k, size_t k_bytes,
                         uint8_t * v, size_t v_bytes) const;
     };

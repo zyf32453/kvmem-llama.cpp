@@ -38,6 +38,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem-historical-gc-mode M  off | shadow | delete (default off; requires capture)\n"
             "  --kvmem-historical-gc-low N   LRU Ready low watermark (requires high)\n"
             "  --kvmem-historical-gc-high N  LRU Ready target (requires low)\n"
+            "  --kvmem-historical-pinned-gb G  independent page-locked historical KV budget\n"
             "  --kvmem-block-tokens N     block size (default 32)\n"
             "  --kvmem-budget N           GPU working-set tokens; 0 = n_ctx (identity)\n"
             "  --kvmem-gen-reserve N      extra GPU tokens for decode (default 256)\n"
@@ -93,6 +94,7 @@ int main(int argc, char ** argv) {
     bool historical_gc_mode_set = false;
     uint32_t historical_gc_low = 0, historical_gc_high = 0;
     bool historical_gc_low_set = false, historical_gc_high_set = false;
+    bool historical_pinned_set = false;
 
     llama_kvmem_params kparams = {};
     kparams.block_tokens = 32;
@@ -243,6 +245,10 @@ int main(int argc, char ** argv) {
             const double gb = std::atof(need(arg));
             kparams.cpu_bytes = gb <= 0.0 ? 0
                 : static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
+        } else if (eq(arg, "--kvmem-historical-pinned-gb")) {
+            const double gb = kvmem_cli_real(arg, need(arg), 0, 1048576);
+            kparams.historical_pinned_bytes = static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
+            historical_pinned_set = true;
         } else if (eq(arg, "--kvmem-nvme-gb")) {
             const double gb = std::atof(need(arg));
             kparams.nvme_bytes = gb <= 0.0 ? 0
@@ -299,8 +305,9 @@ int main(int argc, char ** argv) {
     }
 #endif
     // Validate before backend initialization and loading a potentially large model.
-    if ((historical_gc_mode_set || historical_gc_low_set || historical_gc_high_set) && !historical_capacity) {
-        fprintf(stderr, "historical GC flags require --kvmem-historical-capture N\n");
+    if ((historical_gc_mode_set || historical_gc_low_set || historical_gc_high_set ||
+         historical_pinned_set) && !historical_capacity) {
+        fprintf(stderr, "historical options require --kvmem-historical-capture N\n");
         return 1;
     }
     if (historical_gc_low_set != historical_gc_high_set ||

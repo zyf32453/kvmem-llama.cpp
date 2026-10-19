@@ -62,8 +62,9 @@ inline int kvmem_cli_gpu_layers(const char * option, const char * value) {
 
 struct kvmem_server_historical_options {
     uint32_t capacity = 0, low = 0, high = 0;
+    uint64_t pinned_bytes = 0;
     int mode = 0;
-    bool mode_set = false, low_set = false, high_set = false;
+    bool mode_set = false, low_set = false, high_set = false, pinned_set = false;
     template<typename Need>
     bool parse(const std::string & arg, const Need & need) {
         if (arg == "--kvmem-historical-capture") {
@@ -79,11 +80,15 @@ struct kvmem_server_historical_options {
             const auto value = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
             if (arg == "--kvmem-historical-gc-low") { low = value; low_set = true; }
             else { high = value; high_set = true; }
+        } else if (arg == "--kvmem-historical-pinned-gb") {
+            const double gb = kvmem_cli_real(arg.c_str(), need(arg.c_str()), 0, 1048576);
+            pinned_bytes = static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
+            pinned_set = true;
         } else return false;
         return true;
     }
     void validate() {
-        if (!capacity && (mode_set || low_set || high_set))
+        if (!capacity && (mode_set || low_set || high_set || pinned_set))
             throw std::invalid_argument("historical GC flags require --kvmem-historical-capture N");
         if (low_set != high_set || ((low_set || high_set) && !mode))
             throw std::invalid_argument("historical Ready thresholds require both low and high with shadow/delete");

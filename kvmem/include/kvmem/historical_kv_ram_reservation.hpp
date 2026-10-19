@@ -6,7 +6,7 @@ namespace kvmem {
 
 // The RAM part of request admission. This is deliberately not a promise that
 // an adapter has also reserved GPU pages or directory nodes. If the store
-// enables independent NVMe copies, their real extents are reserved here too.
+// enables independent NVMe or pinned copies, their real extents are reserved here too.
 // The adapter must compose those resources before marking a request active,
 // and enforce these token/append limits during execution.
 struct HistoricalKvRamDemand {
@@ -45,6 +45,7 @@ public:
     // installing/releasing some of the payloads.
     uint64_t reserved_payload_bytes() const noexcept { return reserved_payload_bytes_; }
     uint64_t reserved_nvme_bytes() const noexcept { return reserved_nvme_bytes_; }
+    uint64_t reserved_pinned_bytes() const noexcept { return reserved_pinned_bytes_; }
     uint64_t reserved_scratch_bytes() const noexcept { return scratch_.capacity(); }
 
 private:
@@ -58,6 +59,7 @@ private:
     std::vector<uint8_t> scratch_;
     uint64_t reserved_payload_bytes_ = 0;
     uint64_t reserved_nvme_bytes_ = 0;
+    uint64_t reserved_pinned_bytes_ = 0;
 };
 
 } // namespace kvmem

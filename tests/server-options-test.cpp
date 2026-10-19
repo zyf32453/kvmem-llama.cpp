@@ -12,6 +12,16 @@ static void rejects(const std::function<void()> & fn) {
 }
 int main() {
     {
+        kvmem_server_options pinned;
+        check(pinned.parse("--kvmem-historical-pinned-gb", [](const char *) { return "0.25"; }));
+        rejects([&] { pinned.historical.validate(); });
+        check(pinned.parse("--kvmem-historical-capture", [](const char *) { return "4"; }));
+        pinned.historical.validate();
+        check(pinned.historical.pinned_bytes == 256ull * 1024 * 1024);
+        for (const char * bad : {"NaN", "inf", "1x", "-1"})
+            rejects([&] { pinned.parse("--kvmem-historical-pinned-gb", [&](const char *) { return bad; }); });
+    }
+    {
         kvmem_server_options h;
         auto parse_h = [&](const char * flag, const char * value) {
             check(h.parse(flag, [&](const char *) { return value; }));

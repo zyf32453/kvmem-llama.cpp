@@ -139,6 +139,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem-historical-gc-mode M  off, shadow or delete (default off)\n"
             "  --kvmem-historical-gc-low N   Ready low watermark (set with high)\n"
             "  --kvmem-historical-gc-high N  Ready high watermark\n"
+            "  --kvmem-historical-pinned-gb GB  independent page-locked historical KV budget\n"
             "  --kvmem-nvme-gb GB         NVMe file in GiB (0 = off)\n"
             "  --kvmem-nvme-dir PATH      NVMe directory (default /tmp/kvmem_nvme)\n"
             "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
@@ -2668,6 +2669,7 @@ int main(int argc, char ** argv) {
     options.conversations = std::max(options.conversations, options.parallel);
     options.historical.validate();
     st.historical = options.historical;
+    st.kparams.historical_pinned_bytes = st.historical.pinned_bytes;
     if (st.historical.capacity && (!st.kparams.enabled || st.kparams.method != 0 || st.spec_mtp ||
             !mmproj_path.empty() || options.parallel != 1 || options.conversations != 1 ||
             st.kparams.cpu_bytes || st.kparams.nvme_bytes || st.kparams.raw_k_nvme ||
@@ -3152,6 +3154,7 @@ int main(int argc, char ** argv) {
     props["kvmem"]["historical"] = {{"capacity", st.historical.capacity},
         {"mode", st.historical.mode == 2 ? "delete" : st.historical.mode == 1 ? "shadow" : "off"},
         {"ready_low", st.historical.low}, {"ready_high", st.historical.high},
+        {"pinned_bytes", st.historical.pinned_bytes},
         {"admission", st.historical.capacity ? "finite_request" : "disabled"}};
     props["kvmem"]["conversation_bytes_max"] = options.conversation_bytes;
     // The legacy single-lane capability can degrade to one store.

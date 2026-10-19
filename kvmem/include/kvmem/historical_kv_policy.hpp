@@ -42,6 +42,8 @@ struct HistoricalKvBlockMeta {
     bool mean_k_released = false;
     uint64_t nvme_bytes = 0;
     bool nvme_released = false;
+    uint64_t pinned_bytes = 0;
+    bool pinned_released = false;
 };
 
 // The manager owns this immutable-for-one-round, safely sampled observation.

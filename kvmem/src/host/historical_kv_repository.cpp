@@ -120,6 +120,7 @@ struct HistoricalKvRepository::Shared {
         std::atomic<HostRelease> kv_release{HostRelease::Bound};
         std::atomic<HostRelease> mean_release{HostRelease::Bound};
         std::atomic<HostRelease> nvme_release{HostRelease::Bound};
+        std::atomic<HostRelease> pinned_release{HostRelease::Bound};
         // A resource writer owns one identity ref plus one claim per open
         // component. Closing a claim never invalidates its immutable handle.
         std::atomic<uint8_t> writer_resources{0};
@@ -190,6 +191,8 @@ struct HistoricalKvRepository::Shared {
         out.mean_k_released = slot.mean_release.load(std::memory_order_acquire) == HostRelease::Released;
         out.nvme_released = slot.nvme_release.load(std::memory_order_acquire) == HostRelease::Released;
         out.nvme_bytes = out.nvme_released ? 0 : slot.resources.nvme_bytes;
+        out.pinned_released = slot.pinned_release.load(std::memory_order_acquire) == HostRelease::Released;
+        out.pinned_bytes = out.pinned_released ? 0 : slot.resources.pinned_bytes;
         if (out.packed_kv_released) out.payload_bytes -= slot.resources.packed_kv_bytes;
         if (out.mean_k_released) out.payload_bytes -= slot.resources.mean_k_bytes;
         if (out.host_released) out.payload_bytes = 0;
@@ -451,6 +454,8 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reser
     slot.mean_release.store(HostRelease::Bound, std::memory_order_relaxed);
     slot.nvme_release.store(resources.nvme_bytes ? HostRelease::Bound : HostRelease::Released,
                             std::memory_order_relaxed);
+    slot.pinned_release.store(resources.pinned_bytes ? HostRelease::Bound : HostRelease::Released,
+                              std::memory_order_relaxed);
     slot.resources = std::move(resources);
     const bool split_writer = bool(slot.resources.callback);
     slot.writer_resources.store(split_writer ? kWriterAll : 0, std::memory_order_relaxed);
@@ -515,6 +520,8 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_write
         slot.mean_release.store(HostRelease::Bound, std::memory_order_relaxed);
         slot.nvme_release.store(resources.nvme_bytes ? HostRelease::Bound : HostRelease::Released,
                                 std::memory_order_relaxed);
+        slot.pinned_release.store(resources.pinned_bytes ? HostRelease::Bound : HostRelease::Released,
+                                  std::memory_order_relaxed);
         slot.resources = std::move(resources);
         const bool split_writer = bool(slot.resources.callback);
         slot.writer_resources.store(split_writer ? kWriterAll : 0, std::memory_order_relaxed);
@@ -700,6 +707,17 @@ HistoricalKvRepository::ReclaimResult HistoricalKvRepository::try_reclaim(
     }
 
     bool external_progress = false, external_retry = false;
+    if (slot.resources.pinned_bytes &&
+        slot.pinned_release.load(std::memory_order_acquire) != HostRelease::Released) {
+        slot.pinned_release.store(HostRelease::Releasing, std::memory_order_release);
+        bool complete = false;
+        try { complete = slot.resources.callback(handle, HostResource::Pinned); }
+        catch (...) { complete = false; }
+        if (complete) {
+            slot.pinned_release.store(HostRelease::Released, std::memory_order_release);
+            external_progress = true;
+        } else external_retry = true;
+    }
     if (slot.resources.nvme_bytes &&
         slot.nvme_release.load(std::memory_order_acquire) != HostRelease::Released) {
         // The allocation closes admission and counts its own actual IO. Its
@@ -746,7 +764,8 @@ HistoricalKvRepository::ReclaimResult HistoricalKvRepository::try_reclaim(
         slot.mean_release.store(HostRelease::Released, std::memory_order_release);
         slot.host_release.store(HostRelease::Released, std::memory_order_release);
     }
-    if (slot.nvme_release.load(std::memory_order_acquire) != HostRelease::Released)
+    if (slot.nvme_release.load(std::memory_order_acquire) != HostRelease::Released ||
+        slot.pinned_release.load(std::memory_order_acquire) != HostRelease::Released)
         return newly_released ? ReclaimResult::HostReleased : ReclaimResult::Retry;
     if (!full_release) {
         uint64_t only_guard = code(Phase::Retired, 0, 1);
@@ -828,10 +847,14 @@ bool HistoricalKvRepository::is_resource_releasing(HistoricalKvHandle handle, Ho
         return phase_of(control) == Phase::Releasing &&
             slot.kv_release.load(std::memory_order_acquire) == HostRelease::Released &&
             slot.mean_release.load(std::memory_order_acquire) == HostRelease::Released &&
-            slot.nvme_release.load(std::memory_order_acquire) == HostRelease::Released;
+            slot.nvme_release.load(std::memory_order_acquire) == HostRelease::Released &&
+            slot.pinned_release.load(std::memory_order_acquire) == HostRelease::Released;
     if (resource == HostResource::Nvme)
         return (phase_of(control) == Phase::Retired || phase_of(control) == Phase::Releasing) &&
             slot.nvme_release.load(std::memory_order_acquire) == HostRelease::Releasing;
+    if (resource == HostResource::Pinned)
+        return (phase_of(control) == Phase::Retired || phase_of(control) == Phase::Releasing) &&
+            slot.pinned_release.load(std::memory_order_acquire) == HostRelease::Releasing;
     const auto & state = resource == HostResource::PackedKv ? slot.kv_release : slot.mean_release;
     return (phase_of(control) == Phase::Retired || phase_of(control) == Phase::Releasing) &&
         !resource_refs_of(control, resource) && state.load(std::memory_order_acquire) == HostRelease::Releasing;
