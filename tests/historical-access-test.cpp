@@ -313,6 +313,21 @@ struct kvmem_transfer_test_access {
     static const void * row_buffer(const llama_memory_kvmem & mem) { return mem.row_positions_.data(); }
     static size_t row_capacity(const llama_memory_kvmem & mem) { return mem.row_positions_.capacity(); }
     static bool append_after_failure(llama_memory_kvmem & mem) { return mem.prepare_working_set(1); }
+    static bool consume_retired_capture(llama_memory_kvmem & mem) {
+        if (!mem.prepare_working_set(1)) return false;
+        const auto handle = mem.runtime_->historical_shadow_directory().observe(0).handle;
+        if (mem.historical_capture_->repository()->retire(handle) !=
+                kvmem::HistoricalKvRepository::RetireResult::Committed) return false;
+        const llama_pos position = 0;
+        mem.pos_queue_.push_back(mem.capture_batch(&position, 1));
+        const bool closed = mem.pos_queue_.front().ranges.size() == 1 &&
+            mem.pos_queue_.front().ranges.front().route == llama_memory_kvmem::MeanWriteRange::Route::Closed;
+        mem.historical_capture_->producers_captured();
+        // Recency has no Mean-K capture nodes. This deliberately orders
+        // retirement before producer lookup, rather than hoping for the race.
+        mem.harvest_pending(nullptr);
+        return closed && mem.pos_queue_.empty() && mem.capture_arena_.use_count() == 1;
+    }
     static uint64_t source_readers(const llama_memory_kvmem & mem) {
         uint64_t total = 0;
         for (auto count : mem.historical_gpu_readers_) total += count;
@@ -2973,18 +2988,19 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
 int main(int argc, char ** argv) {
     constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 43 : 35;
     if (argc != 2 && argc != 3 && argc != 4) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --soak-seconds 1..86400 | --scenario 0..%u] (requires CUDA)\n", argv[0], scenario_count - 1);
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --soak-seconds 1..86400 | --scenario 0..%u] (requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
     }
     try {
         unsigned first_scenario = 0, end_scenario = scenario_count;
         unsigned soak_seconds = 0;
-        bool run_repeated = true, run_reset = true;
+        bool run_repeated = true, run_reset = true, run_closed_capture = true;
         if (argc == 3) {
             const std::string selected = argv[2];
-            require(selected == "--repeated" || selected == "--reset", "unknown test selection");
+            require(selected == "--repeated" || selected == "--reset" || selected == "--closed-capture", "unknown test selection");
             run_repeated = selected == "--repeated";
             run_reset = selected == "--reset";
+            run_closed_capture = selected == "--closed-capture";
             end_scenario = 0;
         } else if (argc == 4) {
             const std::string selection = argv[2], value = argv[3];
@@ -3003,6 +3019,7 @@ int main(int argc, char ** argv) {
                 run_repeated = false;
             }
             run_reset = false;
+            run_closed_capture = false;
         }
         llama_backend_init();
         ggml_backend_load_all();
@@ -3101,6 +3118,21 @@ int main(int argc, char ** argv) {
             auto * repeated_mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(repeated_ctx.get()));
             require(repeated_mem != nullptr, "repeated request adapter is missing");
             check_repeated_requests(repeated_ctx.get(), model.get(), *repeated_mem, generate, soak_seconds);
+        }
+        if (run_closed_capture) {
+            std::unique_ptr<llama_context, decltype(&llama_free)> closed_ctx(
+                llama_init_from_model(model.get(), cp), llama_free);
+            require(bool(closed_ctx), "closed capture context init failed");
+            auto * closed_mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(closed_ctx.get()));
+            require(closed_mem && llama_kvmem_historical_capture_begin(closed_ctx.get(), 4, 1, 0, 1),
+                    "closed capture admission failed");
+            require(kvmem_transfer_test_access::consume_retired_capture(*closed_mem),
+                    "all-retired capture retained its queue or arena after harvest");
+            closed_mem->end_prefill_capture();
+            require(llama_kvmem_historical_capture_finish() &&
+                    llama_kvmem_historical_capture_begin(closed_ctx.get(), 4, 1, 0, 1),
+                    "all-retired capture prevented the next request from starting");
+            std::puts("PASS all-retired capture: closed before producer lookup, empty capture queue, arena released, next request admitted");
         }
         std::unique_ptr<llama_context, decltype(&llama_free)> backend_guard_ctx(
             llama_init_from_model(model.get(), cp), llama_free);

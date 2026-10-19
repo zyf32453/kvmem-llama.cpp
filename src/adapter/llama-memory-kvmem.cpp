@@ -4376,9 +4376,12 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) try {
         d2h_commit(d2h_->next == 0 ? 1 : 0);
     }
     if (pending_capture_.empty() || pos_queue_.empty()) {
-        // Recency has no Mean-K graph nodes. Consume the executed batch after
-        // its packed jobs captured ownership, including between microbatches.
-        if (managed_packed) pos_queue_.erase(pos_queue_.begin());
+        // Recency has no Mean-K graph nodes. A managed batch can also contain
+        // only Closed ranges if GC retired every writer before capture lookup.
+        // That batch still consumed its input: retaining it would pin the
+        // request arena forever and refuse the next request after finish.
+        if (!pos_queue_.empty() && (managed_packed || historical_capture_))
+            pos_queue_.erase(pos_queue_.begin());
         harvest_flush();
         if (sched) {
             ggml_backend_sched_synchronize(sched);
