@@ -38,9 +38,14 @@ static_assert(sizeof(llm_graph_input_attn_kv) < 1024, "KV attention input copied
 // allocation. Model loading, CUDA and background capture are unaffected.
 static thread_local bool deny_cpp_allocation = false;
 static thread_local size_t foreground_cpp_frees = 0;
+static thread_local uint64_t foreground_cpp_allocations = 0, foreground_cpp_allocated_bytes = 0;
 void * operator new(size_t size) {
     if (deny_cpp_allocation) throw std::bad_alloc();
-    if (void * p = std::malloc(size ? size : 1)) return p;
+    if (void * p = std::malloc(size ? size : 1)) {
+        ++foreground_cpp_allocations;
+        foreground_cpp_allocated_bytes += size;
+        return p;
+    }
     throw std::bad_alloc();
 }
 void * operator new[](size_t size) { return ::operator new(size); }
@@ -2985,15 +2990,237 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
                 (unsigned long long) stats.reclaimed, (unsigned long long) admission_refusals);
 }
 
+// A separate trajectory from same-domain reuse: retain one real CPU reader
+// across each reset, alternate normal completion / prefill cancel / generation
+// cancel, and keep the same loaded model, context and GPU/backend buffers.
+static void check_reset_soak(llama_context * ctx, llama_model * model,
+                             llama_memory_kvmem & mem, unsigned seconds) {
+    const auto * vocab = llama_model_get_vocab(model);
+    const std::string text(600, 'a');
+    const int count = -llama_tokenize(vocab, text.c_str(), text.size(), nullptr, 0, true, true);
+    require(count >= 64, "reset soak has too few tokens");
+    std::vector<llama_token> tokens(count);
+    require(llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(), count, true, true) == count,
+            "reset soak tokenization failed");
+    constexpr uint32_t capacity = 8, max_output = 3, appends = 5;
+    require(llama_kvmem_historical_capture_begin(ctx, capacity, 64, max_output, appends),
+            "reset soak initial admission failed");
+    const auto budget = kvmem_transfer_test_access::capture_storage(mem)->config().payload_budget;
+    const auto unit = kvmem::HistoricalKvRawStore::max_payload_bytes(
+        kvmem_transfer_test_access::capture_storage(mem)->config(), 1);
+    require(budget && budget->limit_bytes() == 2 * capacity * unit, "reset soak shared budget missing");
+    const auto arena = kvmem_transfer_test_access::capture_arena(mem).get();
+    const auto rows = kvmem_transfer_test_access::row_buffer(mem);
+    const auto row_capacity = kvmem_transfer_test_access::row_capacity(mem);
+    const auto backend = ctx->get_historical_backend_status();
+    const auto table_bytes = mem.store().allocated_bytes();
+    const auto layer_id = mem.raw().config().historical_gc_attention_layers.front();
+    std::shared_ptr<kvmem::HistoricalKvRepository> previous_repository;
+    std::shared_ptr<kvmem::HistoricalKvRawStore> previous_storage;
+    std::optional<kvmem::HistoricalKvRepository::Lease> previous_reader;
+    std::optional<kvmem::HistoricalKvRawStore::LayerSnapshot> previous_layer;
+    kvmem::HistoricalKvHandle previous_handle{};
+    struct RetiredDomain {
+        std::weak_ptr<kvmem::HistoricalKvRepository> repository;
+        std::weak_ptr<kvmem::HistoricalKvRawStore> storage;
+    };
+    // Weak observers cannot keep domain payloads alive and never grow with time.
+    std::vector<RetiredDomain> retired;
+    retired.reserve(kvmem::HistoricalKvCleanup::process().capacity());
+    uint64_t requests = 0, finished = 0, prefill_cancelled = 0, generation_cancelled = 0;
+    uint64_t refusals = 0, total_tokens = 0, generated = 0, drained = 0, peak_payload = budget->used_bytes();
+    // Ordinary operator new on this thread only: cumulative requested bytes,
+    // not retained memory, C malloc/CUDA allocation, or a complete heap audit.
+    uint64_t decode_allocations = 0, decode_allocated_bytes = 0;
+    uint64_t last_repository_id = 0;
+    const auto started = std::chrono::steady_clock::now();
+    auto last_sample = started;
+    const auto elapsed = [&] {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    };
+    const auto prune = [&] {
+        retired.erase(std::remove_if(retired.begin(), retired.end(), [&](const RetiredDomain & domain) {
+            if (!domain.repository.expired() || !domain.storage.expired()) return false;
+            ++drained;
+            return true;
+        }), retired.end());
+    };
+    const auto sample = [&](bool final) {
+        unsigned long long rss = 0, hwm = 0, threads = 0;
+#ifdef __linux__
+        if (auto * status = std::fopen("/proc/self/status", "r")) {
+            char line[256];
+            while (std::fgets(line, sizeof(line), status)) {
+                (void) std::sscanf(line, "VmRSS: %llu kB", &rss);
+                (void) std::sscanf(line, "VmHWM: %llu kB", &hwm);
+                (void) std::sscanf(line, "Threads: %llu", &threads);
+            }
+            std::fclose(status);
+        }
+#endif
+        std::printf("KVMEM_RESET_SOAK {\"final\":%s,\"seconds\":%.3f,\"requests\":%llu,"
+            "\"finished\":%llu,\"prefill_cancelled\":%llu,\"generation_cancelled\":%llu,"
+            "\"tokens\":%llu,\"generated\":%llu,\"admission_refusals\":%llu,"
+            "\"repository_id\":%llu,\"old_domains_drained\":%llu,\"old_domains_pending\":%zu,"
+            "\"shared_payload_bytes\":%llu,\"shared_payload_limit\":%llu,\"sampled_peak_payload\":%llu,"
+            "\"decode_cpp_allocations\":%llu,\"decode_cpp_allocated_bytes\":%llu,"
+            "\"table_bytes\":%zu,\"directory_entries\":%zu,\"row_capacity\":%zu,"
+            "\"arena_bytes\":%zu,\"backend_output_bytes\":%zu,\"graph_meta_bytes\":%zu,"
+            "\"cleanup_occupied\":%u,\"cleanup_capacity\":%u,\"rss_kib\":%llu,\"peak_rss_kib\":%llu,\"threads\":%llu}\n",
+            final ? "true" : "false", elapsed(), (unsigned long long) requests,
+            (unsigned long long) finished, (unsigned long long) prefill_cancelled,
+            (unsigned long long) generation_cancelled, (unsigned long long) total_tokens,
+            (unsigned long long) generated, (unsigned long long) refusals,
+            (unsigned long long) last_repository_id, (unsigned long long) drained, retired.size(),
+            (unsigned long long) budget->used_bytes(), (unsigned long long) budget->limit_bytes(),
+            (unsigned long long) peak_payload, (unsigned long long) decode_allocations,
+            (unsigned long long) decode_allocated_bytes, table_bytes,
+            size_t(mem.runtime().historical_shadow_directory().size()), row_capacity,
+            kvmem_transfer_test_access::capture_arena(mem)->capacity_bytes(),
+            backend.output_bytes, backend.graph_meta_bytes,
+            kvmem::HistoricalKvCleanup::process().occupied(), kvmem::HistoricalKvCleanup::process().capacity(),
+            rss, hwm, threads);
+        std::fflush(stdout);
+    };
+    const auto decode = [&](uint32_t n) {
+        const auto allocations = foreground_cpp_allocations, bytes = foreground_cpp_allocated_bytes;
+        auto batch = llama_batch_get_one(tokens.data(), n);
+        require(llama_decode(ctx, batch) == 0, "reset soak prefill failed");
+        llama_synchronize(ctx);
+        mem.harvest_flush();
+        kvmem_transfer_test_access::commit(mem);
+        decode_allocations += foreground_cpp_allocations - allocations;
+        decode_allocated_bytes += foreground_cpp_allocated_bytes - bytes;
+    };
+    while (requests < 96 || elapsed() < seconds) {
+        if (requests) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            bool admitted = false;
+            do {
+                admitted = llama_kvmem_historical_capture_reset_begin(ctx, capacity, 64, max_output, appends);
+                if (!admitted) {
+                    ++refusals;
+                    require(kvmem_transfer_test_access::capture_repository(mem) == previous_repository &&
+                            !previous_repository->closed(), "reset soak refusal replaced old domain");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            } while (!admitted && std::chrono::steady_clock::now() < deadline);
+            require(admitted, "reset soak could not admit the next finite request");
+        }
+        auto repository = kvmem_transfer_test_access::capture_repository(mem);
+        auto storage = kvmem_transfer_test_access::capture_storage(mem);
+        require(storage->config().payload_budget == budget && budget->used_bytes() <= budget->limit_bytes() &&
+                repository->repository_id() != last_repository_id, "reset soak lost shared quota or incarnation");
+        last_repository_id = repository->repository_id();
+        peak_payload = std::max(peak_payload, budget->used_bytes());
+        // This trajectory isolates domain teardown, not pressure decisions.
+        // The six-slot reservation leaves two Ready slots; low=1 keeps the
+        // first published block available for a deterministic post-finish
+        // reader. Start while the request owns the domain, as the API requires.
+        require(llama_kvmem_historical_gc_start(2, 1, 2), "reset soak GC startup failed");
+        decode(32);
+        if (previous_reader) {
+            const auto observed = previous_storage->read_layer(*previous_reader, previous_handle, layer_id);
+            require(previous_repository->closed() && !repository->acquire_read(previous_handle) &&
+                    !previous_repository->acquire_read(previous_handle) &&
+                    observed && observed->packed_k == previous_layer->packed_k &&
+                    observed->packed_v == previous_layer->packed_v,
+                    "reset soak overwrote or revived an old CPU block");
+            prune();
+            require(retired.size() < retired.capacity(), "reset soak old-domain observers exhausted");
+            retired.push_back({previous_repository, previous_storage});
+            previous_repository.reset();
+            previous_storage.reset();
+            const auto frees = foreground_cpp_frees;
+            previous_reader.reset();
+            require(foreground_cpp_frees == frees, "reset soak old reader freed payload on foreground");
+        }
+        const auto kind = requests % 3;
+        uint32_t input = 32, output = 0;
+        if (kind != 1) {
+            decode(32);
+            input += 32;
+            mem.end_prefill_capture();
+            output = kind == 0 ? 3 : 1;
+            for (uint32_t i = 0; i < output; ++i) {
+                const auto * logits = llama_get_logits_ith(ctx, -1);
+                require(logits != nullptr, "reset soak generation has no logits");
+                llama_token next = std::max_element(logits, logits + llama_vocab_n_tokens(vocab)) - logits;
+                const auto allocations = foreground_cpp_allocations, bytes = foreground_cpp_allocated_bytes;
+                auto batch = llama_batch_get_one(&next, 1);
+                require(llama_decode(ctx, batch) == 0, "reset soak generation failed");
+                llama_synchronize(ctx);
+                decode_allocations += foreground_cpp_allocations - allocations;
+                decode_allocated_bytes += foreground_cpp_allocated_bytes - bytes;
+            }
+        }
+        if (kind == 0) {
+            require(llama_kvmem_historical_capture_finish(), "reset soak finish failed");
+            ++finished;
+        } else {
+            require(llama_kvmem_historical_capture_cancel(ctx), "reset soak cancel failed");
+            if (kind == 1) ++prefill_cancelled;
+            else ++generation_cancelled;
+        }
+        // finish/cancel requires its outstanding operations to be settled.
+        // Take the external reader afterwards, then keep it across the next
+        // reset and that new domain's first decode.
+        // Same-domain in-request GC is exercised by --soak-seconds separately.
+        const auto handle = mem.runtime().historical_shadow_directory().observe(0).handle;
+        auto reader = repository->acquire_read(handle);
+        require(bool(reader), "reset soak could not retain its published CPU block");
+        auto layer = storage->read_layer(*reader, handle, layer_id);
+        require(bool(layer), "reset soak reader has no payload");
+        previous_repository = repository;
+        previous_storage = storage;
+        previous_reader = std::move(reader);
+        previous_layer = std::move(layer);
+        previous_handle = handle;
+        const auto after = ctx->get_historical_backend_status();
+        const auto stats = kvmem_transfer_test_access::gc_stats(mem);
+        require(!stats.policy_failures && !stats.worker_failures, "reset soak observed GC failure");
+        require(mem.store_n_tokens() == input + output && mem.store().allocated_bytes() == table_bytes &&
+                mem.store().block_count() <= capacity && mem.runtime().historical_shadow_directory().size() <= capacity &&
+                kvmem_transfer_test_access::row_buffer(mem) == rows &&
+                kvmem_transfer_test_access::row_capacity(mem) == row_capacity &&
+                kvmem_transfer_test_access::capture_arena(mem).get() == arena &&
+                budget->used_bytes() <= budget->limit_bytes() &&
+                after.scheduler == backend.scheduler && after.output_buffer == backend.output_buffer &&
+                after.output_bytes == backend.output_bytes && after.graph_results == backend.graph_results &&
+                after.graph_meta == backend.graph_meta && after.graph_meta_bytes == backend.graph_meta_bytes &&
+                !after.needs_scheduler_reserve, "reset soak exceeded fixed storage or changed prepared backend");
+        total_tokens += input + output;
+        generated += output;
+        ++requests;
+        prune();
+        if (std::chrono::steady_clock::now() - last_sample >= std::chrono::seconds(10)) {
+            sample(false);
+            last_sample = std::chrono::steady_clock::now();
+        }
+    }
+    previous_reader.reset(); // The final domain is still owned by the live context.
+    previous_repository.reset();
+    previous_storage.reset();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!retired.empty() && std::chrono::steady_clock::now() < deadline) {
+        prune();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    require(retired.empty() && drained + 1 == requests, "reset soak retained an old CPU domain");
+    kvmem_transfer_test_access::stop_gc(mem);
+    sample(true);
+    std::puts("PASS reset soak: old readers survive new decoding, old domains drain in background, finite finish/cancel, shared payload bound, fixed GPU/backend workspace");
+}
+
 int main(int argc, char ** argv) {
     constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 43 : 35;
     if (argc != 2 && argc != 3 && argc != 4) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --soak-seconds 1..86400 | --scenario 0..%u] (requires CUDA)\n", argv[0], scenario_count - 1);
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u] (requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
     }
     try {
         unsigned first_scenario = 0, end_scenario = scenario_count;
-        unsigned soak_seconds = 0;
+        unsigned soak_seconds = 0, reset_soak_seconds = 0;
         bool run_repeated = true, run_reset = true, run_closed_capture = true;
         if (argc == 3) {
             const std::string selected = argv[2];
@@ -3007,9 +3234,14 @@ int main(int argc, char ** argv) {
             require(!value.empty() && value.find_first_not_of("0123456789") == std::string::npos,
                     "test selection value must be an unsigned decimal integer");
             const auto number = std::stoul(value);
-            if (selection == "--soak-seconds") {
+            if (selection == "--soak-seconds" || selection == "--reset-soak-seconds") {
                 require(number > 0 && number <= 86400, "soak duration must be 1..86400 seconds");
-                soak_seconds = static_cast<unsigned>(number);
+                if (selection == "--reset-soak-seconds") {
+                    reset_soak_seconds = static_cast<unsigned>(number);
+                    run_repeated = false;
+                } else {
+                    soak_seconds = static_cast<unsigned>(number);
+                }
                 end_scenario = 0;
             } else {
                 require(selection == "--scenario", "unknown test selection");
@@ -3103,13 +3335,14 @@ int main(int argc, char ** argv) {
         llama_kvmem_set_params(&kp);
         cp.n_ubatch = 16;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
-        if (run_reset) {
+        if (run_reset || reset_soak_seconds) {
             std::unique_ptr<llama_context, decltype(&llama_free)> reset_ctx(
                 llama_init_from_model(model.get(), cp), llama_free);
             require(bool(reset_ctx), "reset context init failed");
             auto * reset_mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(reset_ctx.get()));
             require(reset_mem != nullptr, "reset adapter is missing");
-            check_reset_request(reset_ctx.get(), model.get(), *reset_mem);
+            if (reset_soak_seconds) check_reset_soak(reset_ctx.get(), model.get(), *reset_mem, reset_soak_seconds);
+            else check_reset_request(reset_ctx.get(), model.get(), *reset_mem);
         }
         for (bool generate : {false, true}) if (run_repeated && (!soak_seconds || generate)) {
             std::unique_ptr<llama_context, decltype(&llama_free)> repeated_ctx(
