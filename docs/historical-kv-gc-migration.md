@@ -54,6 +54,8 @@
 
 **当前位置（2026-10-20）：** 首批范围已冻结。此前一小时同域长测通过：11,448 次请求、45,792 个块经过 8 个槽位；这是当时版本的证据。`18eaddd` 修复有限请求内跨微批次的 GPU 权限，43 个模型场景及 198 次 reset/cancel 短测通过；**最新六轮编码压力仍未通过：off 两轮截断、delete 五轮截断，只有第一轮内容相同。** 容量不足自动重选是否开启新 active，已列为请导师确认的行为边界。本轮先完成独立并发排障：确认旧 GCC 11 检测运行库的条件变量误报，并修复 RawKvStore 关闭通知可能丢失的问题；修复后 GCC 12 TSan 与 ASan/UBSan 各 30/30，受影响用例重复 20 次通过。完整资源预约/上界、reset/cancel 长测、编码质量和独立 CUDA 非法访问仍未关闭；DeepSWE 按用户要求暂缓。首批阶段验收不替代“完成整套生产 GC”的最终目标。
 
+**最新分配审计：** 96 次固定请求的调用栈与计数器完全对应；复用固定物理层目录后，前台普通 C++ 分配从 249,921 次降至 228,417 次，其余来源计数不变。候选首次完整模型回归出现 CUDA 非法指令，基线及候选后续完整对照各退出 0；首败原因仍未确定，不能据重跑通过注销。详见文末“接纳后分配来源审计与层目录复用”，生产验收仍未完成。
+
 ## 2026-10-17 阶段进度
 
 在早期 `KvMemGc` 移植之外，已增加按 `(slot, generation)` 管理块生命周期的 `HistoricalKvRepository`、独立的 `HistoricalKvGc` 管理器和 `HistoricalKvPolicy` 接口。LRU 是一个可替换策略，管理器负责扫描、退休、等待已有 lease、重试及触发物理释放。`HistoricalKvRawStore` 提供按句柄存储的独立验证实现；`HistoricalKvActiveSet` 为每次操作重新取得执行许可，跳过已退休的可选块，必选块缺失时撤销整次申请，并在实际模型计算成功提交时记录最近使用时间。该调用现已接到受限 recency CLI 请求；server 和其它入口尚未覆盖。
@@ -941,6 +943,20 @@ bash scripts/check_tsan_runtime.sh "$out/toolchain/usr/bin/g++-12" "$out/preflig
 修复最终源码通过 GCC 12 TSan **30/30**、ASan/UBSan **30/30**，`raw_kv_store_test` 在 TSan 下重复 **20 次全部通过**。本轮没有改变选块/退休语义，也没有重跑真实模型质量或一小时负载，不能将宿主通过扩大为生产验收完成。普通 C++ 分配统计还只是前台 decode/同步/harvest 区间的累计请求字节，既不是存活内存，也不覆盖 C malloc、其他线程或 CUDA 分配；完整资源预约缺口仍然保留。
 
 原始日志、旧/新最小复现、阳性对照、软件包及最终源码指纹保存在 `artifacts/historical-tsan-runtime/evidence.tar.gz`，SHA-256 为 `cfecde2370da56f2ad309ac9eb68644b1ba5f26d45f52cd542e60b213c03b16d`；远程证据目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-tsan-runtime-18eaddd`。源码修复与检测工具自检单独提交，后续继续按首批范围推进资源预约和真实负载问题。
+
+### 接纳后分配来源审计与层目录复用（2026-10-20）
+
+新增仅在 Linux 模型测试中启用的前台调用栈采样器，使用 `KVMEM_TEST_ALLOCATION_TRACE=/path/to/trace.tsv` 打开。采集区间与既有 reset soak 的普通 C++ 分配计数一致：prefill 包含 decode、同步、harvest/commit，生成包含 decode 和同步。采样表固定 2048 项、每项最多 16 层栈；先预热 unwinder，采集期间不扩容，符号查询和文件输出放在采集结束后，溢出次数单独记录。它不覆盖 C malloc、aligned new、其他线程和 CUDA 内存，也不表示存活堆大小。本轮两份 trace 均无表溢出，调用次数和字节数逐项与独立计数器相等。
+
+在当前 Qwen3 模型上固定执行 96 次请求：正常完成、prefill 取消、生成取消各 32 次，共 5,248 tokens（含 128 个生成 token），95 个旧域均后台退出。原适配器在此区间发生 249,921 次普通 C++ 分配、累计申请 24,711,176 bytes。其中计算图调度的临时依赖表为 166,944 次/7,178,240 bytes，CUDA MoE 匹配器为 37,116 次/2,375,424 bytes，其余 CUDA 图优化为 18,438 次/958,824 bytes，物理层目录复制为 21,504 次/4,128,768 bytes，其他来源为 5,919 次/10,069,920 bytes。这些是一次固定轨迹的计量，不是全模型/全配置上界。
+
+本轮先去掉历史采集等路径中可独立消除的层目录复制。此前每次判断某层是否存在，都调用按值返回的 `get_layer_ids()`，临时分配并填充整个向量；在逐层捕获中反复发生。现在适配器构造时只保存一次真实缓存的完整物理层 ID 和原顺序，后续查询、容量计数和诊断都复用它；其容量计入 `host_bytes()`。不能直接用仅含主模型 attention 层的 historical 配置列表替代，因为实际 KV 缓存可能包含额外草稿层。新增测试对照真实缓存目录，覆盖负值、缺失层和有效层，在禁止普通 C++ 分配的区间重复查询。
+
+相同 96 次请求复验后，计数为 228,417 次/20,582,408 bytes；恰好移除全部 21,504 次层目录分配，减少 8.60% 的调用及 4,128,768 bytes（约 3.94 MiB）的累计申请，其他来源的次数和字节数完全相同。没有用这个数字宣称 RSS 降低或吞吐提升。剩余 228,417 次分配仍存在，**完整预约尚未完成**；下一项主要来源是调度器的临时依赖表，随后是有明确长度上限的 CUDA MoE 匹配容器。处理它们须保留图依赖和融合判断，不能通过关闭正确性检查或改动 GC 删除策略让计数归零。
+
+首次完整模型回归在前六个场景通过后，于零基场景 6（AfterSubmission）中的后续 decode 报 `cudaStreamSynchronize: an illegal instruction was encountered`，进程退出 134。此前已经输出 Host 提前释放、GPU consumer 字节不变的检查通过，但这不能抵消后续 CUDA 失败；它也不能未经定位与旧的 illegal-memory-access 记录归为同一根因。保留首败后，分别重建 `d9934a5` 产品代码基线（含未启用的同一诊断 hook）与候选版，完整模型对照两者均退出 0，覆盖 43 个场景、reset/payload quota、两组重复请求、Closed capture 和 backend guard。准确结论是“候选首次失败、后续完整复验通过”，不是“异常已解决”或“已证明与本轮改动无关”；CUDA 根因仍是生产验收未关闭项。
+
+本轮证据目录为 `artifacts/historical-allocation-audit/`，远程为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-allocation-audit-d9934a5`。采样基线源码包 SHA-256 为 `39d7e50e9a49c7b1428687bbd83b6559179685a4c152083e15962a8abce25f09`，候选源码包为 `7a1bcbf382fc3be9985f5bb805e0ddc6be993d8661b7ebd25fb01eadd35f3827`，完整日志/trace/对照归档 `evidence.tar.gz` 为 `6cafb89cbe1f6d487d9d5516b6bcdd64e6efdfc917c4fad70a8881f6cb00c6a1`。本轮没有修改 GPU 容量重选的 active 边界，也没有解决此前长回答压力失败。
 
 ## 剩余生产接入与完整验收
 

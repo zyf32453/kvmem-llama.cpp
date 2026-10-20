@@ -603,6 +603,10 @@ private:
 
     std::unique_ptr<llama_kv_cache> kv_owned_;
     llama_kv_cache * kv_ = nullptr;
+    // Preserve all physical layer IDs (including any draft layers), in cache
+    // order. The cache topology is fixed across reset/conversation switches.
+    std::vector<uint32_t> kv_layer_ids_;
+    bool cache_has_layer(int32_t il) const noexcept;
     llama_memory_recurrent * recr_ = nullptr;
     struct GdnReplay;
     std::unique_ptr<GdnReplay> gdn_replay_;

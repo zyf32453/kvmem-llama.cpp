@@ -347,7 +347,7 @@ if (KVMEM_BUILD_LLAMA)
         # enabling the production GC worker or running a model download.
         add_executable(kvmem-historical-access-test tests/historical-access-test.cpp)
         target_include_directories(kvmem-historical-access-test PRIVATE src/adapter llama.cpp/src)
-        target_link_libraries(kvmem-historical-access-test PRIVATE llama kvmem Threads::Threads)
+        target_link_libraries(kvmem-historical-access-test PRIVATE llama kvmem Threads::Threads ${CMAKE_DL_LIBS})
         add_test(NAME kvmem-historical-access-test COMMAND kvmem-historical-access-test)
         set_tests_properties(kvmem-historical-access-test PROPERTIES SKIP_RETURN_CODE 77)
         if (GGML_CUDA)

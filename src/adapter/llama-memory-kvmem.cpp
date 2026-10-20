@@ -503,16 +503,9 @@ static kvmem::KvMemRuntimeConfig make_runtime_cfg(
     return cfg;
 }
 
-static bool kvmem_cache_has_layer(const llama_kv_cache * kv, int32_t il) {
-    if (!kv) {
-        return false;
-    }
-    for (uint32_t id : kv->get_layer_ids()) {
-        if (static_cast<int32_t>(id) == il) {
-            return true;
-        }
-    }
-    return false;
+bool llama_memory_kvmem::cache_has_layer(int32_t il) const noexcept {
+    return il >= 0 && std::find(kv_layer_ids_.begin(), kv_layer_ids_.end(),
+                               static_cast<uint32_t>(il)) != kv_layer_ids_.end();
 }
 
 static uint32_t kvmem_first_attn_layer(const llama_model & model) {
@@ -891,8 +884,9 @@ llama_memory_kvmem::llama_memory_kvmem(
         kv_ = kv_owned_.get();
     }
 
+    kv_layer_ids_ = kv_->get_layer_ids();
     std::set<ggml_backend_dev_t> kv_owners;
-    for (uint32_t il : kv_->get_layer_ids()) {
+    for (uint32_t il : kv_layer_ids_) {
         auto * expected = model.dev_layer(static_cast<int>(il));
         if (kvmem_tensor_multi_gpu(model)) {
             for (ggml_tensor * t : {kv_->get_k_storage(static_cast<int32_t>(il)),
@@ -958,7 +952,7 @@ llama_memory_kvmem::llama_memory_kvmem(
     rcfg.historical_gc_require_mean_k = method_ == 1;
     rcfg.historical_gc_attention_layers.clear();
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        if (cache_has_layer(static_cast<int32_t>(il))) {
             rcfg.historical_gc_attention_layers.push_back(il);
         }
     }
@@ -1831,6 +1825,7 @@ uint64_t llama_memory_kvmem::host_bytes() const {
     }
     uint64_t bytes = raw_->allocated_bytes() + (mtp_ ? mtp_->host_bytes() : 0);
     bytes += runtime_->allocated_bytes() + row_positions_.capacity()*sizeof(RowPosition);
+    bytes += kv_layer_ids_.capacity()*sizeof(uint32_t);
     bytes += q_count_.capacity()*sizeof(uint32_t);
     bytes += q_sum_.capacity()*sizeof(std::vector<float>);
     for (const auto & q : q_sum_) bytes += q.capacity()*sizeof(float);
@@ -1853,7 +1848,7 @@ uint64_t llama_memory_kvmem::host_capacity(uint32_t tokens) const {
     checkpoint += uint64_t(n_layer_)*(n_embd_k_ + uint64_t(n_head_)*n_embd_head_)*sizeof(float);
     // MTP carry, token/prompt indexes, query state and bounded allocator slack.
     return 8*checkpoint + 8*1024*1024 + uint64_t(tokens)*64 +
-        raw_->capacity_bytes(tokens, uint32_t(kv_->get_layer_ids().size())) + (mtp_ ? mtp_->capacity_bytes(tokens) : 0) +
+        raw_->capacity_bytes(tokens, uint32_t(kv_layer_ids_.size())) + (mtp_ ? mtp_->capacity_bytes(tokens) : 0) +
         uint64_t(tokens)*sizeof(RowPosition)*2 +
         ((uint64_t(tokens)/block_tokens_) + 2)*sizeof(kvmem::KvMemBlock)*2;
 }
@@ -2116,7 +2111,7 @@ bool llama_memory_kvmem::attach_conv(std::unique_ptr<ConvStore> conv) {
                 continue;
             }
             for (uint32_t il = 0; il < n_layer_ && !miss; ++il) {
-                if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+                if (!cache_has_layer(static_cast<int32_t>(il))) {
                     continue;
                 }
                 if (!raw_->has_k_gpu(id, il, b.n_tokens)) {
@@ -2720,7 +2715,7 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() try {
 
     if (d2d_ok) {
         for (uint32_t il = 0; il < n_layer_; ++il) {
-            if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+            if (!cache_has_layer(static_cast<int32_t>(il))) {
                 continue;
             }
             ggml_tensor * kt = kv_->get_k_storage(static_cast<int32_t>(il));
@@ -4846,7 +4841,7 @@ void llama_memory_kvmem::harvest_captured_packed(const CaptureBatch & batch, uin
         const uint32_t end = range.token_offset + take;
         const uint32_t cell0 = uint32_t(range.gpu_slot) * block_tokens_;
         for (uint32_t il = 0; il < n_layer_; ++il) {
-            if (!kvmem_cache_has_layer(kv_, il)) continue;
+            if (!cache_has_layer(il)) continue;
             for (bool is_k : {true, false}) {
                 // Enqueueing K may flush/commit an older slab, including V.
                 // Refresh component progress after each such transition.
@@ -5038,7 +5033,7 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
     uint32_t n_ok = 0;
     uint32_t n_skip = 0;
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        if (!cache_has_layer(static_cast<int32_t>(il))) {
             continue;
         }
         const uint32_t nget = (cell0 < kv_size_)
@@ -5090,7 +5085,7 @@ void llama_memory_kvmem::harvest_full_blocks_async() {
         }
         bool need = false;
         for (uint32_t il = 0; il < n_layer_; ++il) {
-            if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+            if (!cache_has_layer(static_cast<int32_t>(il))) {
                 continue;
             }
             if (!raw_->has_k_gpu(b.block_id, il, b.n_tokens) ||
@@ -5394,7 +5389,7 @@ void llama_memory_kvmem::decode_mean_flush() try {
     uint32_t n_host = 0;
     float rms = 0.0f;
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        if (!cache_has_layer(static_cast<int32_t>(il))) {
             continue;
         }
         if (il < decode_mean_committed_.size() && decode_mean_committed_[il]) continue;
@@ -5539,7 +5534,7 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) try {
         }
     };
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        if (!cache_has_layer(static_cast<int32_t>(il))) {
             continue;
         }
         const int64_t t_copy = ggml_time_us();
@@ -5614,7 +5609,7 @@ void llama_memory_kvmem::copy_gpu_block_to_host(uint32_t block_id, int32_t gpu_s
     const uint64_t kspan = static_cast<uint64_t>(block_tokens_) * krow;
     const uint64_t vspan = static_cast<uint64_t>(block_tokens_) * vrow;
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        if (!cache_has_layer(static_cast<int32_t>(il))) {
             continue;
         }
         ggml_tensor * kt = kv_->get_k_storage(static_cast<int32_t>(il));
@@ -5652,7 +5647,7 @@ void llama_memory_kvmem::copy_gpu_block_from_host(uint32_t block_id, int32_t gpu
     const uint64_t kspan = static_cast<uint64_t>(block_tokens_) * krow;
     const uint64_t vspan = static_cast<uint64_t>(block_tokens_) * vrow;
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        if (!cache_has_layer(static_cast<int32_t>(il))) {
             continue;
         }
         ggml_tensor * kt = kv_->get_k_storage(static_cast<int32_t>(il));
@@ -5932,7 +5927,7 @@ bool llama_memory_kvmem::get_query(llama_kvmem_query_state & state) {
     bool any = false;
     uint32_t rows = 0;
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (!kvmem_cache_has_layer(kv_, il)) continue;
+        if (!cache_has_layer(il)) continue;
         if (!q_count_[il] || (rows && rows != q_count_[il])) return false;
         rows = q_count_[il];
         any = true;
@@ -5950,7 +5945,7 @@ bool llama_memory_kvmem::set_query(const llama_kvmem_query_state & state) {
         const auto & v = state.sum[il];
         if (v.size() != n_head_ * n_embd_head_ ||
                 !std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); })) return false;
-        if (!kvmem_cache_has_layer(kv_, il)) continue;
+        if (!cache_has_layer(il)) continue;
         if (!state.count[il] || (rows && rows != state.count[il])) return false;
         rows = state.count[il];
     }
@@ -6149,7 +6144,7 @@ bool llama_memory_kvmem::read_gpu_block(uint32_t block_id, uint32_t il, bool is_
                                         std::vector<float> & out) const {
     const auto & store = runtime_->store();
     if (block_id >= store.block_count() || il >= n_layer_ ||
-        !kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        !cache_has_layer(static_cast<int32_t>(il))) {
         return false;
     }
     const kvmem::KvMemBlock & blk = store.blocks()[block_id];
@@ -6244,12 +6239,12 @@ void llama_memory_kvmem::dump_kv_compare(int32_t block_id, bool writeback_test) 
         return true;
     };
 
-    const auto & attn_layers = kv_->get_layer_ids();
+    const auto & attn_layers = kv_layer_ids_;
     if (attn_layers.empty()) return;
     const uint32_t layers_show[] = {attn_layers.front(), attn_layers[attn_layers.size() / 2], attn_layers.back()};
     for (uint32_t li = 0; li < 3; ++li) {
         const uint32_t il = layers_show[li];
-        if (il >= n_layer_ || !kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        if (il >= n_layer_ || !cache_has_layer(static_cast<int32_t>(il))) {
             continue;
         }
         if (!read_gpu_block(bid, il, true, gpu_k)) {
@@ -6293,7 +6288,7 @@ void llama_memory_kvmem::dump_kv_compare(int32_t block_id, bool writeback_test) 
 
     uint32_t il_wb = 0;
     while (il_wb < n_layer_ &&
-           (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il_wb)) ||
+           (!cache_has_layer(static_cast<int32_t>(il_wb)) ||
             !raw_->has_k_gpu(bid, il_wb))) {
         il_wb++;
     }

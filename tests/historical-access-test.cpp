@@ -25,6 +25,7 @@
 #include <thread>
 #include <vector>
 #include <future>
+#include "foreground-allocation-trace.h"
 #ifdef KVMEM_TEST_CUDA
 #include <cuda_runtime_api.h>
 #endif
@@ -44,6 +45,7 @@ void * operator new(size_t size) {
     if (void * p = std::malloc(size ? size : 1)) {
         ++foreground_cpp_allocations;
         foreground_cpp_allocated_bytes += size;
+        ForegroundAllocationTrace::record(size);
         return p;
     }
     throw std::bad_alloc();
@@ -59,6 +61,21 @@ struct DenyCppAllocation {
 };
 
 struct kvmem_transfer_test_access {
+    static bool layer_queries_without_cpp_allocation(const llama_memory_kvmem & mem) {
+        const auto expected = mem.kv_->get_layer_ids();
+        DenyCppAllocation guard;
+        if (expected != mem.kv_layer_ids_) return false;
+        const uint32_t max_layer = expected.empty() ? mem.n_layer_ :
+            std::max(mem.n_layer_, *std::max_element(expected.begin(), expected.end()) + 1);
+        for (unsigned repeat = 0; repeat != 32; ++repeat) {
+            for (int32_t il = -1; il <= static_cast<int32_t>(max_layer); ++il) {
+                const bool present = il >= 0 &&
+                    std::find(expected.begin(), expected.end(), static_cast<uint32_t>(il)) != expected.end();
+                if (mem.cache_has_layer(il) != present) return false;
+            }
+        }
+        return true;
+    }
     struct SlotWorkspaceStatus {
         size_t bytes = 0;
         std::vector<const void *> buffers;
@@ -3010,6 +3027,9 @@ static void check_repeated_requests(llama_context * ctx, llama_model * model,
 // cancel, and keep the same loaded model, context and GPU/backend buffers.
 static void check_reset_soak(llama_context * ctx, llama_model * model,
                              llama_memory_kvmem & mem, unsigned seconds) {
+    ForegroundAllocationTrace allocation_trace;
+    require(kvmem_transfer_test_access::layer_queries_without_cpp_allocation(mem),
+            "physical KV layer query changed membership or allocated storage");
     const auto * vocab = llama_model_get_vocab(model);
     const std::string text(600, 'a');
     const int count = -llama_tokenize(vocab, text.c_str(), text.size(), nullptr, 0, true, true);
@@ -3098,6 +3118,7 @@ static void check_reset_soak(llama_context * ctx, llama_model * model,
         std::fflush(stdout);
     };
     const auto decode = [&](uint32_t n) {
+        ForegroundAllocationTrace::Interval traced(allocation_trace);
         const auto allocations = foreground_cpp_allocations, bytes = foreground_cpp_allocated_bytes;
         auto batch = llama_batch_get_one(tokens.data(), n);
         require(llama_decode(ctx, batch) == 0, "reset soak prefill failed");
@@ -3161,6 +3182,7 @@ static void check_reset_soak(llama_context * ctx, llama_model * model,
                 const auto * logits = llama_get_logits_ith(ctx, -1);
                 require(logits != nullptr, "reset soak generation has no logits");
                 llama_token next = std::max_element(logits, logits + llama_vocab_n_tokens(vocab)) - logits;
+                ForegroundAllocationTrace::Interval traced(allocation_trace);
                 const auto allocations = foreground_cpp_allocations, bytes = foreground_cpp_allocated_bytes;
                 auto batch = llama_batch_get_one(&next, 1);
                 require(llama_decode(ctx, batch) == 0, "reset soak generation failed");
