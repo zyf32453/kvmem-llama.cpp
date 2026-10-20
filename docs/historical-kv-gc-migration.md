@@ -54,11 +54,13 @@
 
 依据实际使用需要，每次只增加一个策略或配置维度，独立冻结和验收。后续仍保留导师方案要求的冗余策略实验，以及所需的检索/重选入口、checkpoint/rollback、pinned/NVMe、MTP、混合模型、多 lane 等工作；不默认把所有可能组合都实现一遍。增加策略仍只修改策略及特征接口，不改回收生命周期协议。
 
-**当前位置（2026-10-20）：** 首批范围已冻结。此前一小时同域长测通过：11,448 次请求、45,792 个块经过 8 个槽位；这是当时版本的证据。`18eaddd` 修复有限请求内跨微批次的 GPU 权限，43 个模型场景及 198 次 reset/cancel 短测通过；**最新六轮编码压力仍未通过：off 两轮截断、delete 五轮截断，只有第一轮内容相同。** 容量不足自动重选是否开启新 active，已列为请导师确认的行为边界。本轮先完成独立并发排障：确认旧 GCC 11 检测运行库的条件变量误报，并修复 RawKvStore 关闭通知可能丢失的问题；修复后 GCC 12 TSan 与 ASan/UBSan 各 30/30，受影响用例重复 20 次通过。完整资源预约/上界、reset/cancel 长测、编码质量和独立 CUDA 非法访问仍未关闭；DeepSWE 按用户要求暂缓。首批阶段验收不替代“完成整套生产 GC”的最终目标。
+**当前位置（2026-10-20）：** 首批范围已冻结。此前一小时同域长测通过：11,448 次请求、45,792 个块经过 8 个槽位；这是当时版本的证据。`18eaddd` 修复有限请求内跨微批次的 GPU 权限，43 个模型场景及 198 次 reset/cancel 短测通过；**最新六轮编码压力仍未通过：off 两轮截断、delete 五轮截断，只有第一轮内容相同。** 容量不足自动重选是否开启新 active，已列为请导师确认的行为边界。本轮先完成独立并发排障：确认旧 GCC 11 检测运行库的条件变量误报，并修复 RawKvStore 关闭通知可能丢失的问题；修复后 GCC 12 TSan 与 ASan/UBSan 各 30/30，受影响用例重复 20 次通过。一小时 reset/cancel 长测现已完成，终态见下文；完整资源预约/上界、编码质量和独立 CUDA 非法访问仍未关闭，DeepSWE 按用户要求暂缓。首批阶段验收不替代“完成整套生产 GC”的最终目标。
 
 **最新分配审计：** 96 次固定请求的调用栈与计数器完全对应；复用固定物理层目录后，前台普通 C++ 分配从 249,921 次降至 228,417 次，其余来源计数不变。候选首次完整模型回归出现 CUDA 非法指令，基线及候选后续完整对照各退出 0；首败原因仍未确定，不能据重跑通过注销。详见文末“接纳后分配来源审计与层目录复用”，生产验收仍未完成。
 
 **最新 CUDA 定向复现与长测：** 在 `4cb3f16` 产品代码上完成 124 次定向场景执行，以及同一模型/context 的一小时 reset/cancel 长测；长测完成 13,303 次请求、13,302 个旧域全部结清，进程退出 0，原始日志复核通过。它们仍未定位原始 CUDA 错误。用户已明确“暂时不改主机设置”，因此暂缓需要 Windows 调试接口的检查器，不执行管理员辅助脚本。长测的版本、资源采样和范围限制见文末验收记录，不能据此宣称整套生产 GC 完成。
+
+**最新宿主检测诊断：** 在独立 ASan/UBSan 构建上，使用进程级 CUDA 兼容参数完成原失败前缀的 8 个场景、34 次解码，未报告 Host 访问或未定义行为错误。进程仍因两个共 300 bytes 的 `libcuda.so.1` 泄漏报告退出 1；无模型、无 KVMem 的 CUDA 小对照也报告完全相同的大小和库内分配位置。因此不能写成 sanitizer 全通过，也未关闭原始设备错误。没有修改 Windows/驱动设置或抑制泄漏检查，详见文末新增记录。
 
 ## 2026-10-17 阶段进度
 
@@ -1014,6 +1016,34 @@ bash scripts/check_tsan_runtime.sh "$out/toolchain/usr/bin/g++-12" "$out/preflig
 - 原有取消、reset、容量不足回退、暂停旧 GC、旧数据读取隔离和后端扩容拒绝检查仍通过。
 
 这组 fixture 使用 6 个物理槽、36 MiB 额度；上一节一小时轨迹使用 8 槽、48 MiB，两组容量不能混报。长测运行在修复前的产品版本；本项是针对统计变化的新旧对照。原始日志、源码包和二进制指纹保存在 `artifacts/historical-host-accounting/evidence.tar.gz`，SHA-256 为 `0d3bf2e30faddeeea1b238f07beba53ecba6ccdd0a6406a040d52f6d88d79828`；三个本地修改源码的 SHA-256 与受测修复版逐一一致。
+
+### 不修改主机设置的 CUDA 宿主检测（2026-10-20）
+
+用户暂缓 Windows 调试接口设置后，在隔离目录复制 `f59a47c` 源码，独立构建真实 CUDA 适配器及模型测试。使用 GCC 11 的 ASan/UBSan、RelWithDebInfo 和 `sm_86`；C/C++ 及 `.cu` 的宿主部分均启用检测。源码全量 manifest 在构建前后核对，实际链接记录与库路径已检查：本次 `libkvmem.a` 以静态方式进入独立 `libllama.so`，其它 ggml 库也来自该独立目录。没有替换原来的普通构建。此快照刻意保持原 CUDA 定向复现的版本，早于 `30e1e8b` 的占用统计修复；不把结果称为最新产品的完整回归。
+
+最初配置因 SSH PATH 没有找到 nvcc 而失败；显式指定 `/usr/local/cuda-13.2/bin/nvcc` 后构建完成。首次模型诊断在 CUDA 初始化时即报 `out of memory`，随后模型退到 CPU，在场景 0 的 pinned fixture 失败，未完成任何场景；退出还报告 5 项共 50,212 bytes 的泄漏。失败后可用显存仍约 15 GiB、系统可用内存约 61 GiB，不能把这个错误直接解释成历史 KV 预算耗尽。
+
+为区分检测环境与产品问题，使用不包含模型或 KVMem 的小程序，依次执行 CUDA 初始化、4 KiB GPU/页锁定 Host 分配、H2D/D2H、CPU 字节校验和释放。普通版本在检测前后均退出 0；默认 ASan 版本复现相同的初始化错误及 50,212-byte 泄漏报告。[NVIDIA 的 CUDA/ASan 兼容说明](https://docs.nvidia.com/deeplearning/tensorrt/latest/reference/troubleshooting-analysis-tools.html#issues-with-cuda-and-address-sanitizer) 建议 `protect_shadow_gap=0`。仅对测试子进程采用该参数后，小程序的全部 CUDA 操作成功；退出仍报告 `libcuda.so.1` 中 260 bytes 与 40 bytes 两项泄漏、退出 1。故意在 CUDA 操作后进行 Host 释放后访问的阳性对照仍准确报 `heap-use-after-free`，UBSan 非法移位阳性对照也有效。没有关闭 heap poisoning、访问检测或泄漏检测，也没有使用 suppression。
+
+随后复用**同一二进制**，保留首次失败日志，另目录运行以下配置：
+
+```text
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:protect_shadow_gap=0
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+LSAN_OPTIONS=
+KVMEM_TEST_MODEL_TRACE=1
+kvmem-historical-access-test MODEL --scenario-range 0 7 1
+```
+
+这次 CUDA 正常识别设备，原失败前缀的 8 个场景全部开始、执行并关闭，8 个场景检查及 backend guard 均完成；34 次 decode 均按顺序记录 decode 返回、同步、harvest 和 commit 返回。包含原先 q8_0→f16 context 转换只是复现前缀，不表示扩展首批支持配置。日志未报告 Host 访问错误、UBSan 错误或新的 CUDA 错误，但进程最终仍因两个共 **300 bytes** 的泄漏报告退出 **1**；大小、数量及库内位置 `libcuda.so.1+0x1025a` / `+0x1c4de` 与无模型对照完全相同。这个对照说明这些报告在没有 GC 时也会出现；不把它们抹去，也不据此宣称整个项目没有泄漏。
+
+准确结论是：**选定模型路径完成了宿主检测执行，没有新的 Host 访问/未定义行为报告；存在与独立 CUDA 对照一致的退出泄漏，不能标记整次 sanitizer 验收通过。** ASan 不检查 GPU kernel 的设备访问或闭源驱动内部；原始偶发 CUDA 非法指令/访问仍未定位，性能、真实任务质量和完整资源上界也不由本次诊断证明。本轮没有修改 GC 产品语义、注册表、驱动、TDR 或主机启动设置。
+
+本地证据位于 `artifacts/historical-adapter-host-asan/`：
+
+- `evidence.tar.gz`：独立构建、原失败、编译参数、源文件与动态库指纹；SHA-256 为 `a7c855187372d3b677866ae9886ff10f44c2ae534dfd2511a12b1512340b0ad4`。
+- `compatible-evidence.tar.gz`：无模型对照、阳性对照和兼容参数下的模型完整日志；SHA-256 为 `8844da57efa36482829a3fd2a0d417bb29f5003c423841fbc3ed23d9f4db3330`。
+- `summary.json` 与 `compatible-summary.json` 保存原始退出码、场景/阶段顺序和每项泄漏栈比较。远程原目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-adapter-host-asan-f59a47c`，兼容运行与小对照分别位于同级 `historical-adapter-host-asan-compatible-f59a47c` / `historical-cuda-asan-runtime-control`。
 
 ## 剩余生产接入与完整验收
 
