@@ -58,7 +58,7 @@
 
 **最新分配审计：** 96 次固定请求的调用栈与计数器完全对应；复用固定物理层目录后，前台普通 C++ 分配从 249,921 次降至 228,417 次，其余来源计数不变。候选首次完整模型回归出现 CUDA 非法指令，基线及候选后续完整对照各退出 0；首败原因仍未确定，不能据重跑通过注销。详见文末“接纳后分配来源审计与层目录复用”，生产验收仍未完成。
 
-**最新 CUDA 定向复现：** 在 `4cb3f16` 产品代码上完成 124 次场景执行，退出码均为 0；其中 64 次保留原失败前的场景顺序和 q8_0→f16 上下文切换。仍未定位原始 CUDA 错误。远程检查器此前未能初始化 Windows 调试接口，管理员协助尚待落实。一小时 reset/cancel 长测已启动，终态以 `artifacts/historical-reset-hour/RUN_STATE.json` 及原始日志为准；启动和中途采样不算验收通过。
+**最新 CUDA 定向复现：** 在 `4cb3f16` 产品代码上完成 124 次场景执行，退出码均为 0；其中 64 次保留原失败前的场景顺序和 q8_0→f16 上下文切换。仍未定位原始 CUDA 错误。远程检查器此前未能初始化 Windows 调试接口；用户已明确“暂时不改主机设置”，因此暂缓该检测路径，不执行管理员辅助脚本。一小时 reset/cancel 长测已启动，终态以 `artifacts/historical-reset-hour/RUN_STATE.json` 及原始日志为准；启动和中途采样不算验收通过。
 
 ## 2026-10-17 阶段进度
 
@@ -973,11 +973,25 @@ bash scripts/check_tsan_runtime.sh "$out/toolchain/usr/bin/g++-12" "$out/preflig
 
 两组驱动退出码均为 0；按完整日志校验轮次/场景顺序、关闭记录、阶段计数和错误标记，未发现本次重复中的 CUDA 失败。五种非法范围/轮数在模型加载前拒绝。准确结论是“124 次定向执行未复现”，不是故障已修复，也不是完整生产验收通过。证据为 `artifacts/historical-cuda-repro/evidence.tar.gz`，SHA-256 为 `4a8b6c9b74b6a202aae3f40e7ec1626ede2980cb8956e6cb30b6af52d774546e`；本地 `summary.json` 保存校验结果。
 
-此前 Compute Sanitizer 日志明确报告 WDDM debugger interface 初始化失败，不能作为业务 GPU 正确性检查。只读核对发现 Windows 主机 `DESKTOP-OH21P4S` 的 `HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger\EnableInterface` 不存在，当前 SSH 对应的 Windows 用户令牌不是管理员。[NVIDIA 文档](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html#windows-specific-behavior) 要求该值为 DWORD 1。已准备 `scripts/windows/enable-cuda-debug-interface.ps1`，由管理员在目标主机手动执行：强制校验机器名，先保存原值，再设置并核对该值。脚本已通过语法检查，但尚未执行；没有修改注册表、TDR、驱动或重启主机。管理员完成设置后，先用小型有效/故意越界 CUDA 程序验证检查器，再决定真实模型检查范围。
+此前 Compute Sanitizer 日志明确报告 WDDM debugger interface 初始化失败，不能作为业务 GPU 正确性检查。只读核对发现 Windows 主机 `DESKTOP-OH21P4S` 的 `HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger\EnableInterface` 不存在，当前 SSH 对应的 Windows 用户令牌不是管理员。[NVIDIA 文档](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html#windows-specific-behavior) 要求该值为 DWORD 1。已准备 `scripts/windows/enable-cuda-debug-interface.ps1`：强制校验机器名，先保存原值，再设置并核对该值；脚本仅通过语法检查，尚未执行。**用户已明确暂时不改主机设置**，因此不执行该脚本，也不修改注册表、TDR、驱动或重启主机；专用检查器路径暂缓，继续现有环境下的定向复现和日志排查，原始 CUDA 故障保持未关闭。以后只有用户重新授权该设置时，才恢复接口配置及小型有效/故意越界 CUDA 对照验证。
 
-在等待设计边界和调试权限确认期间，继续既定的一小时 reset/cancel 轨迹：同一个模型/context 中交替正常结束、prefill 取消和生成取消；保留旧 CPU reader 跨 reset 和新域首轮 decode，随后验证旧域后台退出。使用已编译的同一测试二进制，固定 8 槽、64-token 输入预约、3-token 输出上限及 48 MiB 跨域 payload 预算。驱动保存二进制/关键源文件指纹、实际 PID、模型日志、进程 RSS/HWM 和设备级显存采样，4200 秒上限避免失去终态。
+在等待设计边界确认、调试接口设置暂缓期间，继续既定的一小时 reset/cancel 轨迹：同一个模型/context 中交替正常结束、prefill 取消和生成取消；保留旧 CPU reader 跨 reset 和新域首轮 decode，随后验证旧域后台退出。使用已编译的同一测试二进制，固定 8 槽、64-token 输入预约、3-token 输出上限及 48 MiB 跨域 payload 预算。驱动保存二进制/关键源文件指纹、实际 PID、模型日志、进程 RSS/HWM 和设备级显存采样，4200 秒上限避免失去终态。
 
 该长测验证生命周期与资源复用，不涉及尚未定型的容量重选语义，也不替代编码质量或同域持续追加验收。只有测试进程成功退出、至少 3600 秒、旧域全部结清及 backend guard 通过，驱动才记录该项通过；设备级显存采样不能直接归因于本进程，累计分配字节也不能当作保留量。远程证据目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-reset-hour-4cb3f16`，状态和结果保存在本地 `artifacts/historical-reset-hour/`。
+
+完整证据目录可用 `python scripts/analyze_historical_reset_soak.py EVIDENCE_DIRECTORY` 复查；须包含 `model.log`、`resources.jsonl`、`summary.json` 和 `driver.exit`。脚本核对每个样本的请求分类、token 数、旧域结清关系、额度和固定容量，以及终态退出、至少一小时和 backend guard；输出 `analysis.json`。`--partial` 仅作中途观测，不判定通过；缺少终态证据或使用会关闭断言的 Python `-O` 均拒绝验收。该脚本不代替完整生产质量与内存上界审计。
+
+### 首批配置的资源上界核算（2026-10-20，尚未完成总量验收）
+
+本节核对 `f59a47c` 的受限 RAM 路径和上述 reset 长测初始化日志，区分已有容量约束与仍缺失的总量证明。中途记录不是长测终态；较大上下文的编码请求须使用自身冻结参数重新计算容量。
+
+- **历史 K/V payload：** `HistoricalKvPayloadBudget` 在实际 vector 分配前扣账，底层 `deallocate` 完成后才还账；准备失败也经 allocator 退账。令 `N` 为历史槽位数、`P` 为一个 full-slot 的各层 K/V 容量，当前 recency 无 Mean-K payload，额度为 `2 × N × P`。reset 复用同一预算对象。本次 `N=8`、`P=3,145,728 bytes`，新旧域及私有预约共用 **48 MiB**，不是每次 reset 重新获得 48 MiB。每请求最多 67 token、5 次追加，按碎片上界准备 6 槽，初始实际取得 **18 MiB**；未释放的旧 payload 仍占额度。该账本不含暂存、metadata 或模型内存。
+- **搬运与重排空间：** `kvmem_capture_workspace_reserve` 在首个请求提交前实际分配固定 slab、描述符、事件和 layout scratch，失败撤回，接纳后禁止扩容。初始化日志记录 GPU workspace **34,275,328 bytes**，其中已包含 layout 的 **458,752 bytes**，不能重复相加。D2H 的两个 page-locked slab 合计 **64 MiB**：即使 `historical_pinned_bytes=0`，这份执行暂存仍存在。另有 Host 队列 **2,424,832 bytes**、同步 fallback **32,768 bytes**、stage-in K/V buffer **65,536 bytes**。这些执行空间跨 reset 复用，与被 GC 删除的历史数据属于不同分配。
+- **有限请求记录与块目录：** 当前域的 repository/payload-store 槽数组、dense block 表及位置索引按 `N` 准备；目录 map 节点在私有预约与已安装目录之间转移，墓碑原位复用。manager 的 round、observation、retry、代际数组和 LRU candidate 数量受仓库容量限制，decision buffer 受 batch 上限限制。仍须核算实际 capacity 与控制块开销，不能只统计有效目录项。日志中的 block 表 **1,312 bytes**、256 行位置容量、capture arena **47,104 bytes**，只覆盖其中列出的项目。
+- **旧域与后台清理：** `HistoricalKvCleanup::process()` 的 64 个 ticket 槽位在接纳前取得，物理析构后返还；新域、请求预约、交接和最终清理共用它。64 是任务容量，不能写成“允许 64 个完整域”。旧 reader 持续占用时，payload 预算或 ticket 不足可以令后续请求在接纳前失败；退休和提交清理都不等于释放。旧域的 runtime、repository、目录、manager 及线程/栈等仍须加入跨域资源总账。
+- **后端与进程总量：** 本轮初始化的输出 buffer 为 **38,895,616 bytes**，10 个图结果的 metadata 合计 **19,778,080 bytes**；测试检查其身份和容量不变。这不覆盖整个 scheduler、CUDA 图/驱动、模型映射、allocator 保留量及所有构图临时容器。后端 buffer 未经归属核对不能直接相加为 Host RSS，普通 C++ 累计分配字节也不是当前保留内存。
+
+当前可分别说明 payload 额度、若干 workspace 的实际预约和固定容器的结构上限，**尚不能给出整进程、全部新旧域及后端资源的完整数值上界**。继续补齐账目和失败路径，通用推理框架全面零分配改造按上文约定暂不扩展。`host_bytes()`/对外 store 字节接口只是约定范围的占用统计，不能替代这项完整验收。
 
 ## 剩余生产接入与完整验收
 
