@@ -1829,6 +1829,17 @@ uint64_t llama_memory_kvmem::host_bytes() const {
     bytes += q_count_.capacity()*sizeof(uint32_t);
     bytes += q_sum_.capacity()*sizeof(std::vector<float>);
     for (const auto & q : q_sum_) bytes += q.capacity()*sizeof(float);
+    if (historical_domain_) {
+        const auto & storage = *historical_domain_->storage();
+        const auto & budget = storage.config().payload_budget;
+        // Historical payloads are separate from legacy raw_. The shared
+        // charge includes private reservations and old domains surviving a
+        // reset; counting only this store would hide their retained bytes.
+        // Credits return after actual deallocation, not retire/finish/reset.
+        // This remains accounted store memory, not total process RSS or all
+        // backend/allocator overhead.
+        bytes += budget ? budget->used_bytes() : storage.allocated_payload_bytes();
+    }
     return bytes;
 }
 

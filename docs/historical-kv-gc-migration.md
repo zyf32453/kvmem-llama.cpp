@@ -58,7 +58,7 @@
 
 **最新分配审计：** 96 次固定请求的调用栈与计数器完全对应；复用固定物理层目录后，前台普通 C++ 分配从 249,921 次降至 228,417 次，其余来源计数不变。候选首次完整模型回归出现 CUDA 非法指令，基线及候选后续完整对照各退出 0；首败原因仍未确定，不能据重跑通过注销。详见文末“接纳后分配来源审计与层目录复用”，生产验收仍未完成。
 
-**最新 CUDA 定向复现：** 在 `4cb3f16` 产品代码上完成 124 次场景执行，退出码均为 0；其中 64 次保留原失败前的场景顺序和 q8_0→f16 上下文切换。仍未定位原始 CUDA 错误。远程检查器此前未能初始化 Windows 调试接口；用户已明确“暂时不改主机设置”，因此暂缓该检测路径，不执行管理员辅助脚本。一小时 reset/cancel 长测已启动，终态以 `artifacts/historical-reset-hour/RUN_STATE.json` 及原始日志为准；启动和中途采样不算验收通过。
+**最新 CUDA 定向复现与长测：** 在 `4cb3f16` 产品代码上完成 124 次定向场景执行，以及同一模型/context 的一小时 reset/cancel 长测；长测完成 13,303 次请求、13,302 个旧域全部结清，进程退出 0，原始日志复核通过。它们仍未定位原始 CUDA 错误。用户已明确“暂时不改主机设置”，因此暂缓需要 Windows 调试接口的检查器，不执行管理员辅助脚本。长测的版本、资源采样和范围限制见文末验收记录，不能据此宣称整套生产 GC 完成。
 
 ## 2026-10-17 阶段进度
 
@@ -979,11 +979,19 @@ bash scripts/check_tsan_runtime.sh "$out/toolchain/usr/bin/g++-12" "$out/preflig
 
 该长测验证生命周期与资源复用，不涉及尚未定型的容量重选语义，也不替代编码质量或同域持续追加验收。只有测试进程成功退出、至少 3600 秒、旧域全部结清及 backend guard 通过，驱动才记录该项通过；设备级显存采样不能直接归因于本进程，累计分配字节也不能当作保留量。远程证据目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-reset-hour-4cb3f16`，状态和结果保存在本地 `artifacts/historical-reset-hour/`。
 
+**本次终态：** 产品基线 `4cb3f16`、诊断测试 `f59a47c`，模型加载后的轨迹持续 **3600.244 秒**，含加载和退出的驱动总时长 **3668.261 秒**，进程退出 0。13,303 次请求由 4,435 次正常结束、4,434 次 prefill 取消和 4,434 次生成取消组成，共处理 727,243 token、生成 17,739 token。13,302 个旧域全部结清，pending=0；测试结束采样时当前域仍由 context 持有，不能把该时点解释成所有 payload 已归零。backend guard 也通过。
+
+完整日志的 355 个生命周期样本和 365 个进程/设备样本已用检查脚本复核。记录到 6 次接纳前拒绝，与共享 payload 预算的 refusal 计数相符；测试调用方重试后继续完成，不是已经接纳的请求等待 GC。检查点记录的 payload 峰值为 **36 MiB**，共享额度为 **48 MiB**；这是采样峰值，不是连续追踪得到的全程最高值。清理 ticket 占用采样为 2–5/64，块表、位置容量、arena、输出 buffer 和图 metadata 的记录容量保持不变。
+
+模型加载后的进程 RSS 采样范围为 **806,204–820,472 KiB**（约 787–801 MiB）；进程生命周期高水位 **18,532,308 KiB** 包含模型加载。前后十分钟中位数相差约 2.34 MiB，描述性回归斜率约 1.22 MiB/小时；这些数据没有预先约定的泄漏判定阈值，不能据此证明完整内存上界或“没有泄漏”。2026-10-20 08:49:01 UTC 起另有最多 2 个并行编译任务准备独立的 CPU 侧 ASan/UBSan 诊断构建，因此本轮不能作为无竞争的吞吐/延迟基准。没有并行启动第二个模型负载。
+
+原始证据归档为 `artifacts/historical-reset-hour/evidence.tar.gz`，SHA-256：`1193baa9b4d1d370d671f2d7109a392b0b5f723214af7a4a26b137dd98636aef`；解包目录的 `analysis.json` 保存复核结果。结论仅是该 reset/cancel 生命周期轨迹通过，CUDA 首败根因、实际编码质量和完整资源预约仍未关闭。
+
 完整证据目录可用 `python scripts/analyze_historical_reset_soak.py EVIDENCE_DIRECTORY` 复查；须包含 `model.log`、`resources.jsonl`、`summary.json` 和 `driver.exit`。脚本核对每个样本的请求分类、token 数、旧域结清关系、额度和固定容量，以及终态退出、至少一小时和 backend guard；输出 `analysis.json`。`--partial` 仅作中途观测，不判定通过；缺少终态证据或使用会关闭断言的 Python `-O` 均拒绝验收。该脚本不代替完整生产质量与内存上界审计。
 
 ### 首批配置的资源上界核算（2026-10-20，尚未完成总量验收）
 
-本节核对 `f59a47c` 的受限 RAM 路径和上述 reset 长测初始化日志，区分已有容量约束与仍缺失的总量证明。中途记录不是长测终态；较大上下文的编码请求须使用自身冻结参数重新计算容量。
+本节核对 `f59a47c` 的受限 RAM 路径和上述 reset 长测初始化日志，区分已有容量约束与仍缺失的总量证明。长测终态见上一节；较大上下文的编码请求须使用自身冻结参数重新计算容量。
 
 - **历史 K/V payload：** `HistoricalKvPayloadBudget` 在实际 vector 分配前扣账，底层 `deallocate` 完成后才还账；准备失败也经 allocator 退账。令 `N` 为历史槽位数、`P` 为一个 full-slot 的各层 K/V 容量，当前 recency 无 Mean-K payload，额度为 `2 × N × P`。reset 复用同一预算对象。本次 `N=8`、`P=3,145,728 bytes`，新旧域及私有预约共用 **48 MiB**，不是每次 reset 重新获得 48 MiB。每请求最多 67 token、5 次追加，按碎片上界准备 6 槽，初始实际取得 **18 MiB**；未释放的旧 payload 仍占额度。该账本不含暂存、metadata 或模型内存。
 - **搬运与重排空间：** `kvmem_capture_workspace_reserve` 在首个请求提交前实际分配固定 slab、描述符、事件和 layout scratch，失败撤回，接纳后禁止扩容。初始化日志记录 GPU workspace **34,275,328 bytes**，其中已包含 layout 的 **458,752 bytes**，不能重复相加。D2H 的两个 page-locked slab 合计 **64 MiB**：即使 `historical_pinned_bytes=0`，这份执行暂存仍存在。另有 Host 队列 **2,424,832 bytes**、同步 fallback **32,768 bytes**、stage-in K/V buffer **65,536 bytes**。这些执行空间跨 reset 复用，与被 GC 删除的历史数据属于不同分配。
@@ -992,6 +1000,20 @@ bash scripts/check_tsan_runtime.sh "$out/toolchain/usr/bin/g++-12" "$out/preflig
 - **后端与进程总量：** 本轮初始化的输出 buffer 为 **38,895,616 bytes**，10 个图结果的 metadata 合计 **19,778,080 bytes**；测试检查其身份和容量不变。这不覆盖整个 scheduler、CUDA 图/驱动、模型映射、allocator 保留量及所有构图临时容器。后端 buffer 未经归属核对不能直接相加为 Host RSS，普通 C++ 累计分配字节也不是当前保留内存。
 
 当前可分别说明 payload 额度、若干 workspace 的实际预约和固定容器的结构上限，**尚不能给出整进程、全部新旧域及后端资源的完整数值上界**。继续补齐账目和失败路径，通用推理框架全面零分配改造按上文约定暂不扩展。`host_bytes()`/对外 store 字节接口只是约定范围的占用统计，不能替代这项完整验收。
+
+### 修正 Historical payload 的对外占用统计（2026-10-20）
+
+资源核算发现，`llama_memory_kvmem::host_bytes()` 原先累加 legacy Raw、runtime 和部分适配器容器，却没有加入独立 `HistoricalKvRawStore` 的 K/V payload。因此 `llama_kvmem_store_active_bytes()` 和 `llama_kvmem_store_bytes()` 会漏报当前预约及 reset 后仍由旧读者保留的数据。共享 payload 预算本身此前已扣账；此问题影响对外占用统计，不表示旧代码没有执行该预算约束。
+
+修复直接加入既有共享预算的 `used_bytes()`，只加一次，覆盖当前私有预约、已安装 payload 和所有尚未释放的旧域。额度随实际底层释放归还，退休、请求结束或 reset 不提前扣除它。没有预算的组件级存储使用当前 store 的 payload 计数作为后备；公开受限请求路径始终配置共享预算。本项没有调整 GC 调度、退休权限、GPU 工作集或实际分配大小，也没有把该接口改称完整进程 RSS。
+
+验收先只更新测试、保持原 `libllama.so`/`libggml-cuda.so` 指纹不变：真实模型 `--reset` 退出 1，准确触发 `host accounting omitted current historical payload`。随后加入产品修复，同一模型测试退出 0，覆盖：
+
+- 当前历史 payload 被计入；11 个旧域 reader 加当前域占满 **36 MiB** 的该 fixture 额度时，共享 payload 未被漏记，两个公开字节入口结果一致。
+- 归还旧 reader 不在前台销毁 payload；后台物理释放旧数据后，在当前 runtime 不变的情况下，报告值精确减少 **33 MiB**，没有重复扣除。
+- 原有取消、reset、容量不足回退、暂停旧 GC、旧数据读取隔离和后端扩容拒绝检查仍通过。
+
+这组 fixture 使用 6 个物理槽、36 MiB 额度；上一节一小时轨迹使用 8 槽、48 MiB，两组容量不能混报。长测运行在修复前的产品版本；本项是针对统计变化的新旧对照。原始日志、源码包和二进制指纹保存在 `artifacts/historical-host-accounting/evidence.tar.gz`，SHA-256 为 `0d3bf2e30faddeeea1b238f07beba53ecba6ccdd0a6406a040d52f6d88d79828`；三个本地修改源码的 SHA-256 与受测修复版逐一一致。
 
 ## 剩余生产接入与完整验收
 

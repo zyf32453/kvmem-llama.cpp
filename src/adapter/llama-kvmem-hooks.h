@@ -196,6 +196,8 @@ LLAMA_API bool     llama_kvmem_store_destroy(int32_t store_id);
 LLAMA_API uint32_t llama_kvmem_store_rows(int32_t store_id);
 // Accounted host bytes of one store. Walks blocks times layers under the store
 // mutex: call it once per request or per status report, never per token.
+// Historical capture includes its shared payload charge: current reservations
+// plus old domains still retained after reset. This is not process RSS.
 LLAMA_API uint64_t llama_kvmem_store_bytes(int32_t store_id);
 LLAMA_API llama_pos llama_kvmem_recr_pos_max(void);
 // After MTP verify: keep the first n_keep batch tokens in the running mean (0 = discard).

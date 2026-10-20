@@ -2808,6 +2808,7 @@ static void check_reset_request(llama_context * ctx, llama_model * model, llama_
     while (budget->used_bytes() != unit && std::chrono::steady_clock::now() < initial_deadline)
         std::this_thread::yield();
     require(budget->used_bytes() == unit, "prior reset cleanup did not settle for pressure fixture");
+    require(mem.host_bytes() >= unit, "host accounting omitted current historical payload");
     std::vector<kvmem::HistoricalKvRepository::Lease> retained_readers;
     retained_readers.reserve(16);
     bool quota_refused = false;
@@ -2836,14 +2837,26 @@ static void check_reset_request(llama_context * ctx, llama_model * model, llama_
         ++accepted_resets;
     }
     require(quota_refused && accepted_resets == 11, "retained reset history exceeded two-domain payload bound");
+    // The current store owns one block, but old readers retain eleven more.
+    // Public accounting must include that shared charge exactly once, even
+    // though their directories and payloads have left the active namespace.
+    const auto retained_host_bytes = mem.host_bytes();
+    require(retained_host_bytes >= budget->limit_bytes() &&
+            llama_kvmem_store_active_bytes() == retained_host_bytes &&
+            llama_kvmem_store_bytes(0) == retained_host_bytes,
+            "host accounting omitted retained reset payloads or disagreed across public entry points");
     const auto before_reader_release = foreground_cpp_frees;
     retained_readers.clear();
     require(foreground_cpp_frees == before_reader_release, "quota fixture freed old payload on the foreground");
     const auto released_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (budget->used_bytes() != unit && std::chrono::steady_clock::now() < released_deadline)
         std::this_thread::yield();
-    require(budget->used_bytes() == unit &&
-            llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 0, 1),
+    require(budget->used_bytes() == unit, "old physical cleanup did not restore shared admission capacity");
+    const auto released_host_bytes = mem.host_bytes();
+    require(retained_host_bytes >= released_host_bytes &&
+            retained_host_bytes - released_host_bytes == budget->limit_bytes() - unit,
+            "host accounting did not remove the physically released old payload exactly once");
+    require(llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 0, 1),
             "old physical cleanup did not restore shared admission capacity");
     decode(32);
     mem.end_prefill_capture();
