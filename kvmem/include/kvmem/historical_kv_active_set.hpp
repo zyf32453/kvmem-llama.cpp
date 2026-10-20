@@ -72,6 +72,10 @@ public:
     // A later decode submission under the same active permission may call it
     // again with that submission's sequence, even after retirement.
     bool mark_execution_submitted(uint64_t sequence);
+    // A bounded window may outlive individual GPU residents. Record only
+    // blocks actually used by this submission, not every retained permission.
+    bool contains(HistoricalKvHandle handle) const noexcept;
+    bool mark_execution_submitted(HistoricalKvHandle handle, uint64_t sequence);
 
 private:
     explicit HistoricalKvActiveSet(std::shared_ptr<HistoricalKvRepository> repository);

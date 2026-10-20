@@ -893,6 +893,32 @@ Windows historical 测试 **13/13** 通过；独立 Linux 宿主构建 NVMe ON *
 
 该短测的前台 decode 区间累计观察到 **572,250 次普通 C++ 分配、44,204,172 个请求字节**，因此完整的“接纳后不再依赖新分配”要求尚未满足；这不表示泄漏了 44 MB。仍需定位调用点、核算实际保留量并处理首批可达资源。反复切换的一小时任务因实际删除输出差异暂缓排程；这里通过的是 60 秒预检。
 
+### 有限请求内的 GPU 执行窗口修复（2026-10-20）
+
+原生编码压力测试暴露了一个边界错误：适配器把每个 ubatch 都视为一次全新的 active。于是，同一次回答已经获准使用的历史块被 GC 退休后，会在下一批 token 的 attention view 中消失。88-token 提示、16-token 输出上限的最小复现中，off 与无 KVMem 参考均以正常的 `take_last` 函数开头，delete 则生成 `def {` 和空白。此前的模型测试把“下一微批次排除退休块”当作预期，未覆盖同一有限回答的连续执行语义。
+
+依据导师文档 §4.3 对有限 active window 的约定，首批 recency/RAM 路径现在将一个已预约、输入/输出/追加次数均有上限的请求作为 GPU 执行窗口。首次选择旧 GPU 历史时取得权限；该请求新产生的块，在 writer 发布 Writing 的同一次状态转换中取得原始 GPU 执行权限，避免 GC 在两次独立 acquire 之间退休该块。后续 ubatch 只复用窗口内已经取得的同代权限，不能据“GPU 上还有副本”取得新权利。实际提交仅更新此次确实用到的块的 LRU，已被普通容量管理移出的块不会继续被虚假 touch。
+
+这是 GPU-only 权限，不包含未来 CPU 读或 H2D 权限。GC 仍可退休 Writing/active 块，Packed K/V、Mean-K 等 CPU 分量仍在各自依赖结束后后台释放；元数据槽位则等旧窗口退出后才能返还 Ready。GPU 容量管理仍可按原有规则移出驻留块，保留窗口权限不代表无限保留全部上下文。请求完成、健康取消、成功 reset 或确认设备工作结束后的析构关闭窗口；未确认设备完成的失败路径保留已有依赖。过早调用 finish 不会关闭尚未完成输入的窗口。下一请求重新获取权限，退休块不能复活。
+
+窗口数组在请求接纳前按 repository 固定容量准备，实际使用列表按 GPU 槽数准备，计入 active 空间统计；执行和关闭不扩容。trace 使用 `repository + window` 标识开始/结束。`test_server_historical_workload.py` 的物理回收活动判定同时接受“完整槽回收”和“CPU 已提前释放”的计数；单纯 proposal/commit 仍不算释放证据。Ready 信用继续只来自真实完整回收，不因这个观测口径变化增加。
+
+新增宿主测试覆盖原始 writer/GPU 权限与退休的并发顺序、退休后拒绝新 GPU/CPU 许可、CPU 早于窗口退出释放、同槽代际校验、窗口关闭后禁止追加、无前台 payload 释放，以及仅实际提交的块更新 LRU。真实模型用例相应改为检查同一窗口连续执行，窗口结束后旧许可消失；保留 GPU 字节、后台 Host 释放及设备错误处理检查。
+
+初版修复的最小复现已通过**前缀一致性**检查：同一 HTTP 请求体下，修复后 off/delete 与先前无 KVMem 参考的 16-token 内容逐字相同；delete 观察到 14 次退休及 14 次 Host 提前释放，窗口内 active_skip 为 0、开始/结束各一次。完整元数据回收在 finish 采样点仍为 0：窗口关闭与后台完成最后回收不是同一个时刻，不能将其误读为 CPU 尚未释放。四个针对性模型场景（5/6/7/31）均退出 0。证据为 `artifacts/historical-finite-window/probe-evidence.tar.gz`、`probe-summary.json`；两组短输出故意以 length 结束，不能称为完整回答质量通过。
+
+最终候选版另补充提前 finish 保护、窗口标识和空间统计，源码包 SHA-256 为 `bffd19f1433861537b510bab19a8234aa51a91cb9388fe73697bcde06efaad03`。Windows 三项直接相关宿主测试通过；全套首次 22/25，另外两项临时目录权限失败在指定项目内临时目录后通过，剩余会话缓存符号链接测试受 Windows 权限限制。Linux ASan/UBSan 首次 27/30，三个 NVMe 用例因已有 `/tmp` 目录权限失败；改用本轮隔离临时目录后这三项全部通过，未修改产品代码以绕过检查。最终候选版的 43 个真实模型场景、reset、两组重复请求、全 Closed capture 及 backend guard 已通过；这次通过不单独注销此前独立记录的偶发 CUDA 非法访问问题。
+
+最终候选版 reset/cancel 短测退出 0：60.284 秒完成 198 次请求，正常完成、prefill 取消、生成取消各 66 次，197 个旧域全部后台退出，接纳前拒绝 0；共享 payload 采样峰值 36 MiB/上限 48 MiB，结束 9 MiB，固定元数据/arena/backend 检查通过。前台 decode 普通 C++ 分配仍有 514,475 次、累计请求 40,704,096 bytes；并未解决完整资源预约缺口。
+
+TSan 首次全套在启动阶段遇到 `unexpected memory mapping`。仅对测试进程固定地址布局后，直接相关 historical 测试全部通过，但整套为 **28/30**：未修改的 lane pool 报 `double lock of a mutex`，单独复验仍报错；通用 `raw_kv_store_test` 持续等待，保存线程等待状态后终止，单独设置 60 秒超时复验在 0.56 秒通过。两项首次异常均保留，不能将 TSan 整套报告为通过，也不将它们未经定位归因于本次修改。lane pool 的告警需核对实现与当前 GCC 11/libtsan 运行时；本轮未通过禁用检查来掩盖告警。
+
+完整原生编码压力重放已结束，**仍未通过**。六轮 HTTP 请求体指纹逐轮一致；off 为四轮 stop、两轮 length，delete 为一轮 stop、五轮 length，仅第一轮完整内容相同。第二轮共同前缀为 151 字符，在第 44 个非空内容流式片段处分歧；随后 delete 开始生成无关函数。各轮确有退休及 Host 提前释放，policy/worker failures 为 0，因此不能归结为没有触发 GC，也不能把 HTTP 200 当质量通过。两组负载脚本均退出 1；外层驱动 0 仅表示排程结束。最终证据为 `artifacts/historical-finite-window/final-evidence.tar.gz`，摘要为 `final-summary.json`。
+
+代码检查发现尚未贯通的第二个入口：`prepare_working_set()` 在 GPU 槽位不足时调用 `prepare_prefill_pressure()`，其 `pick_prefill_pressure_blocks()` / `set_selection()` 仍经 `is_live()` → `allows_new_selection()` 过滤已退休块。这条路径可以在同一回答内移除仍有旧窗口权限的 GPU 驻留内容。本轮已修复 ubatch 权限释放及创建竞态，**容量压力选块与该窗口的配合仍待修复**；完整压力失败保留为下一步复现，不能宣布整个输出异常已解决。
+
+下一步优先给这条受限 recency 路径传递已有窗口许可，仅允许保留确实仍驻留、已获同代 GPU 权限的块；不通过全局放宽 `is_live()` 来绕过新选择、CPU 读取、H2D 或下一窗口的退休检查。先补容量压力下的确定性用例，再重放上述第二轮及六轮对照。长期全部资源有界、接纳后无新分配、lane pool 告警及原偶发 CUDA 错误仍需后续处理；这些门槛未完成前不恢复扩展配置开发。DeepSWE 按用户要求继续暂缓。
+
 ## 剩余生产接入与完整验收
 
 以下是导师方案仍未满足的完整待办，不是当前已支持功能，也不是本轮全部开工的清单。影响首批冻结配置的部分随验收修复；可选策略和配置扩展在首批通过后逐项安排：

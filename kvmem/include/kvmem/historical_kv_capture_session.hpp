@@ -34,6 +34,21 @@ public:
         HistoricalKvCleanup * cleanup = nullptr);
     bool admit() noexcept;
     bool admitted() const noexcept { return admitted_; }
+    // Optional finite GPU window, prepared before admit(). New spans receive
+    // their original GPU execution permission atomically with writer admission.
+    // The adapter orders GPU writes/reads and closes only after checked device
+    // completion. Retirement can release Host payload during this window.
+    bool prepare_gpu_window();
+    bool gpu_window_open() const noexcept { return gpu_window_enabled_ && !gpu_window_closed_; }
+    // Pair with repository_id in traces. Every nonempty request reserves a
+    // disjoint birth sequence range in its domain before it can execute.
+    uint64_t gpu_window_id() const noexcept { return birth_start_; }
+    size_t gpu_window_capacity_bytes() const noexcept {
+        return gpu_window_.capacity() * sizeof(HistoricalKvRepository::Lease);
+    }
+    bool has_gpu_permission(HistoricalKvHandle handle) const noexcept;
+    bool mark_gpu_execution(HistoricalKvHandle handle, uint64_t sequence);
+    void close_gpu_window() noexcept;
     // Convenience for host-only callers with no external preparation phase.
     static std::unique_ptr<HistoricalKvCaptureSession> try_create(
         KvMemRuntime & runtime, HistoricalKvRawStoreConfig config,
@@ -77,6 +92,7 @@ public:
     std::shared_ptr<HistoricalKvCaptureDomain> domain() const noexcept { return domain_; }
     uint64_t next_use_sequence() noexcept;
     uint64_t input_remaining() const noexcept { return input_remaining_; }
+    bool input_ended() const noexcept { return !input_; }
     uint64_t output_remaining() const noexcept { return output_remaining_; }
     uint64_t appends_remaining() const noexcept { return appends_remaining_; }
 
@@ -94,6 +110,7 @@ private:
     bool complete(bool cancelled);
     std::vector<HistoricalKvRepository::ResourceRelease> callbacks_;
     std::vector<HistoricalKvRepository::Lease> writers_;
+    std::vector<HistoricalKvRepository::Lease> gpu_window_;
     std::vector<HistoricalKvShadowDirectory::Producer> producers_;
     std::vector<HistoricalKvHandle> handles_;
     uint64_t input_remaining_ = 0, output_remaining_ = 0, appends_remaining_ = 0;
@@ -104,6 +121,7 @@ private:
     uint32_t live_blocks_at_finish_ = 0;
     bool input_ = true, failed_ = false, finished_ = false, admitted_ = false;
     bool owns_domain_claim_ = false;
+    bool gpu_window_enabled_ = false, gpu_window_closed_ = false;
 };
 
 // Runtime-scoped ownership of the physical pool and bounded metadata table.

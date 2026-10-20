@@ -597,7 +597,60 @@ static void test_resource_counter_saturation_does_not_cross_fields() {
     check(repo.try_reclaim(handle) == Repo::ReclaimResult::Complete, "counter field saturation leaked a slot");
 }
 
+static void test_producer_gpu_permission_precedes_retirement() {
+    using Repo = HistoricalKvRepository;
+    Repo repo(1);
+    for (unsigned round = 0; round < 100; ++round) {
+        auto reservation = repo.try_reserve_slots(1);
+        check(bool(reservation), "producer window could not reserve slot");
+        const auto handle = *reservation->next_handle();
+        std::atomic<bool> start{false}, saw_unprotected_writer{false};
+        Repo::RetireResult result = Repo::RetireResult::Stale;
+        unsigned released = 0;
+        std::thread collector([&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            // Observe the exact first visible Writing state, not a writer
+            // already acquired by this test thread after the race.
+            for (;;) {
+                const auto meta = repo.inspect(handle);
+                if (!meta) { std::this_thread::yield(); continue; }
+                if (!meta->active) saw_unprotected_writer = true;
+                result = repo.retire(handle);
+                if (result == Repo::RetireResult::Committed) break;
+            }
+        });
+        Repo::Lease gpu;
+        start.store(true, std::memory_order_release);
+        auto writer = repo.begin_reserved_write_with_gpu(*reservation, round, round, 1, 1, 8,
+            {[&](auto, auto) { ++released; return true; }, 8, 0}, gpu);
+        collector.join();
+        check(writer && gpu && !saw_unprotected_writer &&
+              result == Repo::RetireResult::Committed && repo.outstanding_operations() == 2,
+              "retirement observed a writer without its original GPU permission");
+        check(!gpu.has_host_access() && !gpu.has_packed_kv_access() && !gpu.has_mean_k_access() &&
+              !repo.acquire_gpu(handle) && !repo.acquire_read(handle) && repo.mark_executed(gpu, 9),
+              "retirement revoked old permission or granted new/Host permission");
+        writer.reset();
+        check(repo.try_reclaim(handle) == Repo::ReclaimResult::HostReleased &&
+              repo.inspect(handle)->active && !repo.ready_count() && released > 0,
+              "producer window prevented early Host release or returned identity early");
+        const auto callbacks = released;
+        gpu.reset();
+        check(released == callbacks && !repo.outstanding_operations() &&
+              repo.try_reclaim(handle) == Repo::ReclaimResult::Complete && repo.ready_count() == 1,
+              "GPU lease release freed payload on the foreground or leaked identity");
+    }
+    auto reservation = repo.try_reserve_slots(1);
+    Repo::Lease gpu;
+    repo.close();
+    check(!repo.begin_reserved_write_with_gpu(*reservation, 0, 0, 1, 1, 8,
+          {[](auto, auto) { return true; }, 8, 0}, gpu) &&
+          !gpu && reservation->remaining() == 1 && !repo.outstanding_operations(),
+          "failed producer admission consumed reservation or created permission");
+}
+
 int main() {
+    test_producer_gpu_permission_precedes_retirement();
     test_resource_counter_saturation_does_not_cross_fields();
     test_retire_closes_new_entry_but_keeps_old_reader();
     test_gpu_ready_writing_execution_is_not_cpu_publication();

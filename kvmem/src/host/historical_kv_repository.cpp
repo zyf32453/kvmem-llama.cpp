@@ -428,10 +428,22 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reser
         birth_seq, payload_bytes, {}, std::move(release));
 }
 
+std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reserved_write_with_gpu(
+        Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
+        uint32_t valid_tokens, uint64_t birth_seq, uint64_t payload_bytes,
+        ResourceRelease release, Lease & gpu_execution) {
+    if (gpu_execution) return std::nullopt;
+    if (!release.callback || release.packed_kv_bytes > payload_bytes ||
+        release.mean_k_bytes != payload_bytes - release.packed_kv_bytes)
+        throw std::invalid_argument("historical KV resource release bytes/callback mismatch");
+    return begin_reserved_write_impl(reservation, logical_id, original_begin, valid_tokens,
+        birth_seq, payload_bytes, {}, std::move(release), &gpu_execution);
+}
+
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reserved_write_impl(
         Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
         uint32_t valid_tokens, uint64_t birth_seq, uint64_t payload_bytes,
-        ReleaseCallback release, ResourceRelease resources) {
+        ReleaseCallback release, ResourceRelease resources, Lease * gpu_execution) {
     if (!release && !resources.callback) throw std::invalid_argument("historical KV release callback is required");
     const auto shared = shared_;
     if (reservation.shared_.get() != shared.get() || !reservation.remaining() ||
@@ -461,11 +473,19 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reser
     slot.writer_resources.store(split_writer ? kWriterAll : 0, std::memory_order_relaxed);
     slot.release = std::move(release);
     ++reservation.consumed_;
-    slot.control.store(split_writer ? code(Phase::Writing, 0, 1) + kKvOne + kMeanOne : code(Phase::Writing, 1),
-                       std::memory_order_release);
     Lease writer(shared, handle, LeaseKind::Writer, split_writer ? HostAccess::None : HostAccess::All, split_writer);
     writer.writer_resource_ = std::move(slot.resources.writer_resource);
     writer.count_operation();
+    if (gpu_execution) {
+        *gpu_execution = Lease(shared, handle, LeaseKind::GpuExecution, HostAccess::None);
+        gpu_execution->count_operation();
+    }
+    // Publish BOTH permissions in the same phase transition. In particular,
+    // GC cannot retire a visible Writing slot between writer admission and
+    // the producer window's execution admission.
+    const uint64_t writer_refs = split_writer ?
+        code(Phase::Writing, 0, 1) + kKvOne + kMeanOne : code(Phase::Writing, 1);
+    slot.control.store(writer_refs + (gpu_execution ? kOtherOne : 0), std::memory_order_release);
     return writer;
 }
 

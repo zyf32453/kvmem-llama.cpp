@@ -87,6 +87,18 @@ void HistoricalKvActiveSet::release() noexcept {
     engaged_ = false;
 }
 
+bool HistoricalKvActiveSet::contains(HistoricalKvHandle handle) const noexcept {
+    return engaged_ && std::any_of(handles_.begin(), handles_.end(),
+        [&](HistoricalKvHandle held) { return same_handle(handle, held); });
+}
+
+bool HistoricalKvActiveSet::mark_execution_submitted(HistoricalKvHandle handle, uint64_t sequence) {
+    if (!engaged_) return false;
+    for (const auto & lease : leases_)
+        if (same_handle(lease.handle(), handle)) return repository_->mark_executed(lease, sequence);
+    return false;
+}
+
 bool HistoricalKvActiveSet::mark_execution_submitted(uint64_t sequence) {
     if (!engaged_) return false;
     bool all_recorded = true;

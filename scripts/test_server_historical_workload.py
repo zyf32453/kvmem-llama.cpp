@@ -233,9 +233,13 @@ def main():
                     gc_samples.append({key: int(value) for key, value in re.findall(r'(\w+)=(\d+)', line)})
         # These are finish-boundary observations. Do not sum them: repeated
         # requests in the same domain may report overlapping cumulative stats.
+        # GPU permission can keep identity alive after CPU payload release.
+        # A retirement proposal/commit alone is not physical release evidence.
         activity = args.mode == 'off' or any(
             row.get('shadow', 0) > 0 if args.mode == 'shadow' else
-            row.get('committed', 0) > 0 and row.get('reclaimed', 0) > 0 for row in gc_samples)
+            row.get('committed', 0) > 0 and
+            (row.get('reclaimed', 0) > 0 or row.get('host_released_early', 0) > 0)
+            for row in gc_samples)
         gc_failed = any(row.get('policy_failures', 0) or row.get('worker_failures', 0) for row in gc_samples)
         summary = {
             'mode': args.mode, 'capacity': args.capacity, 'budget': args.budget,

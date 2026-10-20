@@ -836,8 +836,57 @@ static void unused_reservation_handoff_with_stalled_cleanup(bool cancel = false)
           !session->append(1) && !session->cancel(), "completed/cancelled session reopened");
 }
 
+static void finite_gpu_window_keeps_permission_not_host_payload() {
+    KvMemRuntime runtime(runtime_config());
+    auto session = HistoricalKvCaptureSession::try_prepare(runtime, storage_config(), 2, demand(4, 1, 2));
+    check(session && session->prepare_gpu_window() && session->admit(), "GPU window prepare failed");
+    allocation_budget = 0;
+    const auto appended = session->append(4);
+    allocation_budget = -1;
+    check(appended, "GPU window append allocated or failed");
+    auto task = runtime.historical_shadow_directory().find(0)->writer_context;
+    const auto handle = task->handle();
+    auto repository = session->repository();
+    session->producers_captured();
+    check(repository->retire(handle) == HistoricalKvRepository::RetireResult::Committed &&
+          session->has_gpu_permission(handle) && !repository->acquire_gpu_ready_writing(handle),
+          "Writing retirement lost original window or admitted another operation");
+    check(task->storage()->write_layer(task->writer(), handle, 0,
+              std::vector<uint8_t>(8, 17), std::vector<uint8_t>(12, 23), {}, 0) &&
+          !task->storage()->publish_complete(*repository, task->writer(), handle),
+          "retired producer failed to finish bytes or resurrected Live publication");
+    task.reset();
+    check(session->end_input(), "GPU window did not end input");
+    std::thread worker([&] {
+        check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::HostReleased,
+              "GPU window pinned CPU payload");
+    });
+    worker.join();
+    check(session->payload_bytes() == 20 && !repository->ready_count() &&
+          session->mark_gpu_execution(handle, 20) && repository->inspect(handle)->last_use_seq == 20 &&
+          !repository->acquire_read(handle) && !session->finish(),
+          "old finite window could not continue after CPU release");
+    auto stale = handle;
+    ++stale.generation;
+    check(!session->has_gpu_permission(stale) && !session->mark_gpu_execution(stale, 30),
+          "GPU window accepted a different generation");
+    const auto frees = foreground_frees;
+    allocation_budget = 0;
+    session->close_gpu_window();
+    allocation_budget = -1;
+    check(foreground_frees == frees && !session->gpu_window_open() &&
+          !session->has_gpu_permission(handle) && !session->append(1) && session->finish(),
+          "closed GPU window allocated/freed payload or admitted more tokens");
+    check(repository->try_reclaim(handle) == HistoricalKvRepository::ReclaimResult::Complete,
+          "closed GPU window kept metadata alive");
+    wait_cleanup();
+    check(!session->payload_bytes() && repository->ready_count() == 2,
+          "finished window did not return installed and unused capacity");
+}
+
 int main() {
     try {
+        finite_gpu_window_keeps_permission_not_host_payload();
         quotas_and_handoff();
         retired_blocks_do_not_invalidate_completed_request();
         request_finishes_while_background_release_is_blocked();

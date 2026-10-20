@@ -229,6 +229,33 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
     }
 }
 
+bool HistoricalKvCaptureSession::prepare_gpu_window() {
+    if (admitted_ || failed_ || finished_ || gpu_window_enabled_ || gpu_window_closed_) return false;
+    gpu_window_.resize(repository_->capacity());
+    gpu_window_enabled_ = true;
+    return true;
+}
+
+bool HistoricalKvCaptureSession::has_gpu_permission(HistoricalKvHandle handle) const noexcept {
+    if (!gpu_window_open() || handle.slot >= gpu_window_.size()) return false;
+    const auto & lease = gpu_window_[handle.slot];
+    if (!lease) return false;
+    const auto held = lease.handle();
+    return held.incarnation == handle.incarnation && held.generation == handle.generation &&
+        held.slot == handle.slot;
+}
+
+bool HistoricalKvCaptureSession::mark_gpu_execution(HistoricalKvHandle handle, uint64_t sequence) {
+    return has_gpu_permission(handle) && repository_->mark_executed(gpu_window_[handle.slot], sequence);
+}
+
+void HistoricalKvCaptureSession::close_gpu_window() noexcept {
+    // The caller proves completion; this method neither synchronizes CUDA nor
+    // frees Host payload. Lease release only makes background cleanup eligible.
+    gpu_window_.clear();
+    gpu_window_closed_ = true;
+}
+
 bool HistoricalKvCaptureSession::admit() noexcept {
     if (admitted_ || failed_ || finished_ || !reservation_ || runtime_.pending()) return false;
     if (domain_) {
@@ -283,7 +310,8 @@ void HistoricalKvCaptureSession::fail() noexcept {
 
 bool HistoricalKvCaptureSession::append(uint32_t tokens) {
     auto & remaining = input_ ? input_remaining_ : output_remaining_;
-    if (!admitted_ || failed_ || finished_ || !reservation_ || !producers_.empty() ||
+    if (!admitted_ || failed_ || finished_ || (gpu_window_enabled_ && gpu_window_closed_) ||
+        !reservation_ || !producers_.empty() ||
         tokens > remaining || (tokens && !appends_remaining_) ||
         runtime_.store().total_tokens() != expected_rows_ ||
         runtime_.store().block_count() != expected_blocks_) return false;
@@ -299,11 +327,22 @@ bool HistoricalKvCaptureSession::append(uint32_t tokens) {
             const auto index = static_cast<uint32_t>(handles_.size());
             const auto n = std::min(left, block_tokens);
             auto & payload = reservation_->ram->payload(index);
-            auto writer = repository_->begin_reserved_write(reservation_->ram->slots(),
+            HistoricalKvRepository::Lease gpu_execution;
+            auto writer = gpu_window_enabled_ ?
+                repository_->begin_reserved_write_with_gpu(reservation_->ram->slots(),
+                    (domain_ ? domain_->next_logical_id_ : uint64_t(expected_blocks_)) + i,
+                    position, n, birth_start_ + index, payload.payload_bytes(),
+                    std::move(callbacks_[index]), gpu_execution) :
+                repository_->begin_reserved_write(reservation_->ram->slots(),
                 (domain_ ? domain_->next_logical_id_ : uint64_t(expected_blocks_)) + i,
                 position, n, birth_start_ + index,
                 payload.payload_bytes(), std::move(callbacks_[index]));
             if (!writer) throw std::runtime_error("capture reserved writer admission failed");
+            if (gpu_execution) {
+                auto & held = gpu_window_[writer->handle().slot];
+                if (held) throw std::logic_error("capture GPU window slot already occupied");
+                held = std::move(gpu_execution);
+            }
             handles_.push_back(writer->handle());
             writers_.push_back(std::move(*writer));
             if (!storage_->install_payload(writers_.back(), handles_.back(), position, n, payload))
@@ -342,7 +381,8 @@ bool HistoricalKvCaptureSession::cancel() {
 }
 
 bool HistoricalKvCaptureSession::complete(bool cancelled) {
-    if (!admitted_ || failed_ || finished_ || (!cancelled && input_) || !producers_.empty() ||
+    if (!admitted_ || failed_ || finished_ || gpu_window_open() ||
+        (!cancelled && input_) || !producers_.empty() ||
         repository_->outstanding_operations()) return false;
     uint32_t live = 0;
     for (const auto handle : handles_) {

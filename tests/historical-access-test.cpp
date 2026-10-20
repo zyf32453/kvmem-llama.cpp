@@ -189,18 +189,19 @@ struct kvmem_transfer_test_access {
                 ubatches[i].data.get() != ws.data[ws.graph_retained_max + i].get()) return false;
         return true;
     }
-    static std::array<const void *, 16> execution_buffers(const llama_memory_kvmem & mem) {
+    static std::array<const void *, 17> execution_buffers(const llama_memory_kvmem & mem) {
         const auto & a = mem.historical_active_workspace_;
         const auto & c = mem.cell_workspace_;
         return {mem.historical_active_.get(), mem.historical_active_->handles().data(),
-                a.requested.data(), a.requested_ids.data(), a.remove_ids.data(), a.seen.data(),
+                a.requested.data(), a.requested_ids.data(), a.remove_ids.data(), a.seen.data(), a.used.data(),
                 c.slots.strm.data(), c.slots.idxs.data(), c.slots.idxs[0].data(),
                 c.positions.data(), c.logical.data(), c.n_seq_id.data(), c.seq_data.data(),
                 c.seq_id.data(), c.output.data(), c.tokens.data()};
     }
     static size_t execution_bytes(const llama_memory_kvmem & mem) {
         return mem.historical_active_workspace_.capacity_bytes() + mem.cell_workspace_.capacity_bytes() +
-            (mem.historical_active_ ? mem.historical_active_->capacity_bytes() : 0);
+            (mem.historical_active_ ? mem.historical_active_->capacity_bytes() : 0) +
+            (mem.historical_capture_ ? mem.historical_capture_->gpu_window_capacity_bytes() : 0);
     }
     static bool execution_storage_empty(const llama_memory_kvmem & mem) {
         return !mem.historical_active_ && !execution_bytes(mem);
@@ -216,7 +217,7 @@ struct kvmem_transfer_test_access {
                 mem.historical_batch_context_in_use_};
     }
     static size_t active_count(const llama_memory_kvmem & mem) {
-        return mem.historical_active_->handles().size();
+        return mem.historical_active_workspace_.used.size();
     }
     static bool layout(llama_memory_kvmem & mem) { return mem.layout_gpu_slots_by_orig_pos(); }
     static std::array<const void *, 10> layout_buffers(const llama_memory_kvmem & mem) {
@@ -405,8 +406,7 @@ struct kvmem_transfer_test_access {
         return mem.capture_tokens_used_ == tokens;
     }
     static std::vector<kvmem::HistoricalKvHandle> active_handles(const llama_memory_kvmem & mem) {
-        return mem.historical_active_ ? mem.historical_active_->handles() :
-                                        std::vector<kvmem::HistoricalKvHandle>{};
+        return mem.historical_active_workspace_.used;
     }
     static uint64_t deferred_slots(const llama_memory_kvmem & mem) {
         return mem.historical_gpu_deferred_;
@@ -2135,6 +2135,8 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     });
     uint32_t position = 0;
     execute(tokens.data(), 48);
+    require(!llama_kvmem_historical_capture_finish(),
+            "unfinished input was accepted as a completed request");
     require(kvmem_transfer_test_access::slot_fill_without_cpp_allocation(mem),
             "filling a prepared real-model slot list allocated C++ storage");
     if (check_capture_copy) {
@@ -2146,6 +2148,7 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         const auto repository = kvmem_transfer_test_access::capture_repository(mem);
         const auto first = mem.runtime().historical_shadow_directory().observe(0).handle;
         const auto last_use = repository->inspect(first)->last_use_seq;
+        const auto window_operations = repository->outstanding_operations();
         const llama_pos next_position = position;
         bool admitted = true;
         size_t selected = 0;
@@ -2153,14 +2156,14 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
             DenyCppAllocation guard;
             admitted = mem.begin_active_ubatch(1, &next_position) && admitted;
             selected = kvmem_transfer_test_access::active_count(mem);
-            // An abandoned plan releases permission without recording use.
+            // Abandoning this ubatch does not end the finite request window.
             mem.complete_active_ubatch();
         }
         require(admitted && selected && repository->inspect(first)->last_use_seq == last_use &&
-                !repository->outstanding_operations() &&
+                repository->outstanding_operations() == window_operations &&
                 kvmem_transfer_test_access::execution_buffers(mem) == execution_buffers,
-                "prepared model active allocated, retained a lease, or recorded abandoned execution");
-        std::puts("PASS prepared model active: 32 fresh admissions without C++ allocation, no abandoned LRU use, fixed storage");
+                "prepared model ubatch allocated, changed window leases, or recorded abandoned execution");
+        std::puts("PASS prepared model active: 32 ubatch plans without C++ allocation, stable finite window, no abandoned LRU use");
     }
     if (layout_case) {
         struct LayoutFault {
@@ -2321,15 +2324,17 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         const auto skips_before = mem.historical_active_skips();
         execute(tokens.data() + position, 32);
         position += 32;
-        require(mem.historical_active_skips() > skips_before,
-                "next real model active did not exclude the retired resident GPU block");
+        require(mem.historical_active_skips() == skips_before &&
+                repository->inspect(handle)->active && !repository->acquire_gpu(handle),
+                "continuous finite request lost its old permission or granted a new one");
         old_reader = {};
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!repository->reclaim_completed(handle, repository->repository_id()) &&
+        while (!repository->inspect(handle)->host_released &&
                 std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         gc.stop();
-        require(repository->reclaim_completed(handle, repository->repository_id()) &&
+        require(repository->inspect(handle)->host_released &&
+                !repository->reclaim_completed(handle, repository->repository_id()) &&
                 storage->allocated_payload_bytes() < bytes_before,
                 "running GC did not release retired real-model CPU payload");
     } else if (retirement == RetirementPoint::AfterSubmission ||
@@ -2348,27 +2353,30 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
             std::make_unique<kvmem::HistoricalKvLruPolicy>(repository->capacity()), cfg);
         gc.start();
         bool retired_after_submit = false, protected_old_execution = false;
-        bool observed_deferred_source = false;
+        bool observed_continued_window = false;
         int32_t retired_gpu_slot = -1;
         const auto skips_before = mem.historical_active_skips();
         const auto deferred_before = kvmem_transfer_test_access::deferred_slots(mem);
         const auto returned_before = kvmem_transfer_test_access::returned_slots(mem);
         kvmem_transfer_test_access::on_submission(mem, [&] {
             if (retired_after_submit) {
-                if (writing && !observed_deferred_source) {
-                    require(mem.store().blocks()[retired_during_request].gpu_slot < 0 &&
-                            kvmem_transfer_test_access::retired_source_held(mem, retired_gpu_slot),
-                            "next active did not exclude retired cells while retaining the exact D2H source slot");
-                    observed_deferred_source = true;
+                if (writing && !observed_continued_window) {
+                    require(mem.store().blocks()[retired_during_request].gpu_slot == retired_gpu_slot,
+                            "next ubatch revoked the finite producer window's GPU residency");
+                    observed_continued_window = true;
                 }
                 return;
             }
             auto handles = kvmem_transfer_test_access::active_handles(mem);
+            if (!writing) handles.erase(std::remove_if(handles.begin(), handles.end(), [&](auto handle) {
+                const auto meta = repository->inspect(handle);
+                return !meta || meta->life != kvmem::HistoricalKvLife::Live;
+            }), handles.end());
             const auto & directory = mem.runtime().historical_shadow_directory();
             if (writing) {
                 // Retire a current writer after its last GPU-producing graph
                 // was submitted, before harvest queues that graph's D2H.
-                // The following ubatch must run with this exact source held.
+                // The following ubatch remains in the original finite window.
                 handles.clear();
                 const auto end = kvmem_transfer_test_access::submitted_end(mem);
                 for (const auto & block : mem.store().blocks()) {
@@ -2439,22 +2447,23 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         position += chunk;
         kvmem_transfer_test_access::on_submission(mem, {});
         require(retired_after_submit && protected_old_execution &&
-                mem.historical_active_skips() > skips_before,
-                "submitted GPU operation lost its lease or next microbatch reused retired history");
-        if (writing) require(observed_deferred_source &&
-                kvmem_transfer_test_access::deferred_slots(mem) == deferred_before + 1 &&
-                kvmem_transfer_test_access::returned_slots(mem) == returned_before + 1 &&
+                mem.historical_active_skips() == skips_before,
+                "submitted finite window lost its permission at the next microbatch");
+        if (writing) require(observed_continued_window &&
+                kvmem_transfer_test_access::deferred_slots(mem) == deferred_before &&
+                kvmem_transfer_test_access::returned_slots(mem) == returned_before &&
                 !kvmem_transfer_test_access::retired_source_held(mem, retired_gpu_slot),
-                "exact retired GPU source was not deferred and returned once after ordinary D2H completion");
+                "retirement interfered with the continuing window's ordinary GPU source ownership");
         else require(kvmem_transfer_test_access::deferred_slots(mem) == deferred_before,
                      "retirement waited on an unrelated block's D2H sources");
         const auto handle = mem.runtime().historical_shadow_directory().observe(retired_during_request).handle;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!repository->reclaim_completed(handle, repository->repository_id()) &&
+        while (!repository->inspect(handle)->host_released &&
                 std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         gc.stop();
-        require(repository->reclaim_completed(handle, repository->repository_id()) &&
+        require(repository->inspect(handle)->host_released &&
+                !repository->reclaim_completed(handle, repository->repository_id()) &&
                 storage->allocated_payload_bytes() < bytes_before,
                 "submitted-operation retirement never released its CPU payload");
     } else {
@@ -2521,11 +2530,17 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
         return;
     }
     if (retirement != RetirementPoint::None) {
-        std::printf("PASS real model active retirement: type=%s, point=%s, skipped GPU-resident historical block=%u, request completed\n",
+        auto repository = kvmem_transfer_test_access::capture_repository(mem);
+        const auto handle = mem.runtime().historical_shadow_directory().observe(retired_during_request).handle;
+        require(!repository->outstanding_operations() &&
+                repository->try_reclaim(handle) == kvmem::HistoricalKvRepository::ReclaimResult::Complete &&
+                !repository->acquire_gpu(handle),
+                "finished finite window retained permission or a new window revived retired history");
+        std::printf("PASS real model finite-window retirement: type=%s, point=%s, CPU released before window end, no new permission for block=%u\n",
                 ggml_type_name(mem.type_k()),
                 retirement == RetirementPoint::BetweenCalls ? "between-calls" :
                 retirement == RetirementPoint::AfterSubmission ? "after-submission" :
-                                                               "writing-after-submission/deferred-source",
+                                                               "writing-after-submission",
                 retired_during_request);
         return;
     }

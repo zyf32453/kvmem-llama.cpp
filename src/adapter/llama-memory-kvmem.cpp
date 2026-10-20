@@ -1103,6 +1103,7 @@ llama_memory_kvmem::~llama_memory_kvmem() {
     } catch (...) {
         GGML_ABORT("KVMem teardown could not safely finish device work");
     }
+    close_historical_active_window();
     if (mtp_) {
         mtp_->detach_target();
         mtp_ = nullptr;
@@ -1215,6 +1216,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM or CPU cleanup capacity\n");
             return false;
         }
+        if (!session->prepare_gpu_window()) return false;
         auto cell_indices = kv_->prepare_cell_index_nodes(0);
         if (!cell_indices) {
             LLAMA_LOG_ERROR("historical capture: cell indexes are not fresh before admission\n");
@@ -1338,7 +1340,8 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
             (unsigned long long) historical_capture_->storage()->allocated_pinned_bytes(),
             (unsigned long long) input_tokens, (unsigned long long) max_output_tokens,
             (unsigned long long) max_appends, historical_capture_->metadata_remaining(),
-            historical_active_->capacity(), historical_active_->capacity_bytes() + historical_active_workspace_.capacity_bytes(),
+            historical_active_->capacity(), historical_active_->capacity_bytes() + historical_active_workspace_.capacity_bytes() +
+                historical_capture_->gpu_window_capacity_bytes(),
             cell_workspace_.capacity_bytes());
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_PAYLOAD_BUDGET begin used=%llu limit=%llu\n",
             (unsigned long long) cfg.payload_budget->used_bytes(),
@@ -1407,7 +1410,7 @@ bool llama_memory_kvmem::continue_historical_capture(uint32_t capacity, uint64_t
             ++attention_epoch_;
         }
         auto next = kvmem::HistoricalKvCaptureSession::try_prepare_next(historical_domain_, demand);
-        if (!next || !next->admit()) return false;
+        if (!next || !next->prepare_gpu_window() || !next->admit()) return false;
         // No new capture can appear while this serialized owner commits.
         if (!kvmem::FixedByteArena::reset_exclusive(capture_arena_)) std::terminate();
         old_request->capture = std::move(historical_capture_);
@@ -1434,7 +1437,7 @@ bool llama_memory_kvmem::reset_historical_capture(uint32_t capacity, uint64_t in
         return begin_historical_capture(capacity, input_tokens, max_output_tokens, max_appends);
     if (!historical_capture_ || capture_failed_ || historical_capture_->failed() ||
         historical_domain_->repository()->closed() || historical_batch_context_in_use_ ||
-        !historical_active_ || historical_active_->engaged() || runtime_->pending() ||
+        !historical_active_ || historical_ubatch_active_ || runtime_->pending() ||
         capacity != historical_domain_->repository()->capacity() ||
         input_tokens > capture_token_capacity_ || max_output_tokens > capture_token_capacity_ - input_tokens)
         return false;
@@ -1464,7 +1467,7 @@ bool llama_memory_kvmem::reset_historical_capture(uint32_t capacity, uint64_t in
         demand.max_accepted_output_tokens = max_output_tokens;
         demand.max_append_boundaries = max_appends;
         auto capture = kvmem::HistoricalKvCaptureSession::try_prepare_next(domain, demand);
-        if (!capture) return false;
+        if (!capture || !capture->prepare_gpu_window()) return false;
         auto active = kvmem::HistoricalKvActiveSet::prepare(domain->repository(), n_slots_);
         if (!capture->admit()) return false;
 
@@ -1472,6 +1475,7 @@ bool llama_memory_kvmem::reset_historical_capture(uint32_t capacity, uint64_t in
         // serialized owner now retires the entire old conversation namespace.
         // Existing CPU users retain it; none can obtain new execution rights.
         replacing = true;
+        close_historical_active_window();
         historical_capture_->fail();
         if (historical_gc_) historical_gc_->request_stop();
         auto & old = *historical_cleanup_;
@@ -1575,11 +1579,13 @@ bool llama_memory_kvmem::cancel_historical_capture() {
     try {
         harvest_flush();
         harvest_gpu_v_commit();
-        if (historical_batch_context_in_use_ || historical_active_->engaged() || runtime_->pending() ||
+        if (historical_batch_context_in_use_ || historical_ubatch_active_ || runtime_->pending() ||
             std::any_of(historical_gpu_readers_.begin(), historical_gpu_readers_.end(),
                         [](uint32_t n) { return n != 0; }) ||
             std::any_of(historical_gpu_retired_.begin(), historical_gpu_retired_.end(),
-                        [](uint8_t n) { return n != 0; }) || !historical_capture_->cancel()) return false;
+                        [](uint8_t n) { return n != 0; })) return false;
+        close_historical_active_window();
+        if (!historical_capture_->cancel()) return false;
         prefill_capture_ = false;
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE cancel rows=%u input_remaining=%llu unused_cleanup=queued\n",
             store_n_tokens(), (unsigned long long) historical_capture_->input_remaining());
@@ -1592,11 +1598,14 @@ bool llama_memory_kvmem::cancel_historical_capture() {
 }
 
 bool llama_memory_kvmem::finish_historical_capture() {
-    if (!historical_capture_) return false;
+    // A premature finish must not revoke a still-valid finite request window.
+    if (!historical_capture_ || capture_failed_ || historical_capture_->failed() ||
+        !historical_capture_->input_ended()) return false;
     try {
         harvest_flush();
         harvest_gpu_v_commit();
-        if (std::any_of(historical_gpu_readers_.begin(), historical_gpu_readers_.end(),
+        if (historical_batch_context_in_use_ || historical_ubatch_active_ || runtime_->pending() ||
+            std::any_of(historical_gpu_readers_.begin(), historical_gpu_readers_.end(),
                         [](uint32_t readers) { return readers != 0; }) ||
             std::any_of(historical_gpu_retired_.begin(), historical_gpu_retired_.end(),
                         [](uint8_t retired) { return retired != 0; }))
@@ -1604,6 +1613,7 @@ bool llama_memory_kvmem::finish_historical_capture() {
         // Request completion observes task leases only. The GC may keep
         // observing metadata or releasing payloads after this boundary;
         // joining it belongs to context shutdown, never to request finish.
+        close_historical_active_window();
         if (!historical_capture_->finish()) {
             LLAMA_LOG_ERROR("historical capture: incomplete publication or outstanding producers\n");
             return false;
@@ -3123,12 +3133,14 @@ bool llama_memory_kvmem::begin_active_ubatch(
     if (capture_failed_) return false;
     harvest_check_error();
     if (!historical_capture_) return true;
+    if (historical_capture_->failed()) return false;
     const auto reject = [&](const char * reason, uint32_t id = UINT32_MAX) {
         LLAMA_LOG_ERROR("historical active admission: %s block=%u pos=%d tokens=%u\n",
                 reason, id, logical_positions ? logical_positions[0] : -1, n_tokens);
         return false;
     };
-    if (!historical_active_ || historical_active_->engaged() || !n_tokens ||
+    if (!historical_active_ || historical_ubatch_active_ ||
+        !historical_capture_->gpu_window_open() || !n_tokens ||
         !logical_positions || logical_positions[0] < 0 ||
         uint64_t(logical_positions[0]) + n_tokens > uint64_t(INT32_MAX))
         return reject("invalid or overlapping active");
@@ -3146,27 +3158,41 @@ bool llama_memory_kvmem::begin_active_ubatch(
     auto & requested = workspace.requested;
     auto & requested_ids = workspace.requested_ids;
     auto & remove_ids = workspace.remove_ids;
+    auto & used = workspace.used;
+    const bool opening = !historical_active_->engaged();
     if (workspace.seen.size() != n_slots_ || requested.capacity() < n_slots_ ||
-        requested_ids.capacity() < n_slots_ || remove_ids.capacity() < n_slots_)
+        requested_ids.capacity() < n_slots_ || remove_ids.capacity() < n_slots_ || used.capacity() < n_slots_)
         return reject("missing active workspace");
-    requested.clear(); requested_ids.clear(); remove_ids.clear();
+    requested.clear(); requested_ids.clear(); remove_ids.clear(); used.clear();
     std::fill(workspace.seen.begin(), workspace.seen.end(), 0);
     for (const auto & block : store.blocks()) {
         if (block.gpu_slot < 0) continue;
         if (uint32_t(block.gpu_slot) >= n_slots_) return reject("invalid resident slot", block.block_id);
         if (!gpu_kv_already_resident(block.block_id)) continue;
         if (workspace.seen[block.gpu_slot]++) return reject("duplicate resident slot", block.block_id);
-        // The request's producer already owns the current write range. These
-        // newly applied cells are not an old historical view being reselected.
-        if (uint64_t(block.orig_pos_end()) > current_begin &&
-            uint64_t(block.orig_pos_start) < current_end) continue;
-        if (uint64_t(block.orig_pos_end()) > current_begin)
-            return reject("future resident span is not GPU-complete history", block.block_id);
         const auto observation = directory.observe(block.block_id);
         if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Unmanaged)
             return reject("unmanaged resident history", block.block_id);
         if (observation.state == kvmem::HistoricalKvShadowDirectory::State::Bound) {
+            // A finite request is one GPU execution window. Its producer
+            // admits new spans before publishing Writing; already selected
+            // history keeps its old permission across ubatches. Neither
+            // permission grants future Host reads or survives request finish.
+            const bool producer = historical_capture_->has_gpu_permission(observation.handle);
+            if (producer || historical_active_->contains(observation.handle)) {
+                if (uint64_t(block.orig_pos_start) >= current_end)
+                    return reject("future resident span is not in this submission", block.block_id);
+                if (!producer && uint64_t(block.orig_pos_end()) > current_begin)
+                    return reject("old history overlaps producer range", block.block_id);
+                used.push_back(observation.handle);
+                continue;
+            }
+            if (uint64_t(block.orig_pos_end()) > current_begin)
+                return reject("producer span has no window permission", block.block_id);
             const auto meta = repository->inspect(observation.handle);
+            if (!opening && meta && (meta->life == kvmem::HistoricalKvLife::Live ||
+                                      meta->life == kvmem::HistoricalKvLife::Writing))
+                return reject("new GPU selection requires a request boundary", block.block_id);
             if (meta && meta->life == kvmem::HistoricalKvLife::Live) {
                 // This complete resident GPU allocation covers this ubatch;
                 // it performs no future Host read or H2D of this old span.
@@ -3184,22 +3210,14 @@ bool llama_memory_kvmem::begin_active_ubatch(
         }
         remove_ids.push_back(block.block_id);
     }
-    auto admitted = historical_active_->try_acquire(requested);
-    if (!admitted) return reject("active set acquire failed");
-    struct ReleaseOnFailure {
-        kvmem::HistoricalKvActiveSet & active;
-        bool keep = false;
-        ~ReleaseOnFailure() { if (!keep) active.release(); }
-    } release_on_failure{*historical_active_};
-    const auto & handles = historical_active_->handles();
+    if (opening && !historical_active_->try_acquire(requested))
+        return reject("active set acquire failed");
+    // On later failure keep permissions until checked device teardown. They
+    // may cover earlier submissions in this same finite window.
     for (size_t i = 0; i < requested.size(); ++i) {
         const auto target = requested[i].handle;
-        const bool permitted = std::any_of(handles.begin(), handles.end(),
-            [&](kvmem::HistoricalKvHandle handle) {
-                return handle.incarnation == target.incarnation && handle.slot == target.slot &&
-                       handle.generation == target.generation;
-            });
-        if (!permitted) remove_ids.push_back(requested_ids[i]);
+        if (historical_active_->contains(target)) used.push_back(target);
+        else remove_ids.push_back(requested_ids[i]);
     }
     for (uint32_t id : remove_ids) {
         const auto block = store.blocks()[id];
@@ -3233,19 +3251,38 @@ bool llama_memory_kvmem::begin_active_ubatch(
             kvmem_diag("KVMEM_TRACE historical_position_detach block=%u logical=%llu\n",
                 id, static_cast<unsigned long long>(block.logical_id));
     }
-    release_on_failure.keep = true;
+    historical_ubatch_active_ = true;
+    if (opening && trace_) kvmem_diag("KVMEM_TRACE historical_active_window_begin repository=%llu window=%llu rows=%u\n",
+        (unsigned long long) repository->repository_id(),
+        (unsigned long long) historical_capture_->gpu_window_id(), store_n_tokens());
     return true;
 }
 
 void llama_memory_kvmem::mark_active_submission() {
-    if (historical_active_ && historical_active_->engaged() &&
-        !historical_active_->mark_execution_submitted(historical_capture_->next_use_sequence()))
-        throw std::runtime_error("historical active submission could not record LRU use");
+    if (historical_ubatch_active_) {
+        const auto sequence = historical_capture_->next_use_sequence();
+        for (const auto handle : historical_active_workspace_.used)
+            if (!historical_capture_->mark_gpu_execution(handle, sequence) &&
+                !historical_active_->mark_execution_submitted(handle, sequence))
+                throw std::runtime_error("historical active submission could not record LRU use");
+    }
     if (historical_submission_test_hook_) historical_submission_test_hook_();
 }
 
 void llama_memory_kvmem::complete_active_ubatch() noexcept {
+    historical_ubatch_active_ = false;
+    historical_active_workspace_.used.clear();
+}
+
+void llama_memory_kvmem::close_historical_active_window() noexcept {
+    if (historical_capture_ && historical_capture_->gpu_window_open()) {
+        if (trace_) kvmem_diag("KVMEM_TRACE historical_active_window_end repository=%llu window=%llu rows=%u\n",
+            (unsigned long long) historical_capture_->repository()->repository_id(),
+            (unsigned long long) historical_capture_->gpu_window_id(), store_n_tokens());
+        historical_capture_->close_gpu_window();
+    }
     if (historical_active_) historical_active_->release();
+    complete_active_ubatch();
 }
 
 llama_memory_context_ptr llama_memory_kvmem::init_batch(

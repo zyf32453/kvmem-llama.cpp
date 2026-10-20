@@ -289,17 +289,23 @@ private:
     } layout_workspace_;
     struct HistoricalActiveWorkspace {
         std::vector<kvmem::HistoricalKvActiveRequest> requested;
+        std::vector<kvmem::HistoricalKvHandle> used;
         std::vector<uint32_t> requested_ids, remove_ids;
         std::vector<uint8_t> seen;
         void reserve(size_t slots) {
             requested.reserve(slots); requested_ids.reserve(slots); remove_ids.reserve(slots);
+            used.reserve(slots);
             seen.resize(slots);
         }
         size_t capacity_bytes() const noexcept {
             return requested.capacity() * sizeof(kvmem::HistoricalKvActiveRequest) +
+                used.capacity() * sizeof(kvmem::HistoricalKvHandle) +
                 (requested_ids.capacity() + remove_ids.capacity()) * sizeof(uint32_t) + seen.capacity();
         }
     } historical_active_workspace_;
+    bool historical_ubatch_active_ = false;
+    // Call only after the ordinary device owner confirms completion.
+    void close_historical_active_window() noexcept;
     // Scratch for rebuilding the cells of one GPU block. Historical requests
     // also reserve upstream index nodes; full graph ubatches remain separate.
     struct CellWorkspace {

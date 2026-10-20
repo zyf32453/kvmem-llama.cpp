@@ -155,6 +155,16 @@ public:
         Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
         uint32_t valid_tokens, uint64_t birth_seq,
         uint64_t payload_bytes, ResourceRelease release);
+    // Admit the original finite producer window's GPU-only execution right
+    // together with its writer, before Writing becomes visible to retirement.
+    // This does NOT assert that GPU data is ready: the owner must order all
+    // producer writes before reads and retain residency for each submitted use.
+    // No Host read/H2D right is granted. gpu_execution must initially be empty;
+    // failure preserves both it and the reservation.
+    std::optional<Lease> begin_reserved_write_with_gpu(
+        Reservation & reservation, uint64_t logical_id, uint64_t original_begin,
+        uint32_t valid_tokens, uint64_t birth_seq, uint64_t payload_bytes,
+        ResourceRelease release, Lease & gpu_execution);
     // One atomic phase-bit update under the original writer: only Writing
     // becomes Live. Retirement is sticky and refcount churn cannot postpone
     // the last producer's completion publication.
@@ -268,7 +278,7 @@ private:
     std::optional<Lease> begin_reserved_write_impl(Reservation & reservation,
         uint64_t logical_id, uint64_t original_begin, uint32_t valid_tokens,
         uint64_t birth_seq, uint64_t payload_bytes,
-        ReleaseCallback release, ResourceRelease resources);
+        ReleaseCallback release, ResourceRelease resources, Lease * gpu_execution = nullptr);
     bool claim_gc_owner() noexcept;
     void release_gc_owner() noexcept;
     std::optional<Lease> acquire_kind(HistoricalKvHandle, LeaseKind, uint32_t allowed_phases);

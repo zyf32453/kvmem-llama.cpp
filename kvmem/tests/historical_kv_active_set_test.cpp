@@ -250,7 +250,29 @@ static void test_duplicate_resource_requests_keep_host_dependency() {
           "mixed-resource operation did not release after completion");
 }
 
+static void test_window_records_only_submitted_residents() {
+    auto repository = std::make_shared<HistoricalKvRepository>(2);
+    std::atomic<unsigned> released{0};
+    const auto a = live_block(repository, 0, released);
+    const auto b = live_block(repository, 1, released);
+    auto active = HistoricalKvActiveSet::acquire(repository, {{a, true, false, true}, {b, true, false, true}});
+    check(bool(active), "finite GPU selection failed");
+    repository->retire(a);
+    allocation_budget = 0;
+    const auto recorded = active.active->mark_execution_submitted(a, 30);
+    const auto retained = active.active->contains(a);
+    allocation_budget = -1;
+    check(recorded && retained && repository->inspect(a)->last_use_seq == 30 &&
+          repository->inspect(b)->last_use_seq == 1,
+          "window touched a resident absent from the actual submission");
+    active.active->release();
+    check(!active.active->contains(a) && !active.active->mark_execution_submitted(a, 31) &&
+          !HistoricalKvActiveSet::acquire(repository, {{a, true, false, true}}),
+          "next window reused a retired permission");
+}
+
 int main() try {
+    test_window_records_only_submitted_residents();
     test_duplicate_resource_requests_keep_host_dependency();
     test_preview_then_retire_then_new_active();
     test_old_active_finishes_after_retirement();
