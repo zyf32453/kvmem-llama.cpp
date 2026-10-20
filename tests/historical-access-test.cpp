@@ -2863,6 +2863,126 @@ static void check_reset_request(llama_context * ctx, llama_model * model, llama_
     require(llama_kvmem_historical_capture_finish(), "replacement after shared quota release failed");
     std::printf("PASS real reset payload quota: %u retained old domains, limit=%llu, refused before reset, old data readable, background credit returned, new request completed\n",
         accepted_resets, (unsigned long long) budget->limit_bytes());
+
+    // Payload quota alone cannot bound old runtimes, directories or stopped
+    // managers: their Host payload can already be gone while a policy call
+    // still owns the old domain. Hold real GC workers after physical release,
+    // then exhaust the production cleanup tickets through actual resets.
+    auto & cleanup = kvmem::HistoricalKvCleanup::process();
+    const auto settle_cleanup = [&](uint32_t occupied) {
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (cleanup.occupied() != occupied && std::chrono::steady_clock::now() < end)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        require(cleanup.occupied() == occupied, "reset metadata fixture cleanup tickets did not settle");
+    };
+    settle_cleanup(2); // Current domain metadata and eventual adapter disposal.
+    const uint32_t cleanup_capacity = cleanup.capacity();
+    require(cleanup_capacity >= 5, "cleanup capacity too small for reset metadata fixture");
+    const uint32_t expected_resets = (cleanup_capacity - 3) / 2;
+    const auto payload_refusals = budget->refusals();
+    const auto table_bytes = mem.store().allocated_bytes();
+    const auto row_capacity = kvmem_transfer_test_access::row_capacity(mem);
+    struct RetainedDomain {
+        std::weak_ptr<kvmem::HistoricalKvRepository> repository;
+        std::weak_ptr<kvmem::HistoricalKvRawStore> storage;
+        const kvmem::KvMemRuntime * runtime;
+    };
+    std::vector<RetainedDomain> retained_domains;
+    std::vector<std::shared_ptr<HistoricalPolicyGate>> gates;
+    retained_domains.reserve(cleanup_capacity);
+    gates.reserve(cleanup_capacity);
+    struct UnpauseAll {
+        std::vector<std::shared_ptr<HistoricalPolicyGate>> & gates;
+        ~UnpauseAll() { for (const auto & gate : gates) gate->open(); }
+    } unpause_all{gates};
+    unsigned metadata_resets = 0;
+    bool cleanup_refused = false;
+    for (uint32_t attempt = 0; attempt < cleanup_capacity; ++attempt) {
+        settle_cleanup(2 * (metadata_resets + 1));
+        auto repository = kvmem_transfer_test_access::capture_repository(mem);
+        auto storage = kvmem_transfer_test_access::capture_storage(mem);
+        const auto handle = mem.runtime().historical_shadow_directory().observe(0).handle;
+        require(repository->retire(handle) == kvmem::HistoricalKvRepository::RetireResult::Committed,
+                "reset metadata fixture failed to retire its finished block");
+        auto gate = std::make_shared<HistoricalPolicyGate>();
+        gates.push_back(gate);
+        // Reclamation precedes the policy step in the real manager. The
+        // barrier retains CPU ownership, not payload, and calls no CUDA API.
+        kvmem_transfer_test_access::install_gc_policy(mem, std::make_unique<PausedHistoricalPolicy>(gate));
+        require(gate->entered_signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready &&
+                repository->reclaim_completed(handle, repository->repository_id()) &&
+                storage->allocated_payload_bytes() == 0 && budget->used_bytes() == 0,
+                "reset metadata fixture paused before physical payload release");
+        retained_domains.push_back({repository, storage, &mem.runtime()});
+        require(retained_domains.size() < cleanup_capacity &&
+                budget->refusals() == payload_refusals,
+                "metadata backlog unexpectedly consumed the payload quota");
+        // If a regression joins a paused worker, release the gates after a
+        // bounded wait and fail the test, instead of hanging the test process.
+        std::promise<void> reset_returned;
+        auto reset_signal = reset_returned.get_future();
+        auto watchdog = std::async(std::launch::async,
+            [held_gates = gates, signal = std::move(reset_signal)]() mutable {
+                const bool no_wait = signal.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                if (!no_wait) for (const auto & held : held_gates) held->open();
+                return no_wait;
+            });
+        const bool admitted = llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 0, 1);
+        reset_returned.set_value();
+        require(watchdog.get(), "reset waited for an old metadata-only GC worker");
+        if (!admitted) {
+            require(metadata_resets == expected_resets &&
+                    cleanup.occupied() == 2 * (metadata_resets + 1) &&
+                    cleanup_capacity - cleanup.occupied() < 3 &&
+                    budget->used_bytes() == 0 && budget->refusals() == payload_refusals &&
+                    kvmem_transfer_test_access::capture_repository(mem) == repository &&
+                    !repository->closed() && mem.store_n_tokens() == 32 &&
+                    repository->reclaim_completed(handle, repository->repository_id()),
+                    "metadata-capacity refusal leaked tickets, spent payload credit, or replaced the current domain");
+            cleanup_refused = true;
+            break;
+        }
+        ++metadata_resets;
+        require(repository->closed() &&
+                kvmem_transfer_test_access::capture_repository(mem) != repository &&
+                kvmem_transfer_test_access::row_buffer(mem) == rows &&
+                kvmem_transfer_test_access::row_capacity(mem) == row_capacity &&
+                kvmem_transfer_test_access::capture_arena(mem).get() == arena &&
+                mem.store().allocated_bytes() == table_bytes,
+                "metadata backlog changed fixed workspace or lost old/new domain isolation");
+        decode(32);
+        mem.end_prefill_capture();
+        require(llama_kvmem_historical_capture_finish(),
+                "admitted request could not finish while all old GC workers were paused");
+    }
+    require(cleanup_refused && retained_domains.size() == expected_resets + 1,
+            "zero-payload old domains bypassed the cleanup capacity bound");
+    for (const auto & old : retained_domains) {
+        // Every policy is still paused, so its owner keeps these runtimes
+        // alive. Do not dereference these pointers after opening the gates.
+        require(!old.repository.expired() && !old.storage.expired() &&
+                old.runtime->store().allocated_bytes() == table_bytes &&
+                old.runtime->store().block_count() == 1 &&
+                old.runtime->historical_shadow_directory().size() == 1,
+                "metadata-only old domain lost ownership or grew its bounded block table");
+    }
+    const auto peak_cleanup = cleanup.occupied();
+    for (const auto & gate : gates) gate->open();
+    settle_cleanup(2);
+    for (size_t i = 0; i + 1 < retained_domains.size(); ++i)
+        require(retained_domains[i].repository.expired() && retained_domains[i].storage.expired(),
+                "unpaused old metadata domain was not physically destroyed");
+    require(llama_kvmem_historical_capture_reset_begin(ctx, 6, 32, 0, 1),
+            "physical metadata cleanup did not restore request admission");
+    decode(32);
+    mem.end_prefill_capture();
+    require(llama_kvmem_historical_capture_finish(), "request after metadata-capacity recovery failed");
+    settle_cleanup(2);
+    require(retained_domains.back().repository.expired() && retained_domains.back().storage.expired() &&
+            budget->used_bytes() == unit,
+            "metadata-capacity recovery retained the old current domain or lost payload accounting");
+    std::printf("PASS real reset metadata bound: old_domains=%u current_domains=1 held_gc_workers=%zu cleanup=%u/%u payload_at_refusal=0 table_bytes_per_domain=%zu payload_refusals_unchanged=1 rollback_preserved=1 old_domains_drained=%zu recovered_request=1\n",
+        metadata_resets, retained_domains.size(), peak_cleanup, cleanup_capacity, table_bytes, retained_domains.size());
 }
 
 static void check_repeated_requests(llama_context * ctx, llama_model * model,

@@ -62,6 +62,8 @@
 
 **最新宿主检测诊断：** 在独立 ASan/UBSan 构建上，使用进程级 CUDA 兼容参数完成原失败前缀的 8 个场景、34 次解码，未报告 Host 访问或未定义行为错误。进程仍因两个共 300 bytes 的 `libcuda.so.1` 泄漏报告退出 1；无模型、无 KVMem 的 CUDA 小对照也报告完全相同的大小和库内分配位置。因此不能写成 sanitizer 全通过，也未关闭原始设备错误。没有修改 Windows/驱动设置或抑制泄漏检查，详见文末新增记录。
 
+**最新跨域容量验收：** 新增真实模型 reset 用例，在实际 payload 全部释放后暂停 GC worker，使旧 runtime/目录/manager 继续存在。30 个旧域加当前域占用 62/64 个清理 ticket 时，下一次 reset 在接纳前拒绝；payload 为 0、其拒绝计数未增加，当前域未被替换。恢复 worker 后旧域全部销毁、下一请求完成。该用例验证了清理容量独立限制零 payload 的旧域积累；产品库保持不变，整进程资源上界仍待完成。
+
 ## 2026-10-17 阶段进度
 
 在早期 `KvMemGc` 移植之外，已增加按 `(slot, generation)` 管理块生命周期的 `HistoricalKvRepository`、独立的 `HistoricalKvGc` 管理器和 `HistoricalKvPolicy` 接口。LRU 是一个可替换策略，管理器负责扫描、退休、等待已有 lease、重试及触发物理释放。`HistoricalKvRawStore` 提供按句柄存储的独立验证实现；`HistoricalKvActiveSet` 为每次操作重新取得执行许可，跳过已退休的可选块，必选块缺失时撤销整次申请，并在实际模型计算成功提交时记录最近使用时间。该调用现已接到受限 recency CLI 请求；server 和其它入口尚未覆盖。
@@ -998,8 +1000,8 @@ bash scripts/check_tsan_runtime.sh "$out/toolchain/usr/bin/g++-12" "$out/preflig
 - **历史 K/V payload：** `HistoricalKvPayloadBudget` 在实际 vector 分配前扣账，底层 `deallocate` 完成后才还账；准备失败也经 allocator 退账。令 `N` 为历史槽位数、`P` 为一个 full-slot 的各层 K/V 容量，当前 recency 无 Mean-K payload，额度为 `2 × N × P`。reset 复用同一预算对象。本次 `N=8`、`P=3,145,728 bytes`，新旧域及私有预约共用 **48 MiB**，不是每次 reset 重新获得 48 MiB。每请求最多 67 token、5 次追加，按碎片上界准备 6 槽，初始实际取得 **18 MiB**；未释放的旧 payload 仍占额度。该账本不含暂存、metadata 或模型内存。
 - **搬运与重排空间：** `kvmem_capture_workspace_reserve` 在首个请求提交前实际分配固定 slab、描述符、事件和 layout scratch，失败撤回，接纳后禁止扩容。初始化日志记录 GPU workspace **34,275,328 bytes**，其中已包含 layout 的 **458,752 bytes**，不能重复相加。D2H 的两个 page-locked slab 合计 **64 MiB**：即使 `historical_pinned_bytes=0`，这份执行暂存仍存在。另有 Host 队列 **2,424,832 bytes**、同步 fallback **32,768 bytes**、stage-in K/V buffer **65,536 bytes**。这些执行空间跨 reset 复用，与被 GC 删除的历史数据属于不同分配。
 - **有限请求记录与块目录：** 当前域的 repository/payload-store 槽数组、dense block 表及位置索引按 `N` 准备；目录 map 节点在私有预约与已安装目录之间转移，墓碑原位复用。manager 的 round、observation、retry、代际数组和 LRU candidate 数量受仓库容量限制，decision buffer 受 batch 上限限制。仍须核算实际 capacity 与控制块开销，不能只统计有效目录项。日志中的 block 表 **1,312 bytes**、256 行位置容量、capture arena **47,104 bytes**，只覆盖其中列出的项目。
-- **旧域与后台清理：** `HistoricalKvCleanup::process()` 的 64 个 ticket 槽位在接纳前取得，物理析构后返还；新域、请求预约、交接和最终清理共用它。64 是任务容量，不能写成“允许 64 个完整域”。旧 reader 持续占用时，payload 预算或 ticket 不足可以令后续请求在接纳前失败；退休和提交清理都不等于释放。旧域的 runtime、repository、目录、manager 及线程/栈等仍须加入跨域资源总账。
-- **后端与进程总量：** 本轮初始化的输出 buffer 为 **38,895,616 bytes**，10 个图结果的 metadata 合计 **19,778,080 bytes**；测试检查其身份和容量不变。这不覆盖整个 scheduler、CUDA 图/驱动、模型映射、allocator 保留量及所有构图临时容器。后端 buffer 未经归属核对不能直接相加为 Host RSS，普通 C++ 累计分配字节也不是当前保留内存。
+- **旧域与后台清理：** `HistoricalKvCleanup::process()` 的 64 个 ticket 槽位在接纳前取得，物理析构后返还；新域、请求预约、交接和最终清理共用它。64 是任务容量，不能写成“允许 64 个完整域”。旧 reader 持续占用时，payload 预算或 ticket 不足可以令后续请求在接纳前失败；退休和提交清理都不等于释放。下文零 payload 的真实模型故障注入进一步验证：有限请求完成、unused 清理结清后，每个保留域仍占 metadata 与最终 CPU disposal 两个 ticket；新 reset 需要同时取得三个 ticket。此轨迹最多保留 30 个旧域加当前域，62/64 时下一次 reset 拒绝。构造未接纳的新域时还会短暂存在私有对象，须计入峰值；旧域的 runtime、repository、目录、manager 及线程/栈的完整字节总账仍未完成。
+- **后端与进程总量：** 本轮初始化的输出 buffer 为 **38,895,616 bytes**，10 个图结果的 metadata 合计 **19,778,080 bytes**；测试检查其身份和容量不变。这不覆盖整个 scheduler、CUDA 图/驱动、模型映射、allocator 保留量及所有构图临时容器。进一步只读核对当前 ggml CUDA 后端，`cuda_graphs` 以首个 tensor 地址为键，访问时每 5 秒扫描、删除至少 10 秒未使用的条目；没有直接设置条目数上限。10 个 `llm_graph_result` 不能直接换算成 10 个 CUDA graph 实例，仍需核对实际键集合与图内资源。后端 buffer 未经归属核对不能直接相加为 Host RSS，普通 C++ 累计分配字节也不是当前保留内存。
 
 当前可分别说明 payload 额度、若干 workspace 的实际预约和固定容器的结构上限，**尚不能给出整进程、全部新旧域及后端资源的完整数值上界**。继续补齐账目和失败路径，通用推理框架全面零分配改造按上文约定暂不扩展。`host_bytes()`/对外 store 字节接口只是约定范围的占用统计，不能替代这项完整验收。
 
@@ -1044,6 +1046,25 @@ kvmem-historical-access-test MODEL --scenario-range 0 7 1
 - `evidence.tar.gz`：独立构建、原失败、编译参数、源文件与动态库指纹；SHA-256 为 `a7c855187372d3b677866ae9886ff10f44c2ae534dfd2511a12b1512340b0ad4`。
 - `compatible-evidence.tar.gz`：无模型对照、阳性对照和兼容参数下的模型完整日志；SHA-256 为 `8844da57efa36482829a3fd2a0d417bb29f5003c423841fbc3ed23d9f4db3330`。
 - `summary.json` 与 `compatible-summary.json` 保存原始退出码、场景/阶段顺序和每项泄漏栈比较。远程原目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-adapter-host-asan-f59a47c`，兼容运行与小对照分别位于同级 `historical-adapter-host-asan-compatible-f59a47c` / `historical-cuda-asan-runtime-control`。
+
+### 零 payload 旧域的清理容量验收（2026-10-20）
+
+此前 reset 的共享预算用例保留真实 Host reader，主要验证旧 K/V payload 未释放时的 36 MiB 额度；它不能单独证明“payload 已经归还，但旧 runtime/目录/manager 尚未退出”这一分支的上界。本轮在 `tests/historical-access-test.cpp` 的 `--reset` 路径增加专门用例，使用真实模型生成每个域的 32-token K/V、完成请求，然后显式退休该块。真实 GC worker 先完成物理回收，再停在受控的策略调用屏障；这一暂停仅用于故障注入，模拟 worker 迟迟未退出，不是新增生产策略。
+
+测试使用既有 6 个历史槽、32-token 块、每请求 32-token 输入与 0-token 输出，保留初始 36 MiB 共享 payload 额度。每轮确认 payload 已为零，再通过公开 reset API 接纳新域并完成一次真实 decode。旧 worker 全部保持暂停，旧 runtime/目录/存储 owner 的弱引用必须仍存活；测试最后逐一检查旧 runtime 的块表容量没有变化、每个目录只有本轮的一个记录。容量拒绝还有 5 秒 watchdog：若 reset 错误地等待旧 worker，测试先打开屏障以避免无限挂起，再判定失败。
+
+真实模型运行退出 0，得到以下结果：
+
+- **独立容量限制：** 30 次 reset 成功后，30 个旧域加 1 个当前域、31 个暂停的 GC worker 共占 **62/64** 个 cleanup ticket；所有历史 payload 此时为 **0**。下一次 reset 无法取得完整的三个新 ticket，在接纳前拒绝，私有准备取得的名额被撤回。共享 payload 的 refusal 计数保持原值，证明这次拒绝由清理容量触发。
+- **拒绝不替换当前域：** repository 身份、未关闭状态和 32-token 位置保持不变，已回收的代数仍保持回收状态。已接纳的新请求均在旧 worker 继续暂停时完成，测试没有用前台等待 GC 来获得容量。
+- **后台结清与恢复：** 打开屏障后，30 个旧域的 repository/storage 弱引用全部过期，清理占用恢复为当前域的两个 ticket。随后 reset 再次接纳、旧的当前域也销毁，新请求 decode/finish 成功；共验证 31 个被保留域最终结清。新当前域的 payload 为一个 full-slot，3,145,728 bytes。
+- **固定结构：** 所有被保留域的 store 块表统计均为 **1,096 bytes**，适配器的 row buffer、行容量与 capture arena 复用原分配。1,096 bytes 只代表该 store 统计范围，不能当作整个域的全部内存；本用例不证明 CUDA/驱动、线程栈、allocator 或整进程 RSS 的完整字节上界。
+
+数量限制也与源码一致：在这一请求已完成且 unused 清理结清的轨迹中，一个域持有 metadata 与最终 CPU disposal 两个 ticket；创建下一个域需要 CPU disposal、domain metadata、request reservation 共三个。当前容量为 64，62 已占用时剩余两个不足以完整接纳新域。准备期间的私有 runtime/目录会短暂共存，失败后同步撤回；这个瞬时量不等于新增一个已接纳域。该结论针对当前串行 reset 协议，不能将 31 当作全部入口/任意任务组合的通用会话配置上限。
+
+受测产品为 `30e1e8b`：编译前后核对 `libllama`、`libkvmem` 和四个 ggml 库的 SHA-256，六个产品库均未改变，仅更新测试程序。原有 reset/cancel、Host reader 隔离、共享 payload 额度、占用统计与 backend guard 检查仍通过。新增测试源码 SHA-256 为 `748b0643fd422ca0e8665ee0fa32f41a6270d8ed6a9e477dcb955aed847774e9`；二进制为 `4481cf6b8a67cfffbc91bbb0dd400c02a98d4a4b439c1b874ae79d06b93dbe3a`。
+
+原始日志、旧/新测试源文件、产品库核对和实际命令保存在 `artifacts/historical-reset-metadata-bound/evidence.tar.gz`，SHA-256 为 `bbcce05543a0cf4378bee488f2088acfec5308233b864c3aa19940cbe28517fc`；`summary.json` 保存本地复核结果。远程目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-reset-metadata-bound-30e1e8b`。本轮补齐了一条资源边界证据，没有改变生产 GC 行为，也未关闭实际任务质量或原始 CUDA 故障。
 
 ## 剩余生产接入与完整验收
 
