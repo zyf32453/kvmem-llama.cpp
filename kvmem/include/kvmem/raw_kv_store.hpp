@@ -148,6 +148,7 @@ public:
         HistoricalKvHandle handle, uint32_t block_id) noexcept;
 
 private:
+    friend struct RawKvStoreTestAccess;
     struct LayerBlk {
         uint32_t n_tokens = 0;
         uint32_t k_gpu_tokens = 0;

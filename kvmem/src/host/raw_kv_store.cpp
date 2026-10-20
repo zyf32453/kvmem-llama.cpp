@@ -154,7 +154,12 @@ RawKvStore::RawKvStore(RawKvStoreConfig cfg) : cfg_(std::move(cfg)) {
 }
 
 RawKvStore::~RawKvStore() {
-    stop_io_.store(true, std::memory_order_release);
+    {
+        // Publish under the waiter's mutex. Atomic stop alone does not prevent
+        // notification between io_loop's false predicate and its actual wait.
+        std::lock_guard<std::mutex> lock(mu_);
+        stop_io_.store(true, std::memory_order_release);
+    }
     cv_.notify_all();
     if (io_thread_.joinable()) {
         io_thread_.join();

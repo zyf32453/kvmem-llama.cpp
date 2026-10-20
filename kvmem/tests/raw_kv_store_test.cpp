@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <vector>
 
@@ -20,6 +21,58 @@
             std::abort();                                                      \
         }                                                                      \
     } while (0)
+
+namespace kvmem {
+struct RawKvStoreTestAccess {
+    static void check_shutdown_wakeup() {
+        using namespace std::chrono_literals;
+        // Install a controlled waiter in place of disk I/O. It uses the real
+        // store mutex, condition variable and stop flag, so the destructor's
+        // publication/notification protocol is exercised without disk timing.
+        auto store = std::make_unique<RawKvStore>(RawKvStoreConfig{});
+        auto * raw = store.get();
+        std::promise<void> checked_stop, allow_wait, closing;
+        auto resume = allow_wait.get_future();
+        bool notified = false;
+        raw->io_thread_ = std::thread([&] {
+            std::unique_lock<std::mutex> lock(raw->mu_);
+            CHECK(!raw->stop_io_.load(std::memory_order_acquire));
+            checked_stop.set_value();
+            resume.wait(); // Pause after the false predicate, before parking.
+            // Bound the test if the shutdown notification is lost. The actual
+            // io_loop uses an unbounded condition-variable wait here.
+            const auto deadline = std::chrono::steady_clock::now() + 1s;
+            std::cv_status status;
+            do {
+                status = raw->cv_.wait_until(lock, deadline);
+            } while (status != std::cv_status::timeout &&
+                     !raw->stop_io_.load(std::memory_order_acquire));
+            notified = status == std::cv_status::no_timeout;
+            CHECK(raw->stop_io_.load(std::memory_order_acquire));
+        });
+        CHECK(checked_stop.get_future().wait_for(2s) == std::future_status::ready);
+        auto shutdown = std::async(std::launch::async, [&] {
+            closing.set_value();
+            store.reset();
+        });
+        closing.get_future().wait();
+        const auto deadline = std::chrono::steady_clock::now() + 50ms;
+        while (!raw->stop_io_.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        // The waiter still owns mu_: stop must not yet be published.
+        const bool published_before_wait = raw->stop_io_.load(std::memory_order_acquire);
+        allow_wait.set_value();
+        CHECK(shutdown.wait_for(2s) == std::future_status::ready);
+        shutdown.get();
+        if (published_before_wait || !notified) {
+            std::fprintf(stderr, "shutdown handoff: early_stop=%d notified=%d\n",
+                         int(published_before_wait), int(notified));
+        }
+        CHECK(!published_before_wait);
+        CHECK(notified);
+    }
+};
+} // namespace kvmem
 
 // Compare lazy normalization with the previous ordered FP32 sum + cached mean.
 // Cancellation and non-power-of-two tails catch mean-to-sum reconstruction.
@@ -187,6 +240,7 @@ static void test_store_bytes() {
 }
 
 int main() {
+    kvmem::RawKvStoreTestAccess::check_shutdown_wakeup();
     test_sum_only(32);
     test_sum_only(128);
     test_sibling_stores_are_independent();

@@ -52,7 +52,7 @@
 
 依据实际使用需要，每次只增加一个策略或配置维度，独立冻结和验收。后续仍保留导师方案要求的冗余策略实验，以及所需的检索/重选入口、checkpoint/rollback、pinned/NVMe、MTP、混合模型、多 lane 等工作；不默认把所有可能组合都实现一遍。增加策略仍只修改策略及特征接口，不改回收生命周期协议。
 
-**当前位置（2026-10-20）：** 首批范围已冻结；首次长测暴露的采集队列残留已修复，确定性对照、reset 共享预算和两条连续请求回归均通过。修复后的一小时同域长测已完成且退出 0：11,448 次请求、45,792 个块经过 8 个槽位；服务器 off/shadow/delete 和原生模板生命周期回归也已通过。**真实编码压力对照未通过：off 与 shadow 输出相同，但实际触发删除后六轮输出均改变并截断。** 当前优先定位 active 窗口粒度及水位与整请求预约的配合，暂不继续堆叠一小时长测。完整资源上界、reset/cancel 长测、编码质量和独立 CUDA 非法访问仍未关闭；DeepSWE 按用户要求暂缓。首批阶段验收不替代“完成整套生产 GC”的最终目标。
+**当前位置（2026-10-20）：** 首批范围已冻结。此前一小时同域长测通过：11,448 次请求、45,792 个块经过 8 个槽位；这是当时版本的证据。`18eaddd` 修复有限请求内跨微批次的 GPU 权限，43 个模型场景及 198 次 reset/cancel 短测通过；**最新六轮编码压力仍未通过：off 两轮截断、delete 五轮截断，只有第一轮内容相同。** 容量不足自动重选是否开启新 active，已列为请导师确认的行为边界。本轮先完成独立并发排障：确认旧 GCC 11 检测运行库的条件变量误报，并修复 RawKvStore 关闭通知可能丢失的问题；修复后 GCC 12 TSan 与 ASan/UBSan 各 30/30，受影响用例重复 20 次通过。完整资源预约/上界、reset/cancel 长测、编码质量和独立 CUDA 非法访问仍未关闭；DeepSWE 按用户要求暂缓。首批阶段验收不替代“完成整套生产 GC”的最终目标。
 
 ## 2026-10-17 阶段进度
 
@@ -917,7 +917,30 @@ TSan 首次全套在启动阶段遇到 `unexpected memory mapping`。仅对测�
 
 代码检查发现尚未贯通的第二个入口：`prepare_working_set()` 在 GPU 槽位不足时调用 `prepare_prefill_pressure()`，其 `pick_prefill_pressure_blocks()` / `set_selection()` 仍经 `is_live()` → `allows_new_selection()` 过滤已退休块。这条路径可以在同一回答内移除仍有旧窗口权限的 GPU 驻留内容。本轮已修复 ubatch 权限释放及创建竞态，**容量压力选块与该窗口的配合仍待修复**；完整压力失败保留为下一步复现，不能宣布整个输出异常已解决。
 
-下一步优先给这条受限 recency 路径传递已有窗口许可，仅允许保留确实仍驻留、已获同代 GPU 权限的块；不通过全局放宽 `is_live()` 来绕过新选择、CPU 读取、H2D 或下一窗口的退休检查。先补容量压力下的确定性用例，再重放上述第二轮及六轮对照。长期全部资源有界、接纳后无新分配、lane pool 告警及原偶发 CUDA 错误仍需后续处理；这些门槛未完成前不恢复扩展配置开发。DeepSWE 按用户要求继续暂缓。
+针对容量路径，建议只传递确实仍驻留、已获同代 GPU 权限的块的已有窗口许可；不通过全局放宽 `is_live()` 来绕过新选择、CPU 读取、H2D 或下一窗口的退休检查。但导师文档 §4.3 同时规定新 reselect 建立新 ActiveId，因此“因容量不足自动整理是否属于新 active”需要明确；此建议尚未作为最终行为实现。边界定型后先补容量压力用例，再重放第二轮及六轮对照。期间继续独立的并发排障和资源预约审计。长期全部资源有界、接纳后无新分配及原偶发 CUDA 错误仍需后续处理；这些门槛未完成前不恢复扩展配置开发。DeepSWE 按用户要求继续暂缓。
+
+### 并发检测运行库与存储关闭通知（2026-10-20）
+
+先把两个异常分开调查，保留上一轮失败日志。lane pool 的 `double lock of a mutex` 来自当前 GCC 11/libtsan.so.0 与标准库计时等待的兼容性缺口：实际二进制引用 `pthread_cond_clockwait@GLIBC_2.34`，运行库却没有对应 interceptor。不含项目头文件、全部共享数据均由同一 mutex 保护的最小条件变量交接程序，同样报 double lock、退出 66；仅改用 system_clock 的等待重载后退出 0。该行为与 [GCC 的修复讨论](https://gcc.gnu.org/pipermail/gcc-patches/2021-May/570244.html) 和 [GCC 11 问题记录](https://gcc.gnu.org/pipermail/gcc-bugs/2022-July/793323.html) 一致。
+
+从主机配置的 Ubuntu 软件源下载并解包 GCC 12.3.0 与 libtsan.so.2 到本轮隔离目录，没有安装或替换系统编译器。新运行库提供 `pthread_cond_clockwait` 拦截；两种最小等待程序均通过，未改 lane pool 产品源码的完整宿主 TSan 回归也为 30/30。`setarch x86_64 -R` 仅作用于测试子进程以处理此前的地址布局启动冲突，没有修改系统 ASLR 设置，也没有使用告警抑制。
+
+新增 `scripts/check_tsan_runtime.sh` 与独立 `tests/tsan-runtime-probe.cpp`，用于在解释业务并发测试前确认检测环境。脚本先运行正确同步的 timed-wait，再运行故意包含数据竞争的阳性对照；后者必须退出 66 并报告 `ThreadSanitizer: data race`。脚本覆盖继承的 TSAN_OPTIONS，避免外部抑制选项造成假通过。旧工具链被自检拒绝，新工具链自检通过，阳性对照确实退出 66。本轮运行方式如下，工具链路径为已解包目录，不是新增产品依赖：
+
+```bash
+out=/tmp/kvmem-gc-99bef27.3CD9MU/historical-tsan-runtime-18eaddd
+LD_LIBRARY_PATH="$out/toolchain/usr/lib/x86_64-linux-gnu" \
+KVMEM_TSAN_FIXED_LAYOUT=1 \
+bash scripts/check_tsan_runtime.sh "$out/toolchain/usr/bin/g++-12" "$out/preflight-gcc12"
+```
+
+另发现 RawKvStore 析构中真实的条件变量协议缺陷。旧代码在 `mu_` 之外设置原子 `stop_io_` 并通知，而 I/O worker 在 `mu_` 内检查条件再等待：若通知恰好落在“检查为 false”与“进入等待”之间，worker 会错过通知，析构的 join 可能一直等待。原子变量只能消除变量自身的数据竞争，不能修复丢失唤醒。
+
+修复将停止标志的发布放到同一 `mu_` 临界区内，解锁后通知，最后等待 worker 退出；已有排队 I/O 仍按原规则结清。回归通过仅测试可见的 friend 访问，在真实 store 的线程句柄上装入可控 waiter，使用真实 mutex、condition variable、stop flag 和析构函数，暂停在检查与等待之间，不依赖磁盘速度。旧实现复现 `early_stop=1 notified=0`、退出 134；新实现通过。测试中的等待有超时，失败不会无限卡住。这个复现证明了关闭协议缺陷，**但此前原始卡住现场没有调用栈，不能宣称已证明那一次挂起必然由此造成**。
+
+修复最终源码通过 GCC 12 TSan **30/30**、ASan/UBSan **30/30**，`raw_kv_store_test` 在 TSan 下重复 **20 次全部通过**。本轮没有改变选块/退休语义，也没有重跑真实模型质量或一小时负载，不能将宿主通过扩大为生产验收完成。普通 C++ 分配统计还只是前台 decode/同步/harvest 区间的累计请求字节，既不是存活内存，也不覆盖 C malloc、其他线程或 CUDA 分配；完整资源预约缺口仍然保留。
+
+原始日志、旧/新最小复现、阳性对照、软件包及最终源码指纹保存在 `artifacts/historical-tsan-runtime/evidence.tar.gz`，SHA-256 为 `cfecde2370da56f2ad309ac9eb68644b1ba5f26d45f52cd542e60b213c03b16d`；远程证据目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-tsan-runtime-18eaddd`。源码修复与检测工具自检单独提交，后续继续按首批范围推进资源预约和真实负载问题。
 
 ## 剩余生产接入与完整验收
 
