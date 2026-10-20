@@ -40,6 +40,11 @@ static_assert(sizeof(llm_graph_input_attn_kv) < 1024, "KV attention input copied
 static thread_local bool deny_cpp_allocation = false;
 static thread_local size_t foreground_cpp_frees = 0;
 static thread_local uint64_t foreground_cpp_allocations = 0, foreground_cpp_allocated_bytes = 0;
+static bool trace_model_stages = false;
+static void model_stage(const char * phase, uint32_t rows, uint32_t tokens) {
+    if (!trace_model_stages) return;
+    std::fprintf(stderr, "KVMEM_MODEL_STAGE phase=%s rows=%u tokens=%u\n", phase, rows, tokens);
+}
 void * operator new(size_t size) {
     if (deny_cpp_allocation) throw std::bad_alloc();
     if (void * p = std::malloc(size ? size : 1)) {
@@ -2079,10 +2084,15 @@ static void check_request_capture(llama_context * ctx, llama_model * model,
     const auto execute = [&](llama_token * input, uint32_t n) {
         const auto first = mem.store().block_count();
         auto batch = llama_batch_get_one(input, n);
+        model_stage("decode-enter", mem.store_n_tokens(), n);
         require(llama_decode(ctx, batch) == 0, "real managed graph failed");
+        model_stage("decode-return", mem.store_n_tokens(), n);
         llama_synchronize(ctx);
+        model_stage("synchronize-return", mem.store_n_tokens(), n);
         mem.harvest_flush();
+        model_stage("harvest-return", mem.store_n_tokens(), n);
         kvmem_transfer_test_access::commit(mem);
+        model_stage("commit-return", mem.store_n_tokens(), n);
         require(kvmem_transfer_test_access::packed_workspace_unchanged(mem, packed_workspace),
                 "real capture reallocated a prepared queue or fallback buffer");
         require(mem.runtime().store().allocated_bytes() == table_bytes,
@@ -3251,15 +3261,33 @@ static void check_reset_soak(llama_context * ctx, llama_model * model,
 
 int main(int argc, char ** argv) {
     constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 43 : 35;
-    if (argc != 2 && argc != 3 && argc != 4) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u] (requires CUDA)\n", argv[0], scenario_count - 1);
+    if (argc != 2 && argc != 3 && argc != 4 && argc != 6) {
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
     }
     try {
         unsigned first_scenario = 0, end_scenario = scenario_count;
+        unsigned scenario_rounds = 1;
         unsigned soak_seconds = 0, reset_soak_seconds = 0;
         bool run_repeated = true, run_reset = true, run_closed_capture = true;
-        if (argc == 3) {
+        const char * trace = std::getenv("KVMEM_TEST_MODEL_TRACE");
+        trace_model_stages = trace && *trace && *trace != '0';
+        const auto decimal = [](const char * text) {
+            const std::string value = text;
+            require(!value.empty() && value.find_first_not_of("0123456789") == std::string::npos,
+                    "test selection value must be an unsigned decimal integer");
+            return std::stoul(value);
+        };
+        if (argc == 6) {
+            require(std::string(argv[2]) == "--scenario-range", "unknown test selection");
+            const auto first = decimal(argv[3]), last = decimal(argv[4]), rounds = decimal(argv[5]);
+            require(first <= last && last < scenario_count, "scenario range out of bounds");
+            require(rounds > 0 && rounds <= 1000, "scenario rounds must be 1..1000");
+            first_scenario = static_cast<unsigned>(first);
+            end_scenario = static_cast<unsigned>(last + 1);
+            scenario_rounds = static_cast<unsigned>(rounds);
+            run_repeated = run_reset = run_closed_capture = false;
+        } else if (argc == 3) {
             const std::string selected = argv[2];
             require(selected == "--repeated" || selected == "--reset" || selected == "--closed-capture", "unknown test selection");
             run_repeated = selected == "--repeated";
@@ -3267,10 +3295,8 @@ int main(int argc, char ** argv) {
             run_closed_capture = selected == "--closed-capture";
             end_scenario = 0;
         } else if (argc == 4) {
-            const std::string selection = argv[2], value = argv[3];
-            require(!value.empty() && value.find_first_not_of("0123456789") == std::string::npos,
-                    "test selection value must be an unsigned decimal integer");
-            const auto number = std::stoul(value);
+            const std::string selection = argv[2];
+            const auto number = decimal(argv[3]);
             if (selection == "--soak-seconds" || selection == "--reset-soak-seconds") {
                 require(number > 0 && number <= 86400, "soak duration must be 1..86400 seconds");
                 if (selection == "--reset-soak-seconds") {
@@ -3311,20 +3337,29 @@ int main(int argc, char ** argv) {
         cp.n_seq_max = 1;
         cp.type_k = cp.type_v = GGML_TYPE_F16;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        for (unsigned scenario = first_scenario; scenario < end_scenario; ++scenario) {
+        const unsigned range_size = end_scenario - first_scenario;
+        for (unsigned iteration = 0; iteration < range_size * scenario_rounds; ++iteration) {
+            const unsigned scenario = first_scenario + iteration % range_size;
+            const unsigned round = iteration / range_size;
+            std::fprintf(stderr, "KVMEM_MODEL_SCENARIO begin round=%u id=%u\n", round, scenario);
+            // Each round must start with the same configuration, including
+            // ranges which return to the original scenarios 0..2.
+            kp.method = 1;
+            kp.budget = 128;
+            cp.n_ubatch = 64;
+            cp.type_k = cp.type_v = GGML_TYPE_F16;
             if ((scenario >= 3 && scenario <= 12) || (scenario >= 30 && scenario <= 34)) {
                 kp.method = 0;
                 kp.budget = 96;
-                llama_kvmem_set_params(&kp);
                 cp.n_ubatch = 16;
                 cp.type_k = cp.type_v = scenario == 4 ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
             } else if (scenario >= 13) {
                 kp.method = 1;
                 kp.budget = 128;
-                llama_kvmem_set_params(&kp);
                 cp.n_ubatch = 64;
                 cp.type_k = cp.type_v = GGML_TYPE_F16;
             }
+            llama_kvmem_set_params(&kp);
             std::unique_ptr<llama_context, decltype(&llama_free)> ctx(
                 llama_init_from_model(model.get(), cp), llama_free);
             require(bool(ctx), "context init failed");
@@ -3365,7 +3400,12 @@ int main(int argc, char ** argv) {
                 require(storage.expired(), "failed real-model domain leaked captured history after checked teardown");
                 std::puts("PASS failed real-model teardown: captured CPU owner released after device cleanup");
             }
+            std::fflush(stdout);
+            std::fprintf(stderr, "KVMEM_MODEL_SCENARIO closing round=%u id=%u\n", round, scenario);
+            ctx.reset();
+            std::fprintf(stderr, "KVMEM_MODEL_SCENARIO closed round=%u id=%u\n", round, scenario);
             std::printf("PASS historical model scenario %u/%u\n", scenario + 1, scenario_count);
+            std::fflush(stdout);
         }
         kp.method = 0;
         kp.budget = 96;

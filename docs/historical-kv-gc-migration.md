@@ -40,6 +40,8 @@
 
 每轮产出须包含版本/配置指纹、命令、输入、原始日志、资源时间序列、结果和未通过项。延迟、吞吐与质量阈值尚未约定时报告实测差异和限制，不把建议值当成已批准的通过线。当前已有模型/HTTP 回归、sanitizer 和有限连续请求证据；上述完整长测、总量上界及实际 agent 质量验收仍未完成。
 
+**预约范围澄清（2026-10-20，已列为导师确认项）：** 导师文档 §5.5 要求真实 payload/extent、必要的搬运和 scratch 等资源在接纳前落实，已接纳请求不能等待 GC 补给；文档没有直接要求整个推理框架的所有临时 C++ 分配都清零。此前日志里的“完整接纳后零分配”比这条原文更强，不能单凭调用次数非零认定 payload 预约失败，也不能因为 RSS 暂时平稳认定总量已受限。当前保留所有原始分配证据，优先验证 GC 所管理资源的实际预约、跨域总量和失败路径；通用调度器/图优化容器的全面预分配暂不扩展，等待确认其是否属于首批硬门槛。该澄清不豁免首批可达临时空间的上界核算，不把未完成的资源验收标记通过。
+
 ### 第三步：仅修复首批验收暴露的问题
 
 当前开发队列只接收首批配置的安全性、正确性、容量约束、回收等待或实际负载阻塞问题。此前偶发 CUDA 非法访问仍列为未关闭问题：保存首次失败证据，核对版本与触发路径，进行针对性复现和定位；后续未复现不能直接将其注销，也不能直接认定由 GC 导致。
@@ -55,6 +57,8 @@
 **当前位置（2026-10-20）：** 首批范围已冻结。此前一小时同域长测通过：11,448 次请求、45,792 个块经过 8 个槽位；这是当时版本的证据。`18eaddd` 修复有限请求内跨微批次的 GPU 权限，43 个模型场景及 198 次 reset/cancel 短测通过；**最新六轮编码压力仍未通过：off 两轮截断、delete 五轮截断，只有第一轮内容相同。** 容量不足自动重选是否开启新 active，已列为请导师确认的行为边界。本轮先完成独立并发排障：确认旧 GCC 11 检测运行库的条件变量误报，并修复 RawKvStore 关闭通知可能丢失的问题；修复后 GCC 12 TSan 与 ASan/UBSan 各 30/30，受影响用例重复 20 次通过。完整资源预约/上界、reset/cancel 长测、编码质量和独立 CUDA 非法访问仍未关闭；DeepSWE 按用户要求暂缓。首批阶段验收不替代“完成整套生产 GC”的最终目标。
 
 **最新分配审计：** 96 次固定请求的调用栈与计数器完全对应；复用固定物理层目录后，前台普通 C++ 分配从 249,921 次降至 228,417 次，其余来源计数不变。候选首次完整模型回归出现 CUDA 非法指令，基线及候选后续完整对照各退出 0；首败原因仍未确定，不能据重跑通过注销。详见文末“接纳后分配来源审计与层目录复用”，生产验收仍未完成。
+
+**最新 CUDA 定向复现：** 在 `4cb3f16` 产品代码上完成 124 次场景执行，退出码均为 0；其中 64 次保留原失败前的场景顺序和 q8_0→f16 上下文切换。仍未定位原始 CUDA 错误。远程检查器此前未能初始化 Windows 调试接口，管理员协助尚待落实。一小时 reset/cancel 长测已启动，终态以 `artifacts/historical-reset-hour/RUN_STATE.json` 及原始日志为准；启动和中途采样不算验收通过。
 
 ## 2026-10-17 阶段进度
 
@@ -957,6 +961,23 @@ bash scripts/check_tsan_runtime.sh "$out/toolchain/usr/bin/g++-12" "$out/preflig
 首次完整模型回归在前六个场景通过后，于零基场景 6（AfterSubmission）中的后续 decode 报 `cudaStreamSynchronize: an illegal instruction was encountered`，进程退出 134。此前已经输出 Host 提前释放、GPU consumer 字节不变的检查通过，但这不能抵消后续 CUDA 失败；它也不能未经定位与旧的 illegal-memory-access 记录归为同一根因。保留首败后，分别重建 `d9934a5` 产品代码基线（含未启用的同一诊断 hook）与候选版，完整模型对照两者均退出 0，覆盖 43 个场景、reset/payload quota、两组重复请求、Closed capture 和 backend guard。准确结论是“候选首次失败、后续完整复验通过”，不是“异常已解决”或“已证明与本轮改动无关”；CUDA 根因仍是生产验收未关闭项。
 
 本轮证据目录为 `artifacts/historical-allocation-audit/`，远程为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-allocation-audit-d9934a5`。采样基线源码包 SHA-256 为 `39d7e50e9a49c7b1428687bbd83b6559179685a4c152083e15962a8abce25f09`，候选源码包为 `7a1bcbf382fc3be9985f5bb805e0ddc6be993d8661b7ebd25fb01eadd35f3827`，完整日志/trace/对照归档 `evidence.tar.gz` 为 `6cafb89cbe1f6d487d9d5516b6bcdd64e6efdfc917c4fad70a8881f6cb00c6a1`。本轮没有修改 GPU 容量重选的 active 边界，也没有解决此前长回答压力失败。
+
+### CUDA 场景重复诊断与重置长测（2026-10-20）
+
+为定位首败所处阶段，模型测试新增 `--scenario-range FIRST LAST ROUNDS`：零基、首尾均包含，轮数限制为 1..1000。每次执行重新设置该场景的配置，避免上一轮 f16/recency 参数污染下一轮起点。设置 `KVMEM_TEST_MODEL_TRACE=1` 后，在 decode 进入/返回、同步返回、harvest 返回和 commit 返回处输出阶段记录；场景还有开始和 context 关闭记录。没有为诊断增加产品同步，也没有改变 GC/GPU 生命周期或删除条件。
+
+在同一产品版本 `4cb3f16` 上执行两组定向复现：
+
+- `--scenario-range 5 7 20`：60 次场景全部关闭，400 次已记录的 decode 均有后续同步、harvest 和 commit 返回，backend guard 通过。
+- `--scenario-range 0 7 8`：64 次场景全部关闭，272 次已记录的 decode 均有完整返回记录，backend guard 通过。该组包含原失败前缀，特别保留场景 4 的 q8_0 与场景 5/6 的 f16 context 切换。
+
+两组驱动退出码均为 0；按完整日志校验轮次/场景顺序、关闭记录、阶段计数和错误标记，未发现本次重复中的 CUDA 失败。五种非法范围/轮数在模型加载前拒绝。准确结论是“124 次定向执行未复现”，不是故障已修复，也不是完整生产验收通过。证据为 `artifacts/historical-cuda-repro/evidence.tar.gz`，SHA-256 为 `4a8b6c9b74b6a202aae3f40e7ec1626ede2980cb8956e6cb30b6af52d774546e`；本地 `summary.json` 保存校验结果。
+
+此前 Compute Sanitizer 日志明确报告 WDDM debugger interface 初始化失败，不能作为业务 GPU 正确性检查。只读核对发现 Windows 主机 `DESKTOP-OH21P4S` 的 `HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger\EnableInterface` 不存在，当前 SSH 对应的 Windows 用户令牌不是管理员。[NVIDIA 文档](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html#windows-specific-behavior) 要求该值为 DWORD 1。已准备 `scripts/windows/enable-cuda-debug-interface.ps1`，由管理员在目标主机手动执行：强制校验机器名，先保存原值，再设置并核对该值。脚本已通过语法检查，但尚未执行；没有修改注册表、TDR、驱动或重启主机。管理员完成设置后，先用小型有效/故意越界 CUDA 程序验证检查器，再决定真实模型检查范围。
+
+在等待设计边界和调试权限确认期间，继续既定的一小时 reset/cancel 轨迹：同一个模型/context 中交替正常结束、prefill 取消和生成取消；保留旧 CPU reader 跨 reset 和新域首轮 decode，随后验证旧域后台退出。使用已编译的同一测试二进制，固定 8 槽、64-token 输入预约、3-token 输出上限及 48 MiB 跨域 payload 预算。驱动保存二进制/关键源文件指纹、实际 PID、模型日志、进程 RSS/HWM 和设备级显存采样，4200 秒上限避免失去终态。
+
+该长测验证生命周期与资源复用，不涉及尚未定型的容量重选语义，也不替代编码质量或同域持续追加验收。只有测试进程成功退出、至少 3600 秒、旧域全部结清及 backend guard 通过，驱动才记录该项通过；设备级显存采样不能直接归因于本进程，累计分配字节也不能当作保留量。远程证据目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/historical-reset-hour-4cb3f16`，状态和结果保存在本地 `artifacts/historical-reset-hour/`。
 
 ## 剩余生产接入与完整验收
 
