@@ -105,3 +105,60 @@ SHA-256 为 `a2bcadef55deaa8c94f3558406d71f6c4af109b98b911410ea5a5468c047632e`�
 
 强制输出 Z 不是任务质量评测。本轮没有宣称解决此前偶发 CUDA 故障、完成 DeepSWE，
 或取得参考仓库全部后端能力及性能结果。
+
+### 2026-10-21 原生 decoding 小规模性能对照
+
+在同一台 RTX 3080 Ti Laptop 16 GB 主机、同一模型和 `de8fe49` 产品库上新增
+`kvmem-historical-access-test MODEL --gc-bench 5` 测试入口。只编译测试程序，
+libllama/libkvmem 的 SHA-256 在运行前后相同。本次测量不修改产品回收逻辑。
+
+固定 256-token 合成输入、32 步 greedy 生成，忽略 EOS 以保证相同计算步数；f16 KV、
+flash attention、4 CPU 线程、batch 64/ubatch 16。GPU token 预算 1536、生成预留 256，
+同时按短片段所需的**物理槽位**做预检。CPU 历史仓库为 64 槽，low/high 为 32/48，
+故意加大压力以触发回收。每种模式各预热一次后，以轮换顺序测量五次；所有请求使用同一
+模型/context，reset 后等待旧域实际退出，排除旧请求的清理干扰。
+
+GC 在 prefill 结束后启动，以隔离已经开始的生成。每步直接记录 greedy 选 token、
+`llama_decode` 和 `llama_synchronize` 的总耗时；整段吞吐还包括一致的轻量计数检查。
+不用网络/SSE chunk 间隔代替原生 token 延迟。逐步检查所有历史 token 仍驻留 GPU，
+并核对完整输出 token 序列。每个 delete 样本必须在生成区间内观察到退休及实际 CPU 释放。
+测试程序已有的普通 C++ 分配计数 hook 在三种模式中相同，未开启堆栈采集。
+
+有效测量为 15 次请求、每种模式 160 个 decode 步；加上 3 次预热共 18 次。
+全部输出相同、全部 GPU 驻留检查通过、所有 delete 样本都在生成期间真实回收，
+policy/worker failures 均为 0，测试与驱动退出码均为 0。
+每个正式 delete 样本在生成期间退休并提前释放 **27 个 CPU 历史块**；此时完整槽位回收为 0，
+因为 GPU 权限仍保留。这同时验证了 CPU 释放没有要求撤销当前 GPU 驻留。
+
+- 每模式五次吞吐中位数：off **24.219 token/s**，shadow **24.140 token/s**，
+  delete **24.330 token/s**。
+- 每轮与该轮 off 配对后取中位数：shadow 吞吐 **-0.14%**，delete 吞吐 **+0.44%**。
+  delete 五轮差异范围 **-0.42% 到 +1.48%**，有快有慢，不能据此宣称 GC 提速。
+- 配对原生单步 P95 延迟变化：shadow **+0.31%**，delete **+0.17%**；
+  delete 五轮范围 **-2.30% 到 +1.84%**。P99 配对中位变化为 **+0.24%**，
+  但每次仅 32 步，不能据此评价罕见长尾停顿。
+
+结论：**这组短、完整驻留的 decode 负载没有观察到明显性能回退**。本次没有设置或
+通过一个预先约定的性能阈值；GPU 功率/频率未锁定，亚百分比差异可能是运行波动。
+off 仍启用 historical capture/ownership，因而这里衡量的是 GC 的增量开销，
+不代表整个 historical KV 框架相对原始 llama.cpp 的开销。结论不覆盖准入等待、
+开启 GC 的 prefill、长期高频释放、长上下文换窗和真实任务质量。
+
+前两次 384-token 输入/256 步生成的预热中，delete 从第 35 个输出 token 起与 off 不同，
+已作为不等价负载拒绝，没有混入性能结论。其中第二次也仅在 prefill 后启动 GC。
+这些配置只检查请求窗口 ID，没有为每个短片段留足物理槽位；固定窗口 ID 本身不能排除
+容量驱动的 GPU 重选。最终短样本补上最坏情况槽位预检及每步全历史驻留检查。
+长样本分歧的原始数据保留，未用此次短测声称其质量问题已经解决。
+
+复现及汇总命令：
+
+```sh
+build-cuda/bin/kvmem-historical-access-test MODEL.gguf --gc-bench 5 > benchmark.log 2>&1
+python3 scripts/summarize_historical_gc_bench.py benchmark.log --output results
+```
+
+本地数据：`artifacts/background-gc-decode-bench/{summary,runs}.json`；完整证据归档
+`background-gc-decode-bench-evidence.tar.gz` 的 SHA-256 为
+`46c5da14aaa84eb40a4fa27f6564be847c786e3a098c930ba86194e77f5be0a5`。
+归档包含两次不合格预热、最终测量、GPU 状态、源码和二进制指纹及驱动。
+远程原始目录为 `/tmp/kvmem-gc-99bef27.3CD9MU/background-gc-decode-bench-de8fe49-v3`。

@@ -397,6 +397,13 @@ struct kvmem_transfer_test_access {
     static kvmem::HistoricalKvGc::Stats gc_stats(const llama_memory_kvmem & mem) {
         return mem.historical_gc_->stats();
     }
+    static kvmem::HistoricalKvGc::Stats optional_gc_stats(const llama_memory_kvmem & mem) {
+        return mem.historical_gc_ ? mem.historical_gc_->stats() : kvmem::HistoricalKvGc::Stats{};
+    }
+    static uint64_t gpu_window_id(const llama_memory_kvmem & mem) {
+        return mem.historical_capture_->gpu_window_id();
+    }
+    static uint32_t gpu_slots(const llama_memory_kvmem & mem) { return mem.n_slots_; }
     static void on_submission(llama_memory_kvmem & mem, std::function<void()> hook) {
         mem.historical_submission_test_hook_ = std::move(hook);
     }
@@ -3392,16 +3399,160 @@ static void check_reset_soak(llama_context * ctx, llama_model * model,
     std::puts("PASS reset soak: old readers survive new decoding, old domains drain in background, finite finish/cancel, shared payload bound, fixed GPU/backend workspace");
 }
 
+// Small native benchmark: identical finite requests, one model/context, a full
+// warmup per mode, and rotating mode order. No product instrumentation or HTTP
+// chunk timestamps. Never interpret this synthetic fixture as task quality.
+static void benchmark_gc_decode(llama_model * model, unsigned rounds) {
+    constexpr uint32_t input = 256, output = 32, capacity = 64;
+    constexpr uint32_t low = 32, high = 48, batch_size = 64;
+    llama_kvmem_params kp{};
+    kp.enabled = true;
+    kp.method = 0;
+    kp.block_tokens = 32;
+    kp.budget = 1536;
+    kp.gen_reserve = 256;
+    kp.query_begin = kp.query_end = kp.force_pos = -1;
+    llama_kvmem_set_params(&kp);
+    auto cp = llama_context_default_params();
+    cp.n_ctx = 2048;
+    cp.n_batch = batch_size;
+    cp.n_ubatch = 16;
+    cp.n_seq_max = 1;
+    cp.n_threads = cp.n_threads_batch = 4;
+    cp.type_k = cp.type_v = GGML_TYPE_F16;
+    cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    std::unique_ptr<llama_context, decltype(&llama_free)> ctx(llama_init_from_model(model, cp), llama_free);
+    require(bool(ctx), "GC benchmark context init failed");
+    auto * mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(ctx.get()));
+    require(mem != nullptr, "GC benchmark requires a non-hybrid KVMem adapter");
+    // Immutable short spans can each consume a full physical GPU slot. A
+    // token-count-only budget does not establish stable residency.
+    require(kvmem_transfer_test_access::gpu_slots(*mem) >= input / cp.n_ubatch + output,
+            "GC benchmark lacks physical slots for the worst-case short spans");
+    const auto * vocab = llama_model_get_vocab(model);
+    std::string prompt;
+    for (unsigned i = 0; i < 80; ++i)
+        prompt += "Archive note: retain the first section, process the next item, and summarize the stored records.\n";
+    const int count = -llama_tokenize(vocab, prompt.data(), prompt.size(), nullptr, 0, true, true);
+    require(count >= int(input), "GC benchmark input is too short");
+    std::vector<llama_token> tokens(count);
+    require(llama_tokenize(vocab, prompt.data(), prompt.size(), tokens.data(), count, true, true) == count,
+            "GC benchmark tokenization failed");
+    tokens.resize(input);
+    std::vector<llama_token> reference;
+    const char * names[] = {"off", "shadow", "delete"};
+    bool initialized = false;
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::duration elapsed) {
+        return std::chrono::duration<double, std::milli>(elapsed).count();
+    };
+    std::printf("KVMEM_GC_BENCH_CONFIG {\"input_tokens\":%u,\"decode_steps\":%u,\"capacity\":%u,"
+        "\"low\":%u,\"high\":%u,\"gpu_budget\":1536,\"generation_reserve\":256,\"gpu_slots\":%u,"
+        "\"rounds\":%u,\"warmups_per_mode\":1,\"threads\":4,\"ignore_eos\":true,\"prompt_tokens\":[",
+        input, output, capacity, low, high, kvmem_transfer_test_access::gpu_slots(*mem), rounds);
+    for (size_t i = 0; i < tokens.size(); ++i) std::printf("%s%d", i ? "," : "", tokens[i]);
+    std::puts("]}");
+    for (unsigned round = 0; round <= rounds; ++round) {
+        for (unsigned index = 0; index < 3; ++index) {
+            const unsigned mode = (round + index) % 3;
+            std::fprintf(stderr, "KVMEM_GC_BENCH_BEGIN round=%u mode=%s\n", round, names[mode]);
+            std::weak_ptr<kvmem::HistoricalKvRawStore> previous;
+            if (initialized) previous = kvmem_transfer_test_access::capture_storage(*mem);
+            require(initialized ? llama_kvmem_historical_capture_reset_begin(ctx.get(), capacity, input, output,
+                        input / batch_size + output) :
+                    llama_kvmem_historical_capture_begin(ctx.get(), capacity, input, output,
+                        input / batch_size + output), "GC benchmark admission failed");
+            initialized = true;
+            // Exclude old-request cleanup from the new request measurement.
+            const auto deadline = Clock::now() + std::chrono::seconds(10);
+            while (!previous.expired() && Clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            require(previous.expired(), "GC benchmark old scope did not drain");
+            const auto prefill_start = Clock::now();
+            for (uint32_t pos = 0; pos < input; pos += batch_size) {
+                auto batch = llama_batch_get_one(tokens.data() + pos, batch_size);
+                require(llama_decode(ctx.get(), batch) == 0, "GC benchmark prefill failed");
+                llama_synchronize(ctx.get());
+            }
+            mem->end_prefill_capture();
+            const double prefill_ms = ms(Clock::now() - prefill_start);
+            // Isolate already-running decode: all input has acquired its GPU
+            // execution permission before deletion can close new admission.
+            // This does not qualify the GC-enabled prefill path.
+            if (mode) require(llama_kvmem_historical_gc_start(mode, low, high), "GC benchmark worker start failed");
+            const auto before = kvmem_transfer_test_access::optional_gc_stats(*mem);
+            auto last = before;
+            const auto window = kvmem_transfer_test_access::gpu_window_id(*mem);
+            unsigned active_release_steps = 0, first_release_step = 0;
+            bool stable_window = true;
+            std::vector<double> step_ms(output);
+            std::vector<llama_token> generated(output);
+            const auto generation_start = Clock::now();
+            for (uint32_t step = 0; step < output; ++step) {
+                const auto start = Clock::now();
+                const auto * logits = llama_get_logits_ith(ctx.get(), -1);
+                require(logits != nullptr, "GC benchmark missing logits");
+                generated[step] = std::max_element(logits, logits + llama_vocab_n_tokens(vocab)) - logits;
+                auto batch = llama_batch_get_one(&generated[step], 1);
+                require(llama_decode(ctx.get(), batch) == 0, "GC benchmark decode failed");
+                llama_synchronize(ctx.get());
+                step_ms[step] = ms(Clock::now() - start);
+                const auto now = kvmem_transfer_test_access::optional_gc_stats(*mem);
+                if (now.host_released_early > last.host_released_early || now.reclaimed > last.reclaimed) {
+                    if (!active_release_steps) first_release_step = step + 1;
+                    ++active_release_steps;
+                }
+                last = now;
+                stable_window &= kvmem_transfer_test_access::gpu_window_id(*mem) == window;
+                uint64_t resident_tokens = 0;
+                for (const auto & block : mem->store().blocks())
+                    if (block.gpu_slot >= 0) resident_tokens += block.n_tokens;
+                stable_window &= resident_tokens == input + step + 1;
+            }
+            const double generation_ms = ms(Clock::now() - generation_start);
+            const bool same_output = reference.empty() || generated == reference;
+            if (reference.empty()) reference = generated;
+            std::printf("KVMEM_GC_BENCH {\"round\":%u,\"warmup\":%s,\"mode\":\"%s\","
+                "\"prefill_ms\":%.6f,\"generation_ms\":%.6f,\"decode_steps\":%u,"
+                "\"stable_window\":%s,\"same_output\":%s,\"active_release_steps\":%u,\"first_release_step\":%u,"
+                "\"committed_before_decode\":%llu,\"committed_after_decode\":%llu,"
+                "\"host_released_before_decode\":%llu,\"host_released_after_decode\":%llu,"
+                "\"slots_reclaimed_before_decode\":%llu,\"slots_reclaimed_after_decode\":%llu,"
+                "\"shadow_after_decode\":%llu,\"policy_failures\":%llu,\"worker_failures\":%llu,\"step_ms\":[",
+                round, round == 0 ? "true" : "false", names[mode], prefill_ms, generation_ms, output,
+                stable_window ? "true" : "false", same_output ? "true" : "false", active_release_steps, first_release_step,
+                (unsigned long long) before.committed, (unsigned long long) last.committed,
+                (unsigned long long) before.host_released_early, (unsigned long long) last.host_released_early,
+                (unsigned long long) before.reclaimed, (unsigned long long) last.reclaimed,
+                (unsigned long long) last.shadow, (unsigned long long) last.policy_failures,
+                (unsigned long long) last.worker_failures);
+            for (size_t i = 0; i < step_ms.size(); ++i) std::printf("%s%.6f", i ? "," : "", step_ms[i]);
+            std::printf("],\"tokens\":[");
+            for (size_t i = 0; i < generated.size(); ++i) std::printf("%s%d", i ? "," : "", generated[i]);
+            std::puts("]}");
+            std::fflush(stdout);
+            require(stable_window && same_output, "GC benchmark changed GPU window or output; timings are not equivalent work");
+            require(!last.policy_failures && !last.worker_failures, "GC benchmark worker or policy failed");
+            if (mode == 2) require(active_release_steps > 0 && last.committed > before.committed,
+                    "GC benchmark did not retire and release CPU data during decoding");
+            if (mode == 1) require(last.shadow > 0 && last.committed == 0,
+                    "GC benchmark shadow did not exercise the strategy");
+            require(llama_kvmem_historical_capture_finish(), "GC benchmark completion failed");
+        }
+    }
+    std::puts("PASS GC decode benchmark: identical output, stable GPU window, release during decoding");
+}
+
 int main(int argc, char ** argv) {
     constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 43 : 35;
     if (argc != 2 && argc != 3 && argc != 4 && argc != 6) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --gc-bench 1..20 | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
     }
     try {
         unsigned first_scenario = 0, end_scenario = scenario_count;
         unsigned scenario_rounds = 1;
-        unsigned soak_seconds = 0, reset_soak_seconds = 0;
+        unsigned soak_seconds = 0, reset_soak_seconds = 0, gc_bench_rounds = 0;
         bool run_repeated = true, run_reset = true, run_closed_capture = true;
         const char * trace = std::getenv("KVMEM_TEST_MODEL_TRACE");
         trace_model_stages = trace && *trace && *trace != '0';
@@ -3430,7 +3581,12 @@ int main(int argc, char ** argv) {
         } else if (argc == 4) {
             const std::string selection = argv[2];
             const auto number = decimal(argv[3]);
-            if (selection == "--soak-seconds" || selection == "--reset-soak-seconds") {
+            if (selection == "--gc-bench") {
+                require(number > 0 && number <= 20, "GC benchmark rounds must be 1..20");
+                gc_bench_rounds = static_cast<unsigned>(number);
+                end_scenario = 0;
+                run_repeated = false;
+            } else if (selection == "--soak-seconds" || selection == "--reset-soak-seconds") {
                 require(number > 0 && number <= 86400, "soak duration must be 1..86400 seconds");
                 if (selection == "--reset-soak-seconds") {
                     reset_soak_seconds = static_cast<unsigned>(number);
@@ -3457,6 +3613,12 @@ int main(int argc, char ** argv) {
         std::unique_ptr<llama_model, decltype(&llama_model_free)> model(
             llama_model_load_from_file(argv[1], mp), llama_model_free);
         require(bool(model), "model load failed");
+        if (gc_bench_rounds) {
+            benchmark_gc_decode(model.get(), gc_bench_rounds);
+            model.reset();
+            llama_backend_free();
+            return 0;
+        }
         llama_kvmem_params kp{};
         kp.enabled = true;
         kp.method = 1;
