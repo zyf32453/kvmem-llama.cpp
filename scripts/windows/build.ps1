@@ -75,6 +75,7 @@ if (!$HostOnly) {
     $qwen3MoeCapture = Join-Path $SourceDir 'patches/0006-qwen3moe-capture.patch'
     $historicalActive = Join-Path $SourceDir 'patches/0007-historical-active-hook.patch'
     $historicalCells = Join-Path $SourceDir 'patches/0008-historical-cell-index-reservation.patch'
+    $historicalRedundancy = Join-Path $SourceDir 'patches/0014-historical-redundancy-capture.patch'
     $historicalSlots = Join-Path $SourceDir 'patches/0009-historical-slot-info-return.patch'
     $historicalMicrobatch = Join-Path $SourceDir 'patches/0010-historical-microbatch-pool.patch'
     $historicalInput = Join-Path $SourceDir 'patches/0011-historical-input-workspace.patch'
@@ -125,6 +126,10 @@ if (!$HostOnly) {
     if (!(Test-PatchApplied $historicalGraphInput)) {
         Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalGraphInput)
         Invoke-Checked git @('-C', $llama, 'apply', $historicalGraphInput)
+    }
+    if (!(Test-PatchApplied $historicalRedundancy)) {
+        Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalRedundancy)
+        Invoke-Checked git @('-C', $llama, 'apply', $historicalRedundancy)
     }
 }
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',

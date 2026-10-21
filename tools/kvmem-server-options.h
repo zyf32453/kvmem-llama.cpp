@@ -65,6 +65,8 @@ struct kvmem_server_historical_options {
     uint64_t pinned_bytes = 0;
     uint32_t admission_wait_ms = 5000;
     int mode = 0;
+    int policy = 0;
+    bool policy_set = false;
     bool mode_set = false, low_set = false, high_set = false, pinned_set = false;
     template<typename Need>
     bool parse(const std::string & arg, const Need & need) {
@@ -77,6 +79,12 @@ struct kvmem_server_historical_options {
             else if (value == "delete") mode = 2;
             else throw std::invalid_argument("historical GC mode must be off, shadow or delete");
             mode_set = true;
+        } else if (arg == "--kvmem-historical-gc-policy") {
+            const std::string value = need(arg.c_str());
+            if (value == "lru") policy = 0;
+            else if (value == "redundancy") policy = 1;
+            else throw std::invalid_argument("historical GC policy must be lru or redundancy");
+            policy_set = true;
         } else if (arg == "--kvmem-historical-gc-low" || arg == "--kvmem-historical-gc-high") {
             const auto value = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
             if (arg == "--kvmem-historical-gc-low") { low = value; low_set = true; }
@@ -91,7 +99,7 @@ struct kvmem_server_historical_options {
         return true;
     }
     void validate() {
-        if (!capacity && (mode_set || low_set || high_set || pinned_set))
+        if (!capacity && (mode_set || low_set || high_set || pinned_set || policy_set))
             throw std::invalid_argument("historical GC flags require --kvmem-historical-capture N");
         if (low_set != high_set || ((low_set || high_set) && !mode))
             throw std::invalid_argument("historical Ready thresholds require both low and high with shadow/delete");

@@ -36,8 +36,9 @@ static void print_usage(const char * argv0) {
             "  --kvmem                    enable KVMem slot-pool memory\n"
             "  --kvmem-historical-capture N  experimental reserved RAM slots; recency single-request RAM only\n"
             "  --kvmem-historical-gc-mode M  off | shadow | delete (default off; requires capture)\n"
-            "  --kvmem-historical-gc-low N   LRU Ready low watermark (requires high)\n"
-            "  --kvmem-historical-gc-high N  LRU Ready target (requires low)\n"
+            "  --kvmem-historical-gc-policy P  lru (default) | redundancy\n"
+            "  --kvmem-historical-gc-low N   GC Ready low watermark (requires high)\n"
+            "  --kvmem-historical-gc-high N  GC Ready target (requires low)\n"
             "  --kvmem-historical-pinned-gb G  independent page-locked historical KV budget\n"
             "  --kvmem-block-tokens N     block size (default 32)\n"
             "  --kvmem-budget N           GPU working-set tokens; 0 = n_ctx (identity)\n"
@@ -92,6 +93,7 @@ int main(int argc, char ** argv) {
     uint32_t historical_capacity = 0;
     int historical_gc_mode = 0;
     bool historical_gc_mode_set = false;
+    bool historical_gc_policy_set = false;
     uint32_t historical_gc_low = 0, historical_gc_high = 0;
     bool historical_gc_low_set = false, historical_gc_high_set = false;
     bool historical_pinned_set = false;
@@ -183,6 +185,12 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "--kvmem-historical-gc-mode requires off, shadow or delete\n");
                 return 1;
             }
+        } else if (eq(arg, "--kvmem-historical-gc-policy")) {
+            const char * value = need(arg);
+            if (eq(value, "lru")) kparams.historical_gc_policy = 0;
+            else if (eq(value, "redundancy")) kparams.historical_gc_policy = 1;
+            else { fprintf(stderr, "historical GC policy requires lru or redundancy\n"); return 1; }
+            historical_gc_policy_set = true;
         } else if (eq(arg, "--kvmem-historical-gc-low") ||
                    eq(arg, "--kvmem-historical-gc-high")) {
             const bool low = eq(arg, "--kvmem-historical-gc-low");
@@ -306,7 +314,7 @@ int main(int argc, char ** argv) {
 #endif
     // Validate before backend initialization and loading a potentially large model.
     if ((historical_gc_mode_set || historical_gc_low_set || historical_gc_high_set ||
-         historical_pinned_set) && !historical_capacity) {
+         historical_pinned_set || historical_gc_policy_set) && !historical_capacity) {
         fprintf(stderr, "historical options require --kvmem-historical-capture N\n");
         return 1;
     }

@@ -14,6 +14,7 @@ add_library(kvmem
     src/host/historical_kv_cleanup.cpp
     src/host/historical_kv_gc.cpp
     src/host/historical_kv_policy_lru.cpp
+    src/host/historical_kv_redundancy.cpp
     src/host/historical_kv_ram_reservation.cpp
     src/host/historical_kv_raw_store.cpp
     src/host/historical_kv_repository.cpp
@@ -60,6 +61,7 @@ kvmem_add_test(historical_kv_cleanup_test)
 kvmem_add_test(historical_kv_gc_test)
 kvmem_add_test(historical_kv_legacy_raw_bridge_test)
 kvmem_add_test(historical_kv_policy_test)
+kvmem_add_test(historical_kv_redundancy_test)
 kvmem_add_test(historical_kv_raw_store_test)
 kvmem_add_test(historical_kv_pinned_store_test)
 kvmem_add_test(historical_kv_repository_test)

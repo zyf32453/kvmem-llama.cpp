@@ -1,5 +1,8 @@
 # CPU 历史 KV 后台管理
 
+后续新增的可选 redundancy 策略、采集成本及对照测试见
+[redundancy 策略说明](background-gc-redundancy.md)。本文保留基本 LRU 版的范围与原始验收记录。
+
 本分支 `codex/background-gc-vllm` 按用户 2026-10-21 的新指示，对齐
 [Di-Chai/kvmem-vllm 的 8560331](https://github.com/Di-Chai/kvmem-vllm/tree/8560331de4d9a889a1e884fe238b91e957a5958d)。
 参考其 `docs/background-history-gc.md`、`csrc/historical_kv_policy.hpp` 和

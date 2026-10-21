@@ -400,6 +400,9 @@ struct kvmem_transfer_test_access {
     static kvmem::HistoricalKvGc::Stats optional_gc_stats(const llama_memory_kvmem & mem) {
         return mem.historical_gc_ ? mem.historical_gc_->stats() : kvmem::HistoricalKvGc::Stats{};
     }
+    static std::shared_ptr<kvmem::HistoricalKvMeanKeySource> redundancy_source(llama_memory_kvmem & mem) {
+        return mem.historical_redundancy_;
+    }
     static uint64_t gpu_window_id(const llama_memory_kvmem & mem) {
         return mem.historical_capture_->gpu_window_id();
     }
@@ -3399,14 +3402,70 @@ static void check_reset_soak(llama_context * ctx, llama_model * model,
     std::puts("PASS reset soak: old readers survive new decoding, old domains drain in background, finite finish/cancel, shared payload bound, fixed GPU/backend workspace");
 }
 
+// Counterfactual selection on the SAME real model features. These metrics
+// describe the selection signal; they are not an independent task-quality test.
+static void compare_redundancy_selection(llama_memory_kvmem & mem) {
+    mem.harvest_flush();
+    auto repo = kvmem_transfer_test_access::capture_repository(mem);
+    auto source = kvmem_transfer_test_access::redundancy_source(mem);
+    require(repo && source && source->begin_round(repo->incarnation()), "selection comparison lacks complete real Query");
+    kvmem::HistoricalKvSnapshot snapshot;
+    snapshot.incarnation = repo->incarnation(); snapshot.round_id = 1; snapshot.blocks = repo->snapshot();
+    kvmem::HistoricalKvLruPolicy lru(repo->capacity());
+    kvmem::HistoricalKvRedundancyPolicy red(repo->capacity(), source, {});
+    kvmem::HistoricalKvDecisionBuffer old(repo->capacity()), proposed(repo->capacity());
+    const auto run = [&](kvmem::HistoricalKvPolicy & policy, kvmem::HistoricalKvDecisionBuffer & out) {
+        for (unsigned i=0;i<100;++i)
+            if (policy.step(snapshot, {0,1,4,0}, {16,4}, out).status != kvmem::HistoricalKvStepStatus::Yielded) return;
+        throw std::runtime_error("real selection comparison did not finish");
+    };
+    run(lru,old); run(red,proposed);
+    require(old.values().size()==4 && proposed.values().size()==4, "real selection comparison needs equal four-block eviction");
+    std::vector<std::vector<float>> keys;
+    std::vector<double> logits;
+    std::vector<uint32_t> slots;
+    for (const auto & block : snapshot.blocks) {
+        std::vector<float> key(source->dimensions()); double logit=0;
+        if (block.life == kvmem::HistoricalKvLife::Live && block.sealed && source->read(block,key.data(),logit)) {
+            keys.push_back(std::move(key)); logits.push_back(logit); slots.push_back(block.handle.slot);
+        }
+    }
+    require(keys.size()>4, "too few valid real descriptors");
+    const auto selected = [](const kvmem::HistoricalKvDecisionBuffer & out,uint32_t slot) {
+        for (const auto & item:out.values()) if (item.victim.slot==slot) return true;
+        return false;
+    };
+    const double maxlogit=*std::max_element(logits.begin(),logits.end());
+    double total=0; for(auto & value:logits) total += value=std::exp(value-maxlogit);
+    const auto measure = [&](const kvmem::HistoricalKvDecisionBuffer & out) {
+        double mass=0,similarity=0; size_t pairs=0;
+        for(size_t a=0;a<keys.size();++a) if(!selected(out,slots[a])) {
+            mass+=logits[a]/total;
+            for(size_t b=a+1;b<keys.size();++b) if(!selected(out,slots[b])) {
+                for(size_t d=0;d<keys[a].size();++d) similarity+=double(keys[a][d])*keys[b][d];
+                ++pairs;
+            }
+        }
+        return std::make_pair(mass,similarity/std::max<size_t>(1,pairs));
+    };
+    const auto a=measure(old),b=measure(proposed);
+    std::printf("KVMEM_GC_REDUNDANCY_EFFECT {\"valid_blocks\":%zu,\"evictions_per_policy\":4,\"lru_retained_query_mass\":%.9f,\"redundancy_retained_query_mass\":%.9f,\"lru_retained_pair_similarity\":%.9f,\"redundancy_retained_pair_similarity\":%.9f,\"lru_deleted_positions\":[",
+        keys.size(),a.first,b.first,a.second,b.second);
+    for(size_t i=0;i<old.values().size();++i) std::printf("%s%llu",i?",":"",(unsigned long long)repo->inspect(old.values()[i].victim)->original_begin);
+    std::printf("],\"redundancy_deleted_positions\":[");
+    for(size_t i=0;i<proposed.values().size();++i) std::printf("%s%llu",i?",":"",(unsigned long long)repo->inspect(proposed.values()[i].victim)->original_begin);
+    std::puts("]}");
+}
+
 // Small native benchmark: identical finite requests, one model/context, a full
 // warmup per mode, and rotating mode order. No product instrumentation or HTTP
 // chunk timestamps. Never interpret this synthetic fixture as task quality.
-static void benchmark_gc_decode(llama_model * model, unsigned rounds) {
+static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redundancy = false) {
     constexpr uint32_t input = 256, output = 32, capacity = 64;
     constexpr uint32_t low = 32, high = 48, batch_size = 64;
     llama_kvmem_params kp{};
     kp.enabled = true;
+    kp.historical_gc_policy = redundancy ? 1 : 0;
     kp.method = 0;
     kp.block_tokens = 32;
     kp.budget = 1536;
@@ -3446,10 +3505,10 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds) {
     const auto ms = [](Clock::duration elapsed) {
         return std::chrono::duration<double, std::milli>(elapsed).count();
     };
-    std::printf("KVMEM_GC_BENCH_CONFIG {\"input_tokens\":%u,\"decode_steps\":%u,\"capacity\":%u,"
+    std::printf("KVMEM_GC_BENCH_CONFIG {\"policy\":\"%s\",\"input_tokens\":%u,\"decode_steps\":%u,\"capacity\":%u,"
         "\"low\":%u,\"high\":%u,\"gpu_budget\":1536,\"generation_reserve\":256,\"gpu_slots\":%u,"
         "\"rounds\":%u,\"warmups_per_mode\":1,\"threads\":4,\"ignore_eos\":true,\"prompt_tokens\":[",
-        input, output, capacity, low, high, kvmem_transfer_test_access::gpu_slots(*mem), rounds);
+        redundancy ? "redundancy" : "lru", input, output, capacity, low, high, kvmem_transfer_test_access::gpu_slots(*mem), rounds);
     for (size_t i = 0; i < tokens.size(); ++i) std::printf("%s%d", i ? "," : "", tokens[i]);
     std::puts("]}");
     for (unsigned round = 0; round <= rounds; ++round) {
@@ -3476,6 +3535,7 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds) {
             }
             mem->end_prefill_capture();
             const double prefill_ms = ms(Clock::now() - prefill_start);
+            if (redundancy && round == 0 && mode == 0) compare_redundancy_selection(*mem);
             // Isolate already-running decode: all input has acquired its GPU
             // execution permission before deletion can close new admission.
             // This does not qualify the GC-enabled prefill path.
@@ -3541,18 +3601,20 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds) {
         }
     }
     std::puts("PASS GC decode benchmark: identical output, stable GPU window, release during decoding");
+    std::fflush(stdout);
 }
 
 int main(int argc, char ** argv) {
     constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 43 : 35;
     if (argc != 2 && argc != 3 && argc != 4 && argc != 6) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --gc-bench 1..20 | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --gc-bench 1..20 | --gc-redundancy-bench 1..20 | --gc-policy-bench 1..20 | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
     }
     try {
         unsigned first_scenario = 0, end_scenario = scenario_count;
         unsigned scenario_rounds = 1;
         unsigned soak_seconds = 0, reset_soak_seconds = 0, gc_bench_rounds = 0;
+        bool redundancy_bench = false, policy_bench = false;
         bool run_repeated = true, run_reset = true, run_closed_capture = true;
         const char * trace = std::getenv("KVMEM_TEST_MODEL_TRACE");
         trace_model_stages = trace && *trace && *trace != '0';
@@ -3581,7 +3643,9 @@ int main(int argc, char ** argv) {
         } else if (argc == 4) {
             const std::string selection = argv[2];
             const auto number = decimal(argv[3]);
-            if (selection == "--gc-bench") {
+            if (selection == "--gc-bench" || selection == "--gc-redundancy-bench" || selection == "--gc-policy-bench") {
+                redundancy_bench = selection == "--gc-redundancy-bench";
+                policy_bench = selection == "--gc-policy-bench";
                 require(number > 0 && number <= 20, "GC benchmark rounds must be 1..20");
                 gc_bench_rounds = static_cast<unsigned>(number);
                 end_scenario = 0;
@@ -3614,7 +3678,12 @@ int main(int argc, char ** argv) {
             llama_model_load_from_file(argv[1], mp), llama_model_free);
         require(bool(model), "model load failed");
         if (gc_bench_rounds) {
-            benchmark_gc_decode(model.get(), gc_bench_rounds);
+            if (policy_bench) {
+                // ABBA order shares one loaded model. Each context still gets
+                // its own full warmups before measuring collection + GC cost.
+                for (bool red : {false, true, true, false})
+                    benchmark_gc_decode(model.get(), gc_bench_rounds, red);
+            } else benchmark_gc_decode(model.get(), gc_bench_rounds, redundancy_bench);
             model.reset();
             llama_backend_free();
             return 0;

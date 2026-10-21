@@ -64,6 +64,7 @@ public:
     // Zero clears the demand. This never reserves or waits for pending bytes.
     void request_capacity(uint32_t ready);
     Stats stats() const;
+    HistoricalKvPolicy::Metrics policy_metrics() const noexcept { return policy_->metrics(); }
 
 private:
     HistoricalKvCommitCode commit(const HistoricalKvDeleteIntent & intent);

@@ -112,6 +112,15 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
+set "REDUNDANCY_PATCH=%ROOT%\patches\0014-historical-redundancy-capture.patch"
+git -C "%LLAMA_DIR%" apply --reverse --check "%REDUNDANCY_PATCH%" >nul 2>&1
+if errorlevel 1 (
+    git -C "%LLAMA_DIR%" apply --check "%REDUNDANCY_PATCH%"
+    if errorlevel 1 exit /b 1
+    git -C "%LLAMA_DIR%" apply "%REDUNDANCY_PATCH%"
+    if errorlevel 1 exit /b 1
+)
+
 if "%JOBS%"=="" set "JOBS=12"
 if "%BUILD_DIR%"=="" set "BUILD_DIR=%ROOT%\build-hip-win"
 

@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=["off", "shadow", "delete"], default="delete")
+    parser.add_argument("--policy", choices=["lru", "redundancy"], default="lru")
     parser.add_argument("--native-template", action="store_true", help="smoke-test the model's normal chat template")
     parser.add_argument("--admission-pressure", action="store_true",
                         help="exercise same-domain capacity demand above the normal GC watermarks")
@@ -68,6 +69,7 @@ def main():
         "--no-ui", "--kv-dtype", "f16", "--kvmem-method", "recency",
         "--kvmem-block-tokens", "32", "--kvmem-budget", "1024" if args.admission_pressure or args.admission_blocked else "128", "--kvmem-gen-reserve", "32",
         "--kvmem-historical-capture", "32", "--kvmem-historical-gc-mode", args.mode,
+        "--kvmem-historical-gc-policy", args.policy,
         "--reasoning-effort", "none", "--kvmem-trace", "-lv", "4"]
     if not args.native_template:
         command += ["--chat-template-file", str(template)]
@@ -133,7 +135,7 @@ def main():
             status, raw = call("/props")
             config = json.loads(raw)["kvmem"]["historical"]
             check("published historical configuration", status == 200 and config["capacity"] == 32 and
-                  config["mode"] == args.mode and config["admission"] == "finite_request" and
+                  config["mode"] == args.mode and config["policy"] == args.policy and config["admission"] == "finite_request" and
                   config["pinned_bytes"] == int(args.pinned_gb * 1024 ** 3))
             if args.admission_blocked:
                 check("published admission timeout", config["admission_wait_ms"] == 1000)

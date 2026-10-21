@@ -642,12 +642,15 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_pac
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_mean_k(HistoricalKvHandle handle) {
     return acquire_kind(handle, LeaseKind::MeanKRead, phase_bit(Phase::Live));
 }
+std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_background_mean_k(HistoricalKvHandle handle) {
+    return acquire_kind(handle, LeaseKind::MeanKRead, phase_bit(Phase::Live), false);
+}
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_external_read(HistoricalKvHandle handle) {
     return acquire_kind(handle, LeaseKind::ExternalRead, phase_bit(Phase::Live));
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_kind(
-    HistoricalKvHandle handle, LeaseKind kind, uint32_t allowed_phases) {
+    HistoricalKvHandle handle, LeaseKind kind, uint32_t allowed_phases, bool request_operation) {
     const auto shared = shared_;
     if (handle.incarnation != shared->incarnation || handle.slot >= shared->capacity ||
         shared->closing.load(std::memory_order_acquire)) return std::nullopt;
@@ -659,7 +662,7 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_kin
     Lease lease(shared, handle, kind, access);
     if (!shared->matches(handle.slot, handle) || shared->closing.load(std::memory_order_acquire))
         return std::nullopt;
-    lease.count_operation();
+    if (request_operation) lease.count_operation();
     return lease;
 }
 

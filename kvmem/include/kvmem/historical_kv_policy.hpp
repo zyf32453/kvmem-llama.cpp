@@ -117,6 +117,10 @@ private:
 
 class HistoricalKvPolicy {
 public:
+    struct Metrics {
+        uint64_t feature_blocks = 0, missing_features = 0, comparisons = 0;
+        uint64_t scored_rounds = 0, representatives = 0, no_query_rounds = 0;
+    };
     virtual ~HistoricalKvPolicy() = default;
     // Revalidate delayed decisions against the same generation's current
     // metadata. Custom strategies remain free to retire Writing/active blocks.
@@ -126,6 +130,7 @@ public:
                                         HistoricalKvWorkBudget budget,
                                         HistoricalKvDecisionBuffer & out) = 0;
     virtual void on_result(const HistoricalKvCommitResult &) noexcept {}
+    virtual Metrics metrics() const noexcept { return {}; }
 };
 
 // Deliberately independent of age, hotness, GPU residency, active status,

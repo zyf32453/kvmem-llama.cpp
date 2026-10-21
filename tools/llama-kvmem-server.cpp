@@ -137,6 +137,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem-cpu-gb GB          CPU spill arena in GiB (0 = off)\n"
             "  --kvmem-historical-capture N  finite-request historical RAM slots (opt in)\n"
             "  --kvmem-historical-gc-mode M  off, shadow or delete (default off)\n"
+            "  --kvmem-historical-gc-policy P  lru (default) or redundancy\n"
             "  --kvmem-historical-gc-low N   Ready low watermark (set with high)\n"
             "  --kvmem-historical-admission-wait-ms N  Idle capacity wait before HTTP 503 (default 5000)\n"
             "  --kvmem-historical-gc-high N  Ready high watermark\n"
@@ -2695,6 +2696,7 @@ int main(int argc, char ** argv) {
     options.historical.validate();
     st.historical = options.historical;
     st.kparams.historical_pinned_bytes = st.historical.pinned_bytes;
+    st.kparams.historical_gc_policy = st.historical.policy;
     if (st.historical.capacity && (!st.kparams.enabled || st.kparams.method != 0 || st.spec_mtp ||
             !mmproj_path.empty() || options.parallel != 1 || options.conversations != 1 ||
             st.kparams.cpu_bytes || st.kparams.nvme_bytes || st.kparams.raw_k_nvme ||
@@ -3178,6 +3180,7 @@ int main(int argc, char ** argv) {
     props["kvmem"]["conversation_cpu_bytes"] = st.kparams.cpu_bytes;
     props["kvmem"]["historical"] = {{"capacity", st.historical.capacity},
         {"mode", st.historical.mode == 2 ? "delete" : st.historical.mode == 1 ? "shadow" : "off"},
+        {"policy", st.historical.policy == 1 ? "redundancy" : "lru"},
         {"ready_low", st.historical.low}, {"ready_high", st.historical.high},
         {"admission_wait_ms", st.historical.admission_wait_ms},
         {"pinned_bytes", st.historical.pinned_bytes},

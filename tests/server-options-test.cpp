@@ -31,6 +31,12 @@ int main() {
         parse_h("--kvmem-historical-capture", "8");
         h.historical.validate();
         check(h.historical.low == 1 && h.historical.high == 2);
+        check(h.historical.policy == 0);
+        parse_h("--kvmem-historical-gc-policy", "redundancy");
+        check(h.historical.policy == 1);
+        rejects([&] { parse_h("--kvmem-historical-gc-policy", "unknown"); });
+        parse_h("--kvmem-historical-gc-policy", "lru");
+        check(h.historical.policy == 0);
         check(h.historical.admission_wait_ms == 5000);
         parse_h("--kvmem-historical-admission-wait-ms", "0");
         check(h.historical.admission_wait_ms == 0);

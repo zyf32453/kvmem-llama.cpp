@@ -7,6 +7,7 @@
 #include "kvmem/kvmem_runtime.hpp"
 #include "kvmem/historical_kv_cleanup.hpp"
 #include "kvmem/historical_kv_active_set.hpp"
+#include "kvmem/historical_kv_redundancy.hpp"
 #include "kvmem/fixed_byte_arena.hpp"
 #include "kvmem/raw_kv_store.hpp"
 #include "kvmem/rope.hpp"
@@ -142,10 +143,12 @@ public:
     }
     // Recapture Q for retrieval even while replaying a cached query span.
     bool want_q_capture() const {
+        if (historical_redundancy_) return prefill_capture_ && !replay_;
         return method_ == 1 && !retrieval_pinned_ && !query_frozen_ &&
             (explicit_spans_ ? !turn_spans_.query.empty() : query_begin_ >= 0);
     }
     bool want_decode_mean() const {
+        if (historical_redundancy_) return !replay_;
         return retrieval_pinned_ && method_ == 1 && !replay_;
     }
     void end_prefill_capture();
@@ -632,6 +635,7 @@ private:
     bool historical_batch_context_in_use_ = false;
     std::unique_ptr<kvmem::HistoricalKvGc> historical_gc_;
     int historical_gc_mode_ = 0;
+    std::shared_ptr<kvmem::HistoricalKvMeanKeySource> historical_redundancy_;
     std::unique_ptr<kvmem::HistoricalKvActiveSet> historical_active_;
     struct HistoricalStageIn {
         kvmem::HistoricalKvShadowDirectory::StageInAccess source;

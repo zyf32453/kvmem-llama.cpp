@@ -198,6 +198,9 @@ public:
     std::optional<Lease> acquire_packed_kv(HistoricalKvHandle handle);
     std::optional<Lease> acquire_packed_kv_transfer(HistoricalKvHandle handle);
     std::optional<Lease> acquire_mean_k(HistoricalKvHandle handle);
+    // Background scoring pins CPU data but is not unfinished request work.
+    // Its lease still prevents release/reuse and keeps the repository alive.
+    std::optional<Lease> acquire_background_mean_k(HistoricalKvHandle handle);
     // Visibility/identity half of external storage admission. This grants no
     // payload access: the caller must also acquire the exact allocation lease
     // before reporting a successful read/transfer admission.
@@ -292,7 +295,8 @@ private:
         ReleaseCallback release, ResourceRelease resources, Lease * gpu_execution = nullptr);
     bool claim_gc_owner() noexcept;
     void release_gc_owner() noexcept;
-    std::optional<Lease> acquire_kind(HistoricalKvHandle, LeaseKind, uint32_t allowed_phases);
+    std::optional<Lease> acquire_kind(HistoricalKvHandle, LeaseKind, uint32_t allowed_phases,
+                                     bool request_operation = true);
     std::shared_ptr<Shared> shared_;
 };
 

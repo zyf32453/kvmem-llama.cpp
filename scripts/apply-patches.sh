@@ -157,3 +157,12 @@ else
     git apply "$HISTORICAL_GRAPH_INPUT"
     echo "applied compact historical graph inputs"
 fi
+
+REDUNDANCY="$ROOT/patches/0014-historical-redundancy-capture.patch"
+if git apply --reverse --check "$REDUNDANCY" 2>/dev/null; then
+    echo "historical redundancy feature capture already applied"
+else
+    git apply --check "$REDUNDANCY"
+    git apply "$REDUNDANCY"
+    echo "applied historical redundancy feature capture"
+fi

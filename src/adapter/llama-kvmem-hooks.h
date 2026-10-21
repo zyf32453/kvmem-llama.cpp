@@ -37,6 +37,7 @@ struct llama_kvmem_params {
     bool     harvest_v;            // prefill D2H V with K (default off; not implied by raw_k_nvme)
     int32_t  mtp_state;            // 0 snapshots, 1 auto, 2 replay
     uint64_t historical_pinned_bytes; // independent historical page-locked pool
+    int32_t  historical_gc_policy; // 0 LRU (default), 1 block redundancy + query importance
 };
 
 // Call before llama_init_from_model. A null pointer resets to defaults
