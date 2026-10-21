@@ -31,7 +31,10 @@ std::shared_ptr<HistoricalKvCaptureDomain> HistoricalKvCaptureDomain::try_prepar
         auto result = std::shared_ptr<HistoricalKvCaptureDomain>(new HistoricalKvCaptureDomain(runtime));
         result->cleanup_ticket_ = std::move(*ticket);
         result->cleanup_task_ = std::make_unique<MetadataCleanup>();
-        result->repository_ = std::make_shared<HistoricalKvRepository>(capacity);
+        const auto & store_config = runtime.store().config();
+        result->repository_ = std::make_shared<HistoricalKvRepository>(capacity, 0,
+            uint64_t(store_config.sink_blocks) * store_config.block_tokens,
+            uint64_t(store_config.recent_blocks) * store_config.block_tokens);
         result->storage_ = std::make_shared<HistoricalKvRawStore>(std::move(config), capacity);
         result->cleanup_task_->metadata = runtime.prepare_historical_metadata(
             result->repository_, result->storage_, capacity);

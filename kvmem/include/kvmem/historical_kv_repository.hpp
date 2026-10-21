@@ -53,7 +53,7 @@ public:
         uint32_t pending = 0; // Retired or Releasing full-slot credits.
     };
 
-    enum class RetireResult { Committed, AlreadyRetired, Stale, VersionChanged, Retry };
+    enum class RetireResult { Committed, AlreadyRetired, Stale, VersionChanged, Retry, NotPermitted };
     // ResourceReleased means a component progressed without completing the
     // whole record. HostReleased means the entire Host bundle just completed,
     // while another dependency remains. Neither grants a Ready slot credit.
@@ -127,7 +127,10 @@ public:
 
     // Zero requests an automatically unique incarnation for this process.
     // Explicit nonzero incarnations are for a caller-controlled session domain.
-    explicit HistoricalKvRepository(uint32_t capacity, uint64_t incarnation = 0);
+    // Immutable policy windows, measured in original token positions. They
+    // only annotate observations; explicit/custom retirement ignores them.
+    explicit HistoricalKvRepository(uint32_t capacity, uint64_t incarnation = 0,
+                                    uint64_t sink_tokens = 0, uint64_t recent_tokens = 0);
     ~HistoricalKvRepository();
     HistoricalKvRepository(const HistoricalKvRepository &) = delete;
     HistoricalKvRepository & operator=(const HistoricalKvRepository &) = delete;
@@ -201,8 +204,13 @@ public:
     std::optional<Lease> acquire_external_read(HistoricalKvHandle handle);
     // When supplied, the content version is checked under the same slot guard
     // as the phase transition. A mismatch leaves the generation Live/Writing.
+    // Optional policy-owned predicate, checked with a generation guard. It
+    // must not acquire storage, block or mutate the repository. The built-in
+    // append-only sink/recent observations can only lose protection in-place.
+    using RetirePredicate = bool (*)(const HistoricalKvBlockMeta &, const void *) noexcept;
     RetireResult retire(HistoricalKvHandle handle,
-                        std::optional<uint64_t> expected_content_version = std::nullopt);
+                        std::optional<uint64_t> expected_content_version = std::nullopt,
+                        RetirePredicate permits = nullptr, const void * policy = nullptr);
     // Call from the CPU reclaimer, not from the foreground. False/throwing
     // callbacks keep admission closed and retry with the same handle. Host
     // release may run in Retired while GPU-only/metadata users remain; only
@@ -262,6 +270,9 @@ public:
     std::vector<HistoricalKvBlockMeta> snapshot() const;
     std::vector<HistoricalKvBlockMeta> snapshot_range(uint32_t first, uint32_t count) const;
     uint32_t ready_count() const;
+    struct CapacityObservation { uint32_t ready = 0, pending = 0; };
+    // Atomic counters sampled over the fixed slot table; never admission credit.
+    CapacityObservation observe_capacity() const noexcept;
     uint32_t ready_count_range(uint32_t first, uint32_t count) const;
     uint32_t capacity() const;
     uint64_t incarnation() const;

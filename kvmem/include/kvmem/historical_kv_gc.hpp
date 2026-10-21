@@ -60,6 +60,9 @@ public:
     bool worker_finished() const noexcept { return worker_finished_.load(std::memory_order_acquire); }
     void stop() noexcept;
     void manual_tick();
+    // Set by the serialized request owner only while no request is executing.
+    // Zero clears the demand. This never reserves or waits for pending bytes.
+    void request_capacity(uint32_t ready);
     Stats stats() const;
 
 private:
@@ -97,6 +100,7 @@ private:
     std::atomic<uint64_t> worker_failures_{0};
     std::atomic<uint64_t> host_released_early_{0};
     std::atomic<uint64_t> partial_resource_releases_{0};
+    std::atomic<uint32_t> requested_ready_{0};
     bool policy_failed_ = false;
 };
 

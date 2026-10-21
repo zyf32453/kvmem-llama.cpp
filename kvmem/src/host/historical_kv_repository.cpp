@@ -134,9 +134,19 @@ struct HistoricalKvRepository::Shared {
         ResourceRelease resources;
     };
 
-    Shared(uint32_t n, uint64_t session)
+    Shared(uint32_t n, uint64_t session, uint64_t sink, uint64_t recent)
         : capacity(n), incarnation(session), repository_id(allocate_repository_id()),
-          slots(new Slot[n]) {}
+          slots(new Slot[n]), sink_tokens(sink), recent_tokens(recent) {}
+
+    // Publication is append-only within an incarnation. A stale observation
+    // protects extra recent history rather than reopening an expired window.
+    void observe_end(uint64_t begin, uint32_t count) noexcept {
+        const uint64_t end = begin > UINT64_MAX - count ? UINT64_MAX : begin + count;
+        auto old = history_end.load(std::memory_order_relaxed);
+        for (unsigned attempt = 0; old < end && attempt < kCasAttempts; ++attempt)
+            if (history_end.compare_exchange_weak(old, end, std::memory_order_release,
+                                                  std::memory_order_relaxed)) break;
+    }
 
     bool try_pin(uint32_t index, uint32_t phases, HostAccess access = HostAccess::None) const {
         auto & control = slots[index].control;
@@ -183,6 +193,12 @@ struct HistoricalKvRepository::Shared {
             std::min<uint64_t>(refs - 1, std::numeric_limits<uint32_t>::max()) : 0);
         out.active = slot.exec_refs.load(std::memory_order_acquire) != 0;
         out.sealed = out.life == HistoricalKvLife::Live;
+        const auto end = history_end.load(std::memory_order_acquire);
+        const auto recent_begin = end > recent_tokens ? end - recent_tokens : 0;
+        const auto block_end = slot.original_begin > UINT64_MAX - slot.valid_tokens
+            ? UINT64_MAX : slot.original_begin + slot.valid_tokens;
+        out.mandatory = slot.original_begin < sink_tokens ||
+            (recent_tokens && block_end > recent_begin);
         out.host_references = static_cast<uint32_t>(host_refs_of(control));
         out.host_released = slot.host_release.load(std::memory_order_acquire) == HostRelease::Released;
         out.packed_kv_references = static_cast<uint32_t>(resource_refs_of(control, HostResource::PackedKv));
@@ -203,6 +219,8 @@ struct HistoricalKvRepository::Shared {
     const uint64_t incarnation;
     const uint64_t repository_id;
     std::unique_ptr<Slot[]> slots;
+    const uint64_t sink_tokens, recent_tokens;
+    std::atomic<uint64_t> history_end{0};
     std::atomic<uint32_t> cursor{0};
     std::atomic<bool> closing{false};
     std::atomic<bool> gc_owner_claimed{false};
@@ -320,9 +338,10 @@ void HistoricalKvRepository::Lease::disarm() noexcept {
     split_writer_ = false;
 }
 
-HistoricalKvRepository::HistoricalKvRepository(uint32_t capacity, uint64_t incarnation)
+HistoricalKvRepository::HistoricalKvRepository(uint32_t capacity, uint64_t incarnation,
+                                               uint64_t sink_tokens, uint64_t recent_tokens)
     : shared_(std::make_shared<Shared>(capacity,
-          incarnation ? incarnation : allocate_incarnation())) {
+          incarnation ? incarnation : allocate_incarnation(), sink_tokens, recent_tokens)) {
     if (!capacity) throw std::invalid_argument("historical KV capacity must be nonzero");
     if (!shared_->slots[0].control.is_lock_free())
         throw std::runtime_error("historical KV control atomic is not lock-free on this host");
@@ -485,6 +504,7 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_reser
     // the producer window's execution admission.
     const uint64_t writer_refs = split_writer ?
         code(Phase::Writing, 0, 1) + kKvOne + kMeanOne : code(Phase::Writing, 1);
+    shared->observe_end(original_begin, valid_tokens);
     slot.control.store(writer_refs + (gpu_execution ? kOtherOne : 0), std::memory_order_release);
     return writer;
 }
@@ -547,6 +567,7 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::begin_write
         slot.writer_resources.store(split_writer ? kWriterAll : 0, std::memory_order_relaxed);
         slot.release = std::move(release);
         slot.generation.store(handle.generation, std::memory_order_release);
+        shared->observe_end(original_begin, valid_tokens);
         slot.control.store(split_writer ? code(Phase::Writing, 0, 1) + kKvOne + kMeanOne : code(Phase::Writing, 1),
                            std::memory_order_release);
         Lease writer(shared, handle, LeaseKind::Writer, split_writer ? HostAccess::None : HostAccess::All, split_writer);
@@ -643,7 +664,8 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_kin
 }
 
 HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(
-        HistoricalKvHandle handle, std::optional<uint64_t> expected_content_version) {
+        HistoricalKvHandle handle, std::optional<uint64_t> expected_content_version,
+        RetirePredicate permits, const void * policy) {
     const auto shared = shared_;
     if (handle.incarnation != shared->incarnation || handle.slot >= shared->capacity ||
         handle.generation == 0) return RetireResult::Stale;
@@ -677,6 +699,8 @@ HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(
         // generation. The guard prevents the slot from being reused here.
         if (expected_content_version && slot.content_version != *expected_content_version)
             return RetireResult::VersionChanged;
+        if (permits && !permits(shared->copy_meta(handle.slot, observed), policy))
+            return RetireResult::NotPermitted;
         const uint64_t desired = (observed & ~kPhaseMask) | static_cast<uint64_t>(Phase::Retired);
         if (control.compare_exchange_weak(observed, desired, std::memory_order_acq_rel,
                                           std::memory_order_acquire)) return RetireResult::Committed;
@@ -1030,6 +1054,18 @@ std::vector<HistoricalKvBlockMeta> HistoricalKvRepository::snapshot_range(
 
 uint32_t HistoricalKvRepository::ready_count() const {
     return ready_count_range(0, shared_->capacity);
+}
+
+HistoricalKvRepository::CapacityObservation HistoricalKvRepository::observe_capacity() const noexcept {
+    CapacityObservation out;
+    for (uint32_t index = 0; index < shared_->capacity; ++index) {
+        const auto & slot = shared_->slots[index];
+        const auto phase = phase_of(slot.control.load(std::memory_order_acquire));
+        if (phase == Phase::Ready && slot.generation.load(std::memory_order_acquire) != UINT64_MAX)
+            ++out.ready;
+        else if (phase == Phase::Retired || phase == Phase::Releasing) ++out.pending;
+    }
+    return out;
 }
 
 uint32_t HistoricalKvRepository::ready_count_range(uint32_t first, uint32_t count) const {

@@ -24,9 +24,15 @@ bool historical_kv_can_request_delete(const HistoricalKvBlockMeta & block,
             block.life == HistoricalKvLife::Live);
 }
 
-HistoricalKvLruPolicy::HistoricalKvLruPolicy(size_t capacity) : capacity_(capacity) {
+HistoricalKvLruPolicy::HistoricalKvLruPolicy(size_t capacity, bool keep_mandatory)
+    : capacity_(capacity), keep_mandatory_(keep_mandatory) {
     if (capacity == 0) throw std::invalid_argument("historical KV policy capacity");
     candidates_.reserve(capacity);
+}
+
+bool HistoricalKvLruPolicy::permits(const HistoricalKvBlockMeta & block) const noexcept {
+    return block.life == HistoricalKvLife::Live && block.sealed &&
+           (!keep_mandatory_ || !block.mandatory);
 }
 
 HistoricalKvStepResult HistoricalKvLruPolicy::step(
@@ -49,23 +55,26 @@ HistoricalKvStepResult HistoricalKvLruPolicy::step(
         cursor_ = 0;
         done_ = false;
         candidates_.clear();
-        if (pressure.ready < pressure.low) pressure_mode_ = true;
-        if (pressure.ready >= pressure.high) pressure_mode_ = false;
-        const uint32_t deficit = pressure.high > pressure.ready
-                               ? pressure.high - pressure.ready : 0;
-        wanted_ = pressure_mode_ && deficit > pressure.pending_slot_credit
-                ? deficit - pressure.pending_slot_credit : 0;
         terminal_ = HistoricalKvStepStatus::Complete;
-        if (wanted_ == 0) done_ = true;
     }
     if (done_) return {terminal_, 0, 0};
+    if (pressure.ready < pressure.low) pressure_mode_ = true;
+    if (pressure.ready >= pressure.high) pressure_mode_ = false;
+    const uint32_t target = std::max(pressure_mode_ ? pressure.high : 0u,
+                                     pressure.requested_ready);
+    const uint32_t deficit = target > pressure.ready ? target - pressure.ready : 0;
+    wanted_ = deficit > pressure.pending_slot_credit ? deficit - pressure.pending_slot_credit : 0;
+    if (!wanted_) {
+        done_ = true;
+        return {HistoricalKvStepStatus::Complete, 0, 0};
+    }
     if (out.remaining() == 0) return {HistoricalKvStepStatus::Yielded, 0, 0};
 
     size_t examined = 0;
     while (cursor_ < snapshot.blocks.size() && examined < budget.scan) {
         const auto & block = snapshot.blocks[cursor_++];
         ++examined;
-        if (historical_kv_can_request_delete(block, snapshot.incarnation))
+        if (historical_kv_can_request_delete(block, snapshot.incarnation) && permits(block))
             candidates_.push_back(&block);
     }
     if (cursor_ != snapshot.blocks.size())

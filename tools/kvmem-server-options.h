@@ -63,6 +63,7 @@ inline int kvmem_cli_gpu_layers(const char * option, const char * value) {
 struct kvmem_server_historical_options {
     uint32_t capacity = 0, low = 0, high = 0;
     uint64_t pinned_bytes = 0;
+    uint32_t admission_wait_ms = 5000;
     int mode = 0;
     bool mode_set = false, low_set = false, high_set = false, pinned_set = false;
     template<typename Need>
@@ -84,6 +85,8 @@ struct kvmem_server_historical_options {
             const double gb = kvmem_cli_real(arg.c_str(), need(arg.c_str()), 0, 1048576);
             pinned_bytes = static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
             pinned_set = true;
+        } else if (arg == "--kvmem-historical-admission-wait-ms") {
+            admission_wait_ms = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 0, 60000);
         } else return false;
         return true;
     }
@@ -95,8 +98,8 @@ struct kvmem_server_historical_options {
         if (!mode) return;
         if (capacity < 2) throw std::invalid_argument("historical GC requires at least two slots");
         if (!low_set) {
-            low = std::max(1u, capacity / 4);
-            high = std::max(low + 1, capacity / 2);
+            low = std::max(1u, capacity / 20);
+            high = std::max(low + 1, capacity / 10);
         }
         if (!low || low >= high || high > capacity)
             throw std::invalid_argument("historical GC requires 0 < low < high <= capacity");

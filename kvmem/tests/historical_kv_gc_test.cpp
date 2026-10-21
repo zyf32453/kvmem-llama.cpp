@@ -374,6 +374,82 @@ void test_manager_reclaims_real_ram_payload() {
           !raw->inspect(*repo, handle), "manager did not release real RAM bytes");
 }
 
+void test_lru_retention_windows_and_custom_override() {
+    auto repo = std::make_shared<HistoricalKvRepository>(4, 0, 4, 4);
+    HistoricalKvHandle handles[4];
+    unsigned released = 0;
+    for (unsigned i = 0; i < 4; ++i) {
+        auto writer = repo->begin_write(i, i * 4, 4, i + 1, 8,
+            [&](const HistoricalKvHandle &) { ++released; return true; });
+        check(writer && repo->publish_write(*writer), "retention fixture failed");
+        handles[i] = writer->handle();
+    }
+    check(repo->inspect(handles[0])->mandatory && repo->inspect(handles[3])->mandatory &&
+          !repo->inspect(handles[1])->mandatory && !repo->inspect(handles[2])->mandatory,
+          "original-position sink/recent annotations are incorrect");
+    auto cfg = config(HistoricalKvGc::Mode::Delete);
+    cfg.ready_high = 4;
+    cfg.scan_blocks = cfg.batch_blocks = cfg.reclaim_blocks = 4;
+    {
+        HistoricalKvGc gc(repo, std::make_unique<HistoricalKvLruPolicy>(4), cfg);
+        for (int i = 0; i < 8; ++i) gc.manual_tick();
+        check(released == 2 && repo->ready_count() == 2 &&
+              repo->acquire_new(handles[0]) && repo->acquire_new(handles[3]) &&
+              !repo->acquire_new(handles[1]) && !repo->acquire_new(handles[2]),
+              "LRU removed mandatory history or failed to reclaim cold history");
+        auto writer = repo->begin_write(4, 16, 4, 5, 8,
+            [&](const HistoricalKvHandle &) { ++released; return true; });
+        check(writer && repo->inspect(writer->handle())->mandatory &&
+              !repo->inspect(handles[3])->mandatory, "recent window did not advance");
+        const auto writing = writer->handle();
+        for (int i = 0; i < 8; ++i) gc.manual_tick();
+        check(repo->inspect(writing)->life == HistoricalKvLife::Writing,
+              "LRU retired an unfinished new tail");
+    }
+    // Protection belongs to LRU, not the deletion protocol.
+    HistoricalKvGc custom(repo, std::make_unique<DeleteOnce>(handles[0]), cfg);
+    custom.manual_tick();
+    check(!repo->acquire_new(handles[0]), "mechanism vetoed custom retirement of a sink block");
+}
+
+void test_idle_capacity_demand_and_cancellation() {
+    auto repo = std::make_shared<HistoricalKvRepository>(8);
+    HistoricalKvHandle oldest{};
+    for (unsigned i = 0; i < 4; ++i) {
+        auto writer = repo->begin_write(i, i * 4, 4, 1, 8,
+            [](HistoricalKvHandle) { return true; });
+        check(writer && repo->publish_write(*writer), "demand fixture publication failed");
+        if (!i) oldest = writer->handle();
+    }
+    auto reader = repo->acquire_new(oldest);
+    check(reader.has_value(), "demand fixture reader missing");
+    auto cfg = config(HistoricalKvGc::Mode::Delete);
+    HistoricalKvGc gc(repo, std::make_unique<HistoricalKvLruPolicy>(8), cfg);
+    bool rejected = false;
+    try { gc.request_capacity(9); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    check(rejected, "oversized demand was accepted");
+    gc.request_capacity(6);
+    gc.manual_tick(); // Snapshot collection is incomplete.
+    gc.request_capacity(0);
+    for (int i = 0; i < 12; ++i) gc.manual_tick();
+    check(gc.stats().committed == 0 && repo->ready_count() == 4,
+          "cancelled idle demand deleted history above the high watermark");
+    gc.request_capacity(6);
+    for (int i = 0; i < 32; ++i) gc.manual_tick();
+    auto capacity = repo->observe_capacity();
+    check(gc.stats().committed == 2 && capacity.ready == 5 && capacity.pending == 1 &&
+          !repo->try_reserve_slots(6),
+          "pending reader-backed retirement became spendable or caused over-deletion");
+    gc.request_capacity(0);
+    reader.reset();
+    for (int i = 0; i < 12; ++i) gc.manual_tick();
+    capacity = repo->observe_capacity();
+    check(capacity.ready == 6 && capacity.pending == 0 && gc.stats().committed == 2 &&
+          repo->try_reserve_slots(6).has_value(),
+          "clearing demand prevented release or actual capacity reuse");
+}
+
 void test_tenfold_ram_reuse_without_worker_allocation() {
     constexpr uint32_t capacity = 4;
     constexpr uint32_t appends = 10 * capacity;
@@ -514,6 +590,8 @@ int main() {
         test_lru_shadow_does_not_repropose_same_generations();
         test_custom_policy_needs_no_lru_watermarks();
         test_manager_reclaims_real_ram_payload();
+        test_lru_retention_windows_and_custom_override();
+        test_idle_capacity_demand_and_cancellation();
         test_tenfold_ram_reuse_without_worker_allocation();
     } catch (const std::exception & e) {
         std::cerr << e.what() << '\n';

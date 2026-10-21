@@ -1,5 +1,9 @@
 # Historical KV 后台 GC 迁移方案
 
+> 2026-10-21 范围调整：本分支按导师当前 `kvmem-vllm` 的基本后台管理交付，
+> 当前范围、实现差异及验收见 [CPU 历史 KV 后台管理](background-history-gc.md)。
+> 下文保留此前设计演进和测试记录；其中扩展生产化待办不再全部作为本轮交付门槛。
+
 ## 结论与边界
 
 `kvmem-qw3` 的 legacy GC（`include/qw3/kvmem_gc.hpp`、`src/kvmem_gc.cpp`、`docs/kvmem_gc_v1.md`）会在后台选择**单个 historical block**，先在新目录视图中将其逻辑删除，等旧读者与 lease 退出后再释放该块的原始 K/V 权威存储。它是永久缩减可检索历史，并非把 GPU 块挪到 CPU 的缓存淘汰。它的策略也不是纯 LRU：最近使用、指数衰减频率、检索分数、重复/覆盖证据、anchor 和保护状态共同参与决策。

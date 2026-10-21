@@ -75,6 +75,11 @@ LLAMA_API bool llama_kvmem_historical_capture_reset_begin(struct llama_context *
 // After begin and before decode. mode: 1 shadow, 2 delete. LRU pressure
 // requires 0 < ready_low < ready_high <= historical capacity.
 LLAMA_API bool llama_kvmem_historical_gc_start(int mode, uint32_t ready_low, uint32_t ready_high);
+// Idle admission only: ask LRU for real Ready capacity, without waiting or
+// granting a reservation. All-zero demand clears the request, including after
+// cancellation/timeouts. Existing finite decode never calls this interface.
+LLAMA_API bool llama_kvmem_historical_gc_request_capacity(struct llama_context * ctx,
+        uint64_t input_tokens, uint64_t max_output_tokens, uint64_t max_appends);
 LLAMA_API bool llama_kvmem_historical_capture_finish(void);
 // End a healthy request at a batch boundary, even with unconsumed input.
 // Synchronizes submitted device/capture work, returns unused reservations on

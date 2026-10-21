@@ -1516,6 +1516,29 @@ bool llama_memory_kvmem::reset_historical_capture(uint32_t capacity, uint64_t in
     }
 }
 
+bool llama_memory_kvmem::request_historical_capacity(uint64_t input_tokens,
+        uint64_t max_output_tokens, uint64_t max_appends) {
+    if (!historical_gc_ || historical_gc_mode_ != 2) return false;
+    if (!input_tokens && !max_output_tokens && !max_appends) {
+        historical_gc_->request_capacity(0);
+        return true;
+    }
+    if (!historical_capture_ || !historical_capture_->finished() ||
+        historical_capture_->failed() || capture_failed_ ||
+        input_tokens > capture_token_capacity_ || max_output_tokens > capture_token_capacity_ - input_tokens)
+        return false;
+    try {
+        kvmem::HistoricalKvRamDemand demand;
+        demand.uncached_input_tokens = input_tokens;
+        demand.max_accepted_output_tokens = max_output_tokens;
+        demand.max_append_boundaries = max_appends;
+        const auto required = kvmem::HistoricalKvRamReservation::required_slots(demand, block_tokens_);
+        if (required > historical_domain_->repository()->capacity()) return false;
+        historical_gc_->request_capacity(static_cast<uint32_t>(required));
+        return true;
+    } catch (const std::exception &) { return false; }
+}
+
 bool llama_memory_kvmem::start_historical_gc(int mode, uint32_t ready_low,
                                              uint32_t ready_high) {
     if (!historical_capture_ || historical_capture_->failed() ||
@@ -6421,6 +6444,13 @@ bool llama_kvmem_historical_capture_begin(llama_context * ctx, uint32_t capacity
 bool llama_kvmem_historical_gc_start(int mode, uint32_t ready_low, uint32_t ready_high) {
     auto * mem = kvmem_capture_active();
     return mem && mem->start_historical_gc(mode, ready_low, ready_high);
+}
+
+bool llama_kvmem_historical_gc_request_capacity(llama_context * ctx,
+        uint64_t input_tokens, uint64_t max_output_tokens, uint64_t max_appends) {
+    auto * mem = kvmem_capture_active();
+    return mem && ctx && ctx->get_memory() == mem &&
+        mem->request_historical_capacity(input_tokens, max_output_tokens, max_appends);
 }
 
 bool llama_kvmem_historical_capture_reset_begin(llama_context * ctx, uint32_t capacity,

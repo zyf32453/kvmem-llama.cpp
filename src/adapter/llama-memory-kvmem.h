@@ -156,6 +156,8 @@ public:
     bool reset_historical_capture(uint32_t capacity, uint64_t input_tokens,
                                   uint64_t max_output_tokens, uint64_t max_appends);
     bool start_historical_gc(int mode, uint32_t ready_low, uint32_t ready_high);
+    bool request_historical_capacity(uint64_t input_tokens, uint64_t max_output_tokens,
+                                     uint64_t max_appends);
     bool finish_historical_capture();
     bool cancel_historical_capture();
     void fail_historical_capture() noexcept;

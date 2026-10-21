@@ -138,6 +138,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem-historical-capture N  finite-request historical RAM slots (opt in)\n"
             "  --kvmem-historical-gc-mode M  off, shadow or delete (default off)\n"
             "  --kvmem-historical-gc-low N   Ready low watermark (set with high)\n"
+            "  --kvmem-historical-admission-wait-ms N  Idle capacity wait before HTTP 503 (default 5000)\n"
             "  --kvmem-historical-gc-high N  Ready high watermark\n"
             "  --kvmem-historical-pinned-gb GB  independent page-locked historical KV budget\n"
             "  --kvmem-nvme-gb GB         NVMe file in GiB (0 = off)\n"
@@ -1193,7 +1194,8 @@ static int decode_span_maybe_spec(ServerState & st, const llama_token * toks, in
 #include "kvmem-multimodal-server.h"
 #include "kvmem-lane-conversations.h"
 
-static bool historical_begin_request(ServerState & st, const std::vector<llama_token> & prompt) {
+static bool historical_begin_request(ServerState & st, const std::vector<llama_token> & prompt,
+                                     const std::function<bool()> & cancelled) {
     if (!st.historical.capacity) return true;
     st.mm_error.clear();
     st.mm_error_status = 503;
@@ -1217,9 +1219,32 @@ static bool historical_begin_request(ServerState & st, const std::vector<llama_t
     const uint64_t output = st.turn_generation_rows;
     const uint64_t appends = (input + st.n_batch - 1) / st.n_batch + output;
     const bool reset = st.historical_initialized && !reuse;
-    const bool accepted = reset
+    bool accepted = reset
         ? llama_kvmem_historical_capture_reset_begin(st.ctx, st.historical.capacity, input, output, appends)
         : llama_kvmem_historical_capture_begin(st.ctx, st.historical.capacity, input, output, appends);
+    // Queue only before an exact-prefix continuation is admitted. The native
+    // worker supplies actual Ready slots; pending retirement is never credit.
+    // Reset and invalid/oversized requests retain their immediate refusal path.
+    if (!accepted && reuse && st.historical.admission_wait_ms &&
+        llama_kvmem_historical_gc_request_capacity(st.ctx, input, output, appends)) {
+        struct ClearDemand {
+            llama_context * ctx;
+            ~ClearDemand() { llama_kvmem_historical_gc_request_capacity(ctx, 0, 0, 0); }
+        } clear{st.ctx};
+        const auto started = std::chrono::steady_clock::now();
+        const auto deadline = started + std::chrono::milliseconds(st.historical.admission_wait_ms);
+        unsigned retries = 0;
+        while (!accepted && !cancelled() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (cancelled()) break;
+            ++retries;
+            accepted = llama_kvmem_historical_capture_begin(st.ctx, st.historical.capacity, input, output, appends);
+        }
+        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        LOG_INF("srv    KVMEM_HISTORICAL_ADMISSION retries=%u waited_ms=%lld admitted=%d cancelled=%d\n",
+            retries, (long long) waited, int(accepted), int(cancelled()));
+    }
     if (!accepted) {
         st.mm_error = "historical request reservation unavailable; no decode was started";
         LOG_WRN("srv    KVMEM_HISTORICAL_HTTP refused input=%llu output=%llu reset=%d\n",
@@ -3154,6 +3179,7 @@ int main(int argc, char ** argv) {
     props["kvmem"]["historical"] = {{"capacity", st.historical.capacity},
         {"mode", st.historical.mode == 2 ? "delete" : st.historical.mode == 1 ? "shadow" : "off"},
         {"ready_low", st.historical.low}, {"ready_high", st.historical.high},
+        {"admission_wait_ms", st.historical.admission_wait_ms},
         {"pinned_bytes", st.historical.pinned_bytes},
         {"admission", st.historical.capacity ? "finite_request" : "disabled"}};
     props["kvmem"]["conversation_bytes_max"] = options.conversation_bytes;
@@ -3513,7 +3539,7 @@ int main(int argc, char ** argv) {
         const int force = force_pos_from_substr(st.vocab, toks, cr.force_substr);
         // Admission happens before committing SSE headers, so both response
         // transports return HTTP 503 when finite RAM cannot be reserved.
-        if (!historical_begin_request(st, toks)) {
+        if (!historical_begin_request(st, toks, cancelled)) {
             res.status = st.mm_error_status;
             res.set_content(json{{"error", st.mm_error}}.dump(), "application/json");
             return;

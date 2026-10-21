@@ -70,7 +70,10 @@ void HistoricalKvGc::run() noexcept {
 }
 
 HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & intent) {
-    switch (repository_->retire(intent.victim, intent.expected_content_version)) {
+    switch (repository_->retire(intent.victim, intent.expected_content_version,
+            [](const HistoricalKvBlockMeta & meta, const void * policy) noexcept {
+                return static_cast<const HistoricalKvPolicy *>(policy)->permits(meta);
+            }, policy_.get())) {
     case HistoricalKvRepository::RetireResult::Committed:
         return HistoricalKvCommitCode::Committed;
     case HistoricalKvRepository::RetireResult::AlreadyRetired:
@@ -78,11 +81,18 @@ HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & i
     case HistoricalKvRepository::RetireResult::Stale:
         return HistoricalKvCommitCode::Stale;
     case HistoricalKvRepository::RetireResult::VersionChanged:
+    case HistoricalKvRepository::RetireResult::NotPermitted:
         return HistoricalKvCommitCode::Reevaluate;
     case HistoricalKvRepository::RetireResult::Retry:
         return HistoricalKvCommitCode::Retry;
     }
     return HistoricalKvCommitCode::Retry;
+}
+
+void HistoricalKvGc::request_capacity(uint32_t ready) {
+    if (ready > repository_->capacity())
+        throw std::invalid_argument("historical GC capacity request exceeds repository");
+    requested_ready_.store(ready, std::memory_order_release);
 }
 
 void HistoricalKvGc::acknowledge(const HistoricalKvDeleteIntent & intent,
@@ -147,6 +157,7 @@ void HistoricalKvGc::manual_tick() {
         pressure_.low = config_.ready_low;
         pressure_.high = config_.ready_high;
         pressure_.pending_slot_credit = 0;
+        pressure_.requested_ready = requested_ready_.load(std::memory_order_acquire);
     }
     // Form one fixed observation over bounded slices; the policy never sees
     // a half-built round. It retains the resulting snapshot across Yielded.
@@ -174,6 +185,18 @@ void HistoricalKvGc::manual_tick() {
     }
     decisions_.clear_after_ack();
     HistoricalKvStepResult step;
+    // Release/admission may have changed capacity during a sliced snapshot.
+    // Refresh pressure without allocating or reading mutable payload objects.
+    const auto capacity_now = repository_->observe_capacity();
+    pressure_.ready = capacity_now.ready;
+    pressure_.pending_slot_credit = capacity_now.pending;
+    if (config_.mode == Mode::Shadow) {
+        for (const auto & block : round_.blocks)
+            if (shadow_generation_[block.handle.slot] == block.handle.generation &&
+                repository_->completion_state(block.handle) == HistoricalKvRepository::CompletionState::Live)
+                ++pressure_.pending_slot_credit;
+    }
+    pressure_.requested_ready = requested_ready_.load(std::memory_order_acquire);
     try {
         step = policy_->step(round_, pressure_,
                              {config_.scan_blocks, config_.batch_blocks}, decisions_);
@@ -225,6 +248,8 @@ void HistoricalKvGc::manual_tick() {
         }
         seen_generation_[intent.victim.slot] = intent.victim.generation;
         if (config_.mode == Mode::Shadow) {
+            const auto current = repository_->inspect(intent.victim);
+            if (!current || !policy_->permits(*current)) continue;
             shadow_generation_[intent.victim.slot] = intent.victim.generation;
             ++shadow_;
             continue;

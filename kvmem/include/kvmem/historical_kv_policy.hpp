@@ -32,6 +32,8 @@ struct HistoricalKvBlockMeta {
     uint32_t references = 0;
     bool active = false;
     bool sealed = false;
+    // A strategy input, not a mechanism-level retirement veto.
+    bool mandatory = false;
     // Observations only, never permission to read or release. Partial Host
     // release sets payload_bytes to zero but does not imply a Ready slot.
     uint32_t host_references = 0;
@@ -61,6 +63,9 @@ struct HistoricalKvPressure {
     // Planning credit for committed retirements expected to return full slots.
     // This is not available capacity and must not be given to the foreground.
     uint32_t pending_slot_credit = 0;
+    // An idle request can ask for more Ready capacity than the low watermark.
+    // Pending retirements remain planning credit, never admission capacity.
+    uint32_t requested_ready = 0;
 };
 
 struct HistoricalKvWorkBudget {
@@ -113,6 +118,9 @@ private:
 class HistoricalKvPolicy {
 public:
     virtual ~HistoricalKvPolicy() = default;
+    // Revalidate delayed decisions against the same generation's current
+    // metadata. Custom strategies remain free to retire Writing/active blocks.
+    virtual bool permits(const HistoricalKvBlockMeta &) const noexcept { return true; }
     virtual HistoricalKvStepResult step(const HistoricalKvSnapshot & snapshot,
                                         const HistoricalKvPressure & pressure,
                                         HistoricalKvWorkBudget budget,
@@ -129,7 +137,8 @@ bool historical_kv_can_request_delete(const HistoricalKvBlockMeta & block,
 // repository, called only by its single policy/manager owner.
 class HistoricalKvLruPolicy final : public HistoricalKvPolicy {
 public:
-    explicit HistoricalKvLruPolicy(size_t capacity);
+    explicit HistoricalKvLruPolicy(size_t capacity, bool keep_mandatory = true);
+    bool permits(const HistoricalKvBlockMeta & block) const noexcept override;
     HistoricalKvStepResult step(const HistoricalKvSnapshot & snapshot,
                                 const HistoricalKvPressure & pressure,
                                 HistoricalKvWorkBudget budget,
@@ -137,6 +146,7 @@ public:
 
 private:
     size_t capacity_;
+    bool keep_mandatory_;
     size_t cursor_ = 0;
     uint64_t round_ = 0;
     uint64_t incarnation_ = 0;

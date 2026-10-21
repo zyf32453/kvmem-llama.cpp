@@ -30,7 +30,12 @@ int main() {
         rejects([&] { h.historical.validate(); });
         parse_h("--kvmem-historical-capture", "8");
         h.historical.validate();
-        check(h.historical.low == 2 && h.historical.high == 4);
+        check(h.historical.low == 1 && h.historical.high == 2);
+        check(h.historical.admission_wait_ms == 5000);
+        parse_h("--kvmem-historical-admission-wait-ms", "0");
+        check(h.historical.admission_wait_ms == 0);
+        for (const char * bad : {"-1", "60001", "10x"})
+            rejects([&] { parse_h("--kvmem-historical-admission-wait-ms", bad); });
         parse_h("--kvmem-historical-gc-low", "3");
         rejects([&] { h.historical.validate(); });
         parse_h("--kvmem-historical-gc-high", "3");

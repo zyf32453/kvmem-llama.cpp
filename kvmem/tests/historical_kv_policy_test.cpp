@@ -19,6 +19,7 @@ static HistoricalKvBlockMeta block(uint32_t slot, uint64_t last_use,
     meta.last_use_seq = last_use;
     meta.birth_seq = birth;
     meta.life = life;
+    meta.sealed = life == HistoricalKvLife::Live;
     return meta;
 }
 
@@ -141,12 +142,44 @@ static void test_custom_policy_can_select_active_writing_block() {
           "mechanism-style filter rejected an active unsealed referenced block");
 }
 
+static void test_lru_sealed_mandatory_and_admission_demand() {
+    auto s = snapshot(20);
+    s.blocks[2].mandatory = true;
+    s.blocks[3].last_use_seq = 0; // An unfinished cold block is still not an LRU victim.
+    HistoricalKvLruPolicy policy(8);
+    HistoricalKvDecisionBuffer out(8);
+    auto result = policy.step(s, {3, 1, 2, 0, 6}, {8, 8}, out);
+    check(result.emitted == 2 && out.values()[0].victim.slot == 1 &&
+          out.values()[1].victim.slot == 0,
+          "LRU failed sealed/mandatory filtering or ignored admission demand above high watermark");
+    check(!policy.permits(s.blocks[2]) && !policy.permits(s.blocks[3]),
+          "LRU permits protected or unfinished records at commit");
+    HistoricalKvLruPolicy unprotected(8, false);
+    check(unprotected.permits(s.blocks[2]) && !unprotected.permits(s.blocks[3]),
+          "disabling mandatory protection changed sealed-only eligibility");
+    out.clear_after_ack();
+    ++s.round_id;
+    result = policy.step(s, {3, 1, 2, 3, 6}, {8, 8}, out);
+    check(result.emitted == 0, "admission demand double-counted pending slots");
+    ++s.round_id;
+    result = policy.step(s, {3, 1, 2, 0, 0}, {8, 8}, out);
+    check(result.emitted == 0, "cleared admission demand continued deleting history");
+    ++s.round_id;
+    result = policy.step(s, {3, 1, 2, 0, 6}, {2, 8}, out);
+    check(result.status == HistoricalKvStepStatus::Yielded && !result.emitted,
+          "demand fixture did not pause inside the policy scan");
+    result = policy.step(s, {3, 1, 2, 0, 0}, {2, 8}, out);
+    check(result.status == HistoricalKvStepStatus::Complete && out.values().empty(),
+          "cancelled demand survived an in-progress policy scan");
+}
+
 int main() {
     try {
         test_incremental_full_directory_lru();
         test_hysteresis_and_pending_credit();
         test_output_backpressure_and_validation();
         test_custom_policy_can_select_active_writing_block();
+        test_lru_sealed_mandatory_and_admission_demand();
     } catch (const std::exception & e) {
         std::cerr << e.what() << '\n';
         return 1;

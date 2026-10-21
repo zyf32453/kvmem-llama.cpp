@@ -321,8 +321,8 @@ int main(int argc, char ** argv) {
             return 1;
         }
         if (!historical_gc_low_set) {
-            historical_gc_low = std::max(1u, historical_capacity / 4);
-            historical_gc_high = std::max(historical_gc_low + 1, historical_capacity / 2);
+            historical_gc_low = std::max(1u, historical_capacity / 20);
+            historical_gc_high = std::max(historical_gc_low + 1, historical_capacity / 10);
         }
         if (!historical_gc_low || historical_gc_low >= historical_gc_high ||
             historical_gc_high > historical_capacity) {
