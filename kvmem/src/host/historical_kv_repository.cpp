@@ -22,7 +22,7 @@ namespace {
 // contention, and without ever undoing concurrent retirement.
 enum class Phase : uint64_t {
     Ready = 0, Reserving = 1, Writing = 2, Live = 3,
-    Releasing = 4, Reserved = 6, Retired = 7
+    Releasing = 4, Growing = 5, Reserved = 6, Retired = 7
 };
 constexpr uint64_t kPhaseMask = 7;
 constexpr uint64_t kPublishBit = 1;
@@ -68,6 +68,7 @@ uint64_t code(Phase phase, uint64_t host = 0, uint64_t other = 0) {
 }
 uint32_t phase_bit(Phase phase) { return 1u << static_cast<unsigned>(phase); }
 constexpr uint32_t kReadable = (1u << static_cast<unsigned>(Phase::Writing)) |
+                               (1u << static_cast<unsigned>(Phase::Growing)) |
                                (1u << static_cast<unsigned>(Phase::Live)) |
                                (1u << static_cast<unsigned>(Phase::Retired));
 
@@ -96,7 +97,8 @@ uint64_t allocate_repository_id() {
 
 HistoricalKvLife public_life(Phase phase) {
     switch (phase) {
-        case Phase::Writing: return HistoricalKvLife::Writing;
+        case Phase::Writing:
+        case Phase::Growing: return HistoricalKvLife::Writing;
         case Phase::Live: return HistoricalKvLife::Live;
         case Phase::Retired: return HistoricalKvLife::Retired;
         case Phase::Releasing: return HistoricalKvLife::Releasing;
@@ -127,9 +129,9 @@ struct HistoricalKvRepository::Shared {
         uint64_t logical_id = 0;
         uint64_t original_begin = 0;
         uint64_t birth_seq = 0;
-        uint64_t content_version = 1;
+        std::atomic<uint64_t> content_version{1};
         uint64_t payload_bytes = 0;
-        uint32_t valid_tokens = 0;
+        std::atomic<uint32_t> valid_tokens{0};
         ReleaseCallback release;
         ResourceRelease resources;
     };
@@ -593,10 +595,47 @@ bool HistoricalKvRepository::publish_write(const Lease & writer) {
     return phase_of(control.fetch_or(kPublishBit, std::memory_order_acq_rel)) == Phase::Writing;
 }
 
+bool HistoricalKvRepository::open_append(const Lease & writer) {
+    if (!owns_writer(writer)) return false;
+    auto & slot = shared_->slots[writer.handle_.slot];
+    auto observed = slot.control.load(std::memory_order_acquire);
+    for (unsigned i = 0; i < kCasAttempts; ++i) {
+        if (phase_of(observed) != Phase::Writing) return false;
+        const auto desired = (observed & ~kPhaseMask) | uint64_t(Phase::Growing);
+        if (slot.control.compare_exchange_weak(observed, desired, std::memory_order_acq_rel)) return true;
+    }
+    return false;
+}
+
+bool HistoricalKvRepository::extend_append(const Lease & writer, uint32_t tokens) {
+    if (!owns_writer(writer)) return false;
+    auto & slot = shared_->slots[writer.handle_.slot];
+    if (phase_of(slot.control.load(std::memory_order_acquire)) != Phase::Growing ||
+        tokens <= slot.valid_tokens.load(std::memory_order_acquire) ||
+        tokens > UINT64_MAX - slot.original_begin) return false;
+    slot.valid_tokens.store(tokens, std::memory_order_release);
+    slot.content_version.fetch_add(1, std::memory_order_acq_rel);
+    shared_->observe_end(slot.original_begin, tokens);
+    return true;
+}
+
+bool HistoricalKvRepository::seal_append(const Lease & writer) {
+    if (!owns_writer(writer)) return false;
+    auto & control = shared_->slots[writer.handle_.slot].control;
+    auto observed = control.load(std::memory_order_acquire);
+    for (unsigned i = 0; i < kCasAttempts; ++i) {
+        if (phase_of(observed) != Phase::Growing) return false;
+        const auto desired = (observed & ~kPhaseMask) | uint64_t(Phase::Writing);
+        if (control.compare_exchange_weak(observed, desired, std::memory_order_acq_rel)) return true;
+    }
+    return false;
+}
+
 bool HistoricalKvRepository::release_writer_resource(const Lease & writer, HostResource resource) noexcept {
     if (!owns_writer(writer) || !writer.split_writer_ ||
         (resource != HostResource::PackedKv && resource != HostResource::MeanK)) return false;
     auto & slot = shared_->slots[writer.handle_.slot];
+    if (phase_of(slot.control.load(std::memory_order_acquire)) == Phase::Growing) return false;
     const uint8_t bit = resource == HostResource::PackedKv ? kWriterKv : kWriterMean;
     // Close the producer's future access first, then drop the backing resource
     // claim. The surviving identity ref keeps metadata/publication usable. A
@@ -615,7 +654,7 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_new
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_gpu_ready_writing(
     HistoricalKvHandle handle) {
     return acquire_kind(handle, LeaseKind::GpuExecution,
-        phase_bit(Phase::Writing) | phase_bit(Phase::Live));
+        phase_bit(Phase::Writing) | phase_bit(Phase::Growing) | phase_bit(Phase::Live));
 }
 
 std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_gpu(
@@ -696,6 +735,7 @@ HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(
     uint64_t observed = control.load(std::memory_order_acquire);
     for (unsigned attempt = 0; attempt < kCasAttempts; ++attempt) {
         if (phase_of(observed) == Phase::Retired) return RetireResult::AlreadyRetired;
+        if (phase_of(observed) == Phase::Growing) return RetireResult::NotPermitted;
         if (phase_of(observed) != Phase::Writing && phase_of(observed) != Phase::Live)
             return RetireResult::Retry;
         // This field is published before Writing and remains immutable for the
@@ -745,7 +785,7 @@ HistoricalKvRepository::ReclaimResult HistoricalKvRepository::try_reclaim(
         if (full_release) guard.disarm();
     } else if (phase == Phase::Releasing) {
         if (!shared->matches(handle.slot, handle)) return ReclaimResult::Stale;
-    } else if (phase == Phase::Writing || phase == Phase::Live) {
+    } else if (phase == Phase::Writing || phase == Phase::Growing || phase == Phase::Live) {
         if (!shared->try_pin(handle.slot, phase_bit(phase))) return ReclaimResult::Deferred;
         guard = Lease(shared, handle, LeaseKind::Read);
         return shared->matches(handle.slot, handle) ? ReclaimResult::Deferred : ReclaimResult::Stale;
@@ -842,7 +882,8 @@ bool HistoricalKvRepository::mark_executed(const Lease & admitted, uint64_t sequ
     const HistoricalKvHandle handle = admitted.handle_;
     if (handle.slot >= shared->capacity || !shared->matches(handle.slot, handle)) return false;
     const Phase phase = phase_of(shared->slots[handle.slot].control.load(std::memory_order_acquire));
-    if (phase != Phase::Writing && phase != Phase::Live && phase != Phase::Retired) return false;
+    if (phase != Phase::Writing && phase != Phase::Growing &&
+        phase != Phase::Live && phase != Phase::Retired) return false;
     auto & use = shared->slots[handle.slot].last_use_seq;
     uint64_t previous = use.load(std::memory_order_relaxed);
     for (unsigned attempt = 0; attempt < kCasAttempts; ++attempt) {
@@ -968,6 +1009,7 @@ HistoricalKvRepository::CompletionState HistoricalKvRepository::completion_state
     case Phase::Ready:
     case Phase::Reserving: return CompletionState::Retired;
     case Phase::Writing:
+    case Phase::Growing:
     case Phase::Reserved: return CompletionState::Unfinished;
     }
     return CompletionState::Unfinished;

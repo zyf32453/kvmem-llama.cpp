@@ -49,6 +49,12 @@ function(kvmem_add_test name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+# Small CPU-only demonstration using the same policy, GC and payload store.
+add_executable(historical_kv_gc_demo examples/historical_kv_gc_demo.cpp)
+target_link_libraries(historical_kv_gc_demo PRIVATE kvmem)
+add_test(NAME historical_kv_gc_demo COMMAND historical_kv_gc_demo)
+set_tests_properties(historical_kv_gc_demo PROPERTIES TIMEOUT 20)
+
 kvmem_add_test(backend_rebind_test)
 kvmem_add_test(kvmem_store_test)
 kvmem_add_test(kvmem_gc_test)

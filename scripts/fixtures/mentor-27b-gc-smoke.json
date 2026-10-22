@@ -1,0 +1,8 @@
+{
+  "name": "mentor-27b-gc-smoke",
+  "system": "Answer each user message with exactly one short sentence. Do not include reasoning.",
+  "turns": [
+    "What is 19 plus 23?",
+    "Now add 5 to that result."
+  ]
+}

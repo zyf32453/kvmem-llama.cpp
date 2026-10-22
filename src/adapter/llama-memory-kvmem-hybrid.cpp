@@ -75,6 +75,8 @@ llama_memory_context_ptr llama_memory_kvmem_hybrid::init_batch(
         llama_batch_allocr & balloc,
         uint32_t n_ubatch,
         bool embd_all) {
+    if (attn_kvmem_->historical_capture_enabled())
+        return attn_kvmem_->init_historical_batch(balloc, n_ubatch, this);
     do {
         balloc.split_reset();
 

@@ -1,0 +1,24 @@
+diff --git a/src/llama-batch.h b/src/llama-batch.h
+--- a/src/llama-batch.h
++++ b/src/llama-batch.h
+@@ -121,4 +121,4 @@
+     // simple split, unknown number of sequence sets of unequal lengths
+-    llama_ubatch split_simple(uint32_t n_ubatch);
++    llama_ubatch split_simple(uint32_t n_ubatch, bool equal_single_seq = false);
+ 
+     // make ubatches of equal-length sequences sets
+diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
+--- a/src/llama-batch.cpp
++++ b/src/llama-batch.cpp
+@@ -587,3 +587,3 @@
+ 
+-llama_ubatch llama_batch_allocr::split_simple(uint32_t n_ubatch) {
++llama_ubatch llama_batch_allocr::split_simple(uint32_t n_ubatch, bool equal_single_seq) {
+     // find the first unused token
+@@ -629,5 +629,5 @@
+ 
+-    return ubatch_add(idxs, idxs.size(), false);
++    return ubatch_add(idxs, equal_single_seq ? 1 : idxs.size(), equal_single_seq);
+ }
+ 
+ llama_ubatch llama_batch_allocr::split_equal(uint32_t n_ubatch, bool sequential, uint32_t n_keep_tail) {

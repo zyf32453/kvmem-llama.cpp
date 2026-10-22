@@ -166,3 +166,30 @@ else
     git apply "$REDUNDANCY"
     echo "applied historical redundancy feature capture"
 fi
+
+HYBRID_CONTEXT="$ROOT/patches/0015-historical-hybrid-context-return.patch"
+if git apply --reverse --check "$HYBRID_CONTEXT" 2>/dev/null; then
+    echo "historical hybrid context patch already applied"
+else
+    git apply --check "$HYBRID_CONTEXT"
+    git apply "$HYBRID_CONTEXT"
+    echo "applied historical hybrid context return"
+fi
+
+TEXT_MROPE="$ROOT/patches/0016-historical-text-mrope-input.patch"
+if git apply --reverse --check "$TEXT_MROPE" 2>/dev/null; then
+    echo "historical text M-RoPE input patch already applied"
+else
+    git apply --check "$TEXT_MROPE"
+    git apply "$TEXT_MROPE"
+    echo "applied historical text M-RoPE input"
+fi
+
+EQUAL_UBATCH="$ROOT/patches/0017-historical-hybrid-equal-ubatch.patch"
+if git apply --reverse --check "$EQUAL_UBATCH" 2>/dev/null; then
+    echo "historical hybrid equal ubatch patch already applied"
+else
+    git apply --check "$EQUAL_UBATCH"
+    git apply "$EQUAL_UBATCH"
+    echo "applied historical hybrid equal ubatch"
+fi

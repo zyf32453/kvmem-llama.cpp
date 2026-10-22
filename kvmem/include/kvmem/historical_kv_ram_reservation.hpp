@@ -18,6 +18,8 @@ struct HistoricalKvRamDemand {
     uint64_t extra_inflight_slots = 0;
     uint64_t private_scratch_bytes = 0;
     bool streaming = false;
+    // A single request extends its private short tail until the block fills.
+    bool pack_append_tails = false;
 };
 
 class HistoricalKvRamReservation {

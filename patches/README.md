@@ -34,6 +34,12 @@ capture nodes. The Bash, Windows CUDA and Windows HIP patch entry points
 apply it idempotently. This enables capture; automatic historical GC remains
 separate and is not enabled by the patch.
 
+`0015`–`0017` extend the already prepared historical decode path to the
+Qwen3.8 hybrid attention/recurrent model. They return the hybrid batch buffers
+to the request, admit pure text with four identical M-RoPE position axes, and
+mark its single-sequence batches as equal-length for recurrent preparation.
+Multimodal inputs and recurrent rollback snapshots remain outside this path.
+
 `reasoning-budget-upgrade.patch` upgrades the v0.15.0 ReplaySSM tree.
 `replayssm-upgrade.patch` upgrades the preceding multimodal/query-replay tree.
 `multimodal-upgrade.patch` upgrades the KVMem working tree recorded before

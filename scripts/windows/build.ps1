@@ -76,6 +76,9 @@ if (!$HostOnly) {
     $historicalActive = Join-Path $SourceDir 'patches/0007-historical-active-hook.patch'
     $historicalCells = Join-Path $SourceDir 'patches/0008-historical-cell-index-reservation.patch'
     $historicalRedundancy = Join-Path $SourceDir 'patches/0014-historical-redundancy-capture.patch'
+    $historicalHybridContext = Join-Path $SourceDir 'patches/0015-historical-hybrid-context-return.patch'
+    $historicalTextMrope = Join-Path $SourceDir 'patches/0016-historical-text-mrope-input.patch'
+    $historicalEqualUbatch = Join-Path $SourceDir 'patches/0017-historical-hybrid-equal-ubatch.patch'
     $historicalSlots = Join-Path $SourceDir 'patches/0009-historical-slot-info-return.patch'
     $historicalMicrobatch = Join-Path $SourceDir 'patches/0010-historical-microbatch-pool.patch'
     $historicalInput = Join-Path $SourceDir 'patches/0011-historical-input-workspace.patch'
@@ -130,6 +133,12 @@ if (!$HostOnly) {
     if (!(Test-PatchApplied $historicalRedundancy)) {
         Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalRedundancy)
         Invoke-Checked git @('-C', $llama, 'apply', $historicalRedundancy)
+    }
+    foreach ($historicalPatch in @($historicalHybridContext, $historicalTextMrope, $historicalEqualUbatch)) {
+        if (!(Test-PatchApplied $historicalPatch)) {
+            Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalPatch)
+            Invoke-Checked git @('-C', $llama, 'apply', $historicalPatch)
+        }
     }
 }
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',

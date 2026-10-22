@@ -171,6 +171,13 @@ public:
     bool install_payload(const HistoricalKvRepository::Lease & writer,
                          HistoricalKvHandle handle, uint64_t original_begin,
                          uint32_t valid_tokens, PreparedPayload & prepared);
+    bool open_append(HistoricalKvRepository & repository,
+                     const HistoricalKvRepository::Lease & writer, HistoricalKvHandle handle);
+    bool extend_append(HistoricalKvRepository & repository,
+                       const HistoricalKvRepository::Lease & writer, HistoricalKvHandle handle,
+                       uint32_t old_tokens, uint32_t new_tokens);
+    bool seal_append(HistoricalKvRepository & repository,
+                     const HistoricalKvRepository::Lease & writer, HistoricalKvHandle handle);
 
     // Whole-layer, write-once publication. The packed rows are opaque bytes;
     // configured mean-K must cover the complete reserved span.
@@ -316,6 +323,7 @@ private:
         uint64_t repository_id = 0;
         uint64_t original_begin = 0;
         uint32_t valid_tokens = 0;
+        bool appendable = false;
         uint32_t written_layers = 0;
         uint32_t packed_complete_layers = 0;
         uint32_t mean_complete_layers = 0;

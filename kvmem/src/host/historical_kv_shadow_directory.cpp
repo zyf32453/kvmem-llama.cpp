@@ -223,6 +223,30 @@ bool HistoricalKvShadowDirectory::append_reserved_blocks(
     return true;
 }
 
+bool HistoricalKvShadowDirectory::extend_reserved_tail(
+        KvMemStore & store, const Producer & producer, uint32_t tokens) noexcept {
+    if (!reserved_append_mode_ || !tokens || !producer ||
+        store.historical_shadow_directory_ != this || store.position_order_.empty()) return false;
+    const uint32_t id = store.position_order_.back();
+    const auto it = entries_.find(id);
+    if (it == entries_.end() || it->second.state != State::Bound ||
+        it->second.producer.lock() != producer) return false;
+    auto & entry = it->second;
+    auto & block = store.blocks_[id];
+    const auto old = entry.binding.valid_tokens;
+    if (!same_span(entry.binding, block) ||
+        block.orig_pos_start + old != store.total_tokens_ ||
+        tokens > store.config().block_tokens - old ||
+        tokens > UINT32_MAX - store.total_tokens_ ||
+        !entry.storage->extend_append(*entry.repository, producer->writer(),
+                                      entry.binding.handle, old, old + tokens)) return false;
+    entry.binding.valid_tokens += tokens;
+    block.n_tokens += tokens;
+    store.total_tokens_ += tokens;
+    ++store.table_revision_;
+    return true;
+}
+
 bool HistoricalKvShadowDirectory::bind_full_block(
         const KvMemStore & store, uint32_t block_id,
         std::shared_ptr<HistoricalKvRepository> repository,

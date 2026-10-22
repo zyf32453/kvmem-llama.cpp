@@ -53,6 +53,9 @@ uint64_t HistoricalKvRamReservation::required_slots(
     const uint64_t tokens = add_checked(demand.uncached_input_tokens, *demand.max_accepted_output_tokens);
     if (tokens && !demand.max_append_boundaries)
         throw std::invalid_argument("historical KV requires an append boundary bound");
+    if (demand.pack_append_tails)
+        return add_checked(tokens / block_tokens + (tokens % block_tokens != 0),
+                           demand.extra_inflight_slots);
     const uint64_t boundaries = std::min(tokens, demand.max_append_boundaries);
     // For k nonempty appends with total T, sum ceil(t_i/B) is at most
     // k + floor((T-k)/B). This bound is attainable (put all extra tokens in

@@ -63,7 +63,7 @@ def summarize(path):
             "GC during prefill is excluded. Two earlier 256-step fixtures lacked worst-case short-span GPU slots; their output diverged and they were rejected. The final fixture checks full token residency after every step, not just the request window ID.",
             "off retains historical capture/ownership: this isolates incremental GC overhead, not total historical KV overhead.",
             "Finite retirement target, not sustained maximal release pressure; GPU power/clocks are not pinned.",
-            "Small sample, no pre-agreed performance acceptance threshold; tiny differences can be noise.",
+            "Small sample; any performance target must be stated separately. Tiny differences can be noise.",
             "The test binary retains its ordinary operator-new counting hook in all modes; product libraries are unchanged.",
         ],
     }

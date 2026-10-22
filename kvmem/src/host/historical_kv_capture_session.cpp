@@ -130,9 +130,10 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
         result->input_remaining_ = demand.uncached_input_tokens;
         result->output_remaining_ = *demand.max_accepted_output_tokens;
         result->appends_remaining_ = demand.max_append_boundaries;
+        result->pack_append_tails_ = demand.pack_append_tails;
         result->handles_.reserve(static_cast<size_t>(required));
         result->writers_.reserve(static_cast<size_t>(required));
-        result->producers_.reserve(static_cast<size_t>(required));
+        result->producers_.reserve(static_cast<size_t>(required + 1));
         result->callbacks_.reserve(static_cast<size_t>(required));
         for (uint64_t i = 0; i < required; ++i) {
             result->callbacks_.push_back({[
@@ -204,9 +205,10 @@ std::unique_ptr<HistoricalKvCaptureSession> HistoricalKvCaptureSession::try_prep
         result->input_remaining_ = demand.uncached_input_tokens;
         result->output_remaining_ = *demand.max_accepted_output_tokens;
         result->appends_remaining_ = demand.max_append_boundaries;
+        result->pack_append_tails_ = demand.pack_append_tails;
         result->handles_.reserve(static_cast<size_t>(required));
         result->writers_.reserve(static_cast<size_t>(required));
-        result->producers_.reserve(static_cast<size_t>(required));
+        result->producers_.reserve(static_cast<size_t>(required + 1));
         result->callbacks_.reserve(static_cast<size_t>(required));
         // Prepare callable allocations before publishing the session. Weak
         // repository capture avoids a repository -> callback -> owner cycle.
@@ -280,6 +282,7 @@ uint32_t HistoricalKvCaptureSession::metadata_remaining() const noexcept {
 }
 
 HistoricalKvCaptureSession::~HistoricalKvCaptureSession() {
+    if (tail_) storage_->seal_append(*repository_, tail_->writer(), tail_->handle());
     // Tasks retain their own repository/storage/context. Closing admission
     // does not revoke their existing writer or free their installed payload.
     if (repository_ && !domain_) repository_->close();
@@ -301,6 +304,8 @@ void HistoricalKvCaptureSession::release_unused() noexcept {
 
 void HistoricalKvCaptureSession::fail() noexcept {
     failed_ = true;
+    if (tail_) storage_->seal_append(*repository_, tail_->writer(), tail_->handle());
+    tail_.reset();
     repository_->close();
     if (domain_ && owns_domain_claim_) {
         domain_->request_claimed_ = false;
@@ -320,12 +325,28 @@ bool HistoricalKvCaptureSession::append(uint32_t tokens) {
         runtime_.store().block_count() != expected_blocks_) return false;
     if (!tokens) return true;
     const uint32_t block_tokens = storage_->config().max_tokens_per_slot;
-    const uint64_t count = (uint64_t(tokens) + block_tokens - 1) / block_tokens;
+    const uint32_t fill = pack_append_tails_ && tail_ ?
+        std::min(tokens, block_tokens - tail_tokens_) : 0;
+    const uint64_t count = (uint64_t(tokens - fill) + block_tokens - 1) / block_tokens;
     if (count > reservation_->ram->slots().remaining()) return false;
     try {
         writers_.clear();
+        HistoricalKvShadowDirectory::Producer touched_tail;
         uint32_t position = expected_rows_;
-        uint32_t left = tokens;
+        uint32_t left = tokens - fill;
+        if (fill) {
+            touched_tail = tail_;
+            if (!runtime_.extend_historical_tail(tail_, fill))
+                throw std::runtime_error("capture private tail extension failed");
+            tail_tokens_ += fill;
+            position += fill;
+            if (tail_tokens_ == block_tokens) {
+                if (!storage_->seal_append(*repository_, tail_->writer(), tail_->handle()))
+                    throw std::runtime_error("capture full tail sealing failed");
+                tail_.reset();
+                tail_tokens_ = 0;
+            }
+        }
         for (uint64_t i = 0; i < count; ++i) {
             const auto index = static_cast<uint32_t>(handles_.size());
             const auto n = std::min(left, block_tokens);
@@ -350,12 +371,20 @@ bool HistoricalKvCaptureSession::append(uint32_t tokens) {
             writers_.push_back(std::move(*writer));
             if (!storage_->install_payload(writers_.back(), handles_.back(), position, n, payload))
                 throw std::runtime_error("capture reserved payload installation failed");
+            if (pack_append_tails_ && n < block_tokens &&
+                !storage_->open_append(*repository_, writers_.back(), handles_.back()))
+                throw std::runtime_error("capture private tail opening failed");
             position += n;
             left -= n;
         }
-        if (!runtime_.register_historical_append(repository_, storage_, writers_, producers_,
+        if (count && !runtime_.register_historical_append(repository_, storage_, writers_, producers_,
                 domain_ ? domain_->cleanup_task_->metadata.get() : reservation_->metadata.get()))
             throw std::runtime_error("capture span registration failed");
+        if (pack_append_tails_ && count && (tokens - fill) % block_tokens) {
+            tail_ = producers_.back();
+            tail_tokens_ = (tokens - fill) % block_tokens;
+        }
+        if (touched_tail) producers_.push_back(std::move(touched_tail));
         writers_.clear();
         expected_rows_ = position;
         expected_blocks_ = runtime_.store().block_count();
@@ -385,8 +414,13 @@ bool HistoricalKvCaptureSession::cancel() {
 
 bool HistoricalKvCaptureSession::complete(bool cancelled) {
     if (!admitted_ || failed_ || finished_ || gpu_window_open() ||
-        (!cancelled && input_) || !producers_.empty() ||
-        repository_->outstanding_operations()) return false;
+        (!cancelled && input_) || !producers_.empty()) return false;
+    if (tail_) {
+        if (!storage_->seal_append(*repository_, tail_->writer(), tail_->handle())) return false;
+        tail_.reset();
+        tail_tokens_ = 0;
+    }
+    if (repository_->outstanding_operations()) return false;
     uint32_t live = 0;
     for (const auto handle : handles_) {
         switch (repository_->completion_state(handle)) {

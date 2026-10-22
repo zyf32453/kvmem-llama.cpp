@@ -121,6 +121,33 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
+set "HYBRID_CONTEXT_PATCH=%ROOT%\patches\0015-historical-hybrid-context-return.patch"
+git -C "%LLAMA_DIR%" apply --reverse --check "%HYBRID_CONTEXT_PATCH%" >nul 2>&1
+if errorlevel 1 (
+    git -C "%LLAMA_DIR%" apply --check "%HYBRID_CONTEXT_PATCH%"
+    if errorlevel 1 exit /b 1
+    git -C "%LLAMA_DIR%" apply "%HYBRID_CONTEXT_PATCH%"
+    if errorlevel 1 exit /b 1
+)
+
+set "TEXT_MROPE_PATCH=%ROOT%\patches\0016-historical-text-mrope-input.patch"
+git -C "%LLAMA_DIR%" apply --reverse --check "%TEXT_MROPE_PATCH%" >nul 2>&1
+if errorlevel 1 (
+    git -C "%LLAMA_DIR%" apply --check "%TEXT_MROPE_PATCH%"
+    if errorlevel 1 exit /b 1
+    git -C "%LLAMA_DIR%" apply "%TEXT_MROPE_PATCH%"
+    if errorlevel 1 exit /b 1
+)
+
+set "EQUAL_UBATCH_PATCH=%ROOT%\patches\0017-historical-hybrid-equal-ubatch.patch"
+git -C "%LLAMA_DIR%" apply --reverse --check "%EQUAL_UBATCH_PATCH%" >nul 2>&1
+if errorlevel 1 (
+    git -C "%LLAMA_DIR%" apply --check "%EQUAL_UBATCH_PATCH%"
+    if errorlevel 1 exit /b 1
+    git -C "%LLAMA_DIR%" apply "%EQUAL_UBATCH_PATCH%"
+    if errorlevel 1 exit /b 1
+)
+
 if "%JOBS%"=="" set "JOBS=12"
 if "%BUILD_DIR%"=="" set "BUILD_DIR=%ROOT%\build-hip-win"
 

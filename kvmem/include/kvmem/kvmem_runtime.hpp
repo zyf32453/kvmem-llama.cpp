@@ -78,6 +78,10 @@ public:
         return historical_shadow_directory_.append_blocks(
             store_, std::move(repository), std::move(storage), writers, producers);
     }
+    bool extend_historical_tail(const HistoricalKvShadowDirectory::Producer & producer,
+                                uint32_t tokens) noexcept {
+        return historical_shadow_directory_.extend_reserved_tail(store_, producer, tokens);
+    }
     std::unique_ptr<HistoricalKvShadowDirectory::AppendReservation> prepare_historical_metadata(
         std::shared_ptr<HistoricalKvRepository> repository,
         std::shared_ptr<HistoricalKvRawStore> storage, uint32_t capacity) {

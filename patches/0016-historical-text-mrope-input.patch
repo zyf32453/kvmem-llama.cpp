@@ -1,0 +1,19 @@
+diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
+--- a/src/llama-batch.cpp
++++ b/src/llama-batch.cpp
+@@ -36,5 +36,5 @@ bool llama_batch_allocr::init(
+             !batch_inp.token || batch_inp.embd || batch_inp.embd_nextn ||
+             (batch_inp.seq_id && !batch_inp.n_seq_id) ||
+-            n_pos_per_embd != 1 || output_all)) {
++            (n_pos_per_embd != 1 && n_pos_per_embd != 4) || output_all)) {
+         LLAMA_LOG_ERROR("%s: input is outside the admitted historical simple-text shape\n", __func__);
+         return false;
+@@ -524,2 +524,3 @@ bool llama_batch_allocr::prepare_historical_simple_input(uint32_t max_tokens) {
+-    if (max_tokens == 0 || n_pos_per_embd != 1 || debug != 0) return false;
++    if (max_tokens == 0 || (n_pos_per_embd != 1 && n_pos_per_embd != 4) || debug != 0)
++        return false;
+     if (prepared_historical_input) return max_tokens <= prepared_historical_max_tokens;
+@@ -567,2 +568,2 @@ bool llama_batch_allocr::use_prepared_simple_pool(
+-    if (!data || !indices || data->empty() || n_pos_per_embd != 1 ||
++    if (!data || !indices || data->empty() || (n_pos_per_embd != 1 && n_pos_per_embd != 4) ||
+         batch.n_tokens <= 0 || !batch.token || batch.embd || batch.embd_nextn) return false;

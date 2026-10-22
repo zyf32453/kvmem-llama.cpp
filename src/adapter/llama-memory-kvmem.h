@@ -31,6 +31,8 @@ struct llama_cparams;
 struct llama_memory_params;
 struct ggml_tensor;
 class llama_memory_recurrent;
+class llama_memory_hybrid_context;
+class llama_memory_kvmem_hybrid;
 class llama_memory_kvmem_mtp;
 namespace kvmem { class HistoricalKvCaptureSession; class HistoricalKvCaptureDomain; class HistoricalKvActiveSet; class HistoricalKvGc; }
 
@@ -92,6 +94,10 @@ public:
             const std::vector<llama_ubatch> & ubatches,
             uint32_t n_new_tokens,
             llama_kv_cache::slot_info_vec_t & sinfos);
+    bool historical_capture_enabled() const noexcept { return historical_capture_ != nullptr; }
+    llama_memory_context_ptr init_historical_batch(llama_batch_allocr & balloc,
+            uint32_t n_ubatch, llama_memory_kvmem_hybrid * hybrid = nullptr);
+    void return_historical_hybrid_batch_buffers(llama_memory_hybrid_context & context) noexcept;
     void reset_policy();
 
     int32_t alloc_slot();
@@ -379,9 +385,12 @@ private:
         std::vector<int32_t> indices;
         uint32_t max_tokens = 0, n_ubatch = 0;
         size_t max_ubatches = 0;
-        void prepare(uint32_t batch, uint32_t ubatch, uint64_t request_tokens) {
+        void prepare(uint32_t batch, uint32_t ubatch, uint64_t request_tokens,
+                     uint32_t n_pos_per_token = 1) {
             if (!batch || !ubatch || !request_tokens)
                 throw std::length_error("invalid historical microbatch bound");
+            if (n_pos_per_token != 1 && n_pos_per_token != 4)
+                throw std::length_error("historical text supports one or four position axes");
             max_tokens = static_cast<uint32_t>(std::min<uint64_t>(batch, request_tokens));
             n_ubatch = ubatch;
             max_ubatches = (size_t(max_tokens) + ubatch - 1) / ubatch;
@@ -395,7 +404,7 @@ private:
                 auto item = std::make_shared<llama_ubatch::data_t>();
                 item->token.reserve(n);
                 item->logical_pos.reserve(n);
-                item->pos.reserve(n);
+                item->pos.reserve(n * n_pos_per_token);
                 item->n_seq_id.reserve(n);
                 item->seq_id.reserve(n);
                 item->seq_id_unq.reserve(1);

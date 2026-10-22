@@ -1,0 +1,12 @@
+diff --git a/src/llama-memory-hybrid.h b/src/llama-memory-hybrid.h
+--- a/src/llama-memory-hybrid.h
++++ b/src/llama-memory-hybrid.h
+@@ -126,6 +126,8 @@ public:
+     const llama_kv_cache_context * get_attn() const;
+     const llama_memory_recurrent_context * get_recr() const;
+
++    std::vector<llama_ubatch> take_ubatches() noexcept { return std::move(ubatches); }
++
+ private:
+     // the index of the next ubatch to process
+     size_t i_next = 0;

@@ -58,7 +58,7 @@ public:
     HistoricalKvCaptureSession(const HistoricalKvCaptureSession &) = delete;
     HistoricalKvCaptureSession & operator=(const HistoricalKvCaptureSession &) = delete;
 
-    // Append immutable spans using reserved RAM, directory nodes, producers
+    // Append spans using reserved RAM, directory nodes, producers
     // and dense block descriptors; the successful path does not allocate.
     // Quota/state rejection does not change the runtime. Internal installation
     // failure closes the session, retaining installed data until domain teardown.
@@ -112,6 +112,7 @@ private:
     std::vector<HistoricalKvRepository::Lease> writers_;
     std::vector<HistoricalKvRepository::Lease> gpu_window_;
     std::vector<HistoricalKvShadowDirectory::Producer> producers_;
+    HistoricalKvShadowDirectory::Producer tail_;
     std::vector<HistoricalKvHandle> handles_;
     uint64_t input_remaining_ = 0, output_remaining_ = 0, appends_remaining_ = 0;
     uint64_t last_use_sequence_ = 0;
@@ -119,6 +120,8 @@ private:
     uint64_t expected_revision_ = 0;
     uint32_t expected_rows_ = 0, expected_blocks_ = 0, reserved_blocks_ = 0;
     uint32_t live_blocks_at_finish_ = 0;
+    uint32_t tail_tokens_ = 0;
+    bool pack_append_tails_ = false;
     bool input_ = true, failed_ = false, finished_ = false, admitted_ = false;
     bool owns_domain_claim_ = false;
     bool gpu_window_enabled_ = false, gpu_window_closed_ = false;

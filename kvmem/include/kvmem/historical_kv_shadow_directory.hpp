@@ -85,6 +85,10 @@ public:
         std::shared_ptr<HistoricalKvRawStore> storage,
         std::vector<HistoricalKvRepository::Lease> & writers,
         std::vector<Producer> & producers);
+    // The admitting request alone may extend its still-private tail. No new
+    // dense slot, handle, or producer context is allocated by this operation.
+    bool extend_reserved_tail(KvMemStore & store, const Producer & producer,
+                              uint32_t tokens) noexcept;
 
     struct Binding {
         uint32_t block_id = 0;
@@ -147,10 +151,11 @@ public:
                          HistoricalKvRepository::Lease & writer,
                          Producer & producer,
                          std::shared_ptr<HistoricalKvRawStore> storage = {});
-    // Bind an immutable admitted span, including a short/non-aligned tail.
+    // Bind an admitted span, including a short/non-aligned tail.
     // Such spans require handle-addressed storage: positional legacy Raw
-    // cannot represent them. Later appends start a new dense block, regardless
-    // of whether this generation is Writing, Live or already retired.
+    // cannot represent them. Ordinary appends start a new dense block; an
+    // opt-in request can extend its private tail until it seals at block size
+    // or request completion.
     bool bind_block(const KvMemStore & store, uint32_t block_id,
                     std::shared_ptr<HistoricalKvRepository> repository,
                     HistoricalKvHandle handle,

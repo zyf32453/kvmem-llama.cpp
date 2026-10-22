@@ -11,19 +11,22 @@ const { chromium } = require(process.env.KVMEM_PLAYWRIGHT_MODULE || 'playwright'
 const workload = JSON.parse(await fs.readFile(path.join(root, 'workload.json'), 'utf8'));
 const rows = JSON.parse(await fs.readFile(path.join(root, 'results.json'), 'utf8'));
 const allowed = ['state.js', 'physics.js', 'weapons.js', 'bots.js', 'render.js', 'index.html'];
-if (workload.name !== 'browser-fps-v1' || workload.files?.length !== 8 ||
+if (!['browser-fps-v1', 'browser-fps-v2'].includes(workload.name) || workload.files?.length !== 8 ||
     workload.files.some(file => !allowed.includes(file))) throw new Error('Unexpected workload/file contract');
 const assets = {};
 const incomplete = [];
-for (let i = 0; i < workload.files.length; ++i) {
+for (let i = 0; i < Math.max(workload.files.length, rows.length); ++i) {
   const row = rows[i];
+  const file = row?.output_file || workload.files[i];
+  if (file && !allowed.includes(file)) throw new Error('Unexpected output file');
   if (!row?.done || row.http_status !== 200 || row.finish_reason !== 'stop' || row.error) {
     incomplete.push(i + 1);
     continue;
   }
   const content = row.content.trim();
   const fence = content.match(/^```(?:javascript|js|html)?\s*\n([\s\S]*?)\n```$/i);
-  assets[workload.files[i]] = fence ? fence[1] : content;
+  if (!file) throw new Error('Repair output lacks file identity');
+  assets[file] = fence ? fence[1] : content;
 }
 const app = path.join(root, 'app');
 await fs.mkdir(app); // Never silently replace a previous inspection.
@@ -31,7 +34,7 @@ for (const [file, text] of Object.entries(assets)) await fs.writeFile(path.join(
 const report = { workload: workload.name, incomplete_turns: incomplete, checks: [], browser_errors: [],
   blocked_requests: [], limitations: 'Deterministic browser checks only; no visual-playability score or general task-success claim.' };
 function check(name, pass, detail) { report.checks.push({ name, pass: Boolean(pass), ...(detail ? { detail } : {}) }); }
-check('all eight outputs completed without truncation', incomplete.length === 0);
+check('all requested outputs completed without truncation', incomplete.length === 0);
 check('all six application files exist', allowed.every(file => file in assets));
 if (allowed.every(file => file in assets)) {
   const browser = await chromium.launch({ headless: true, ...(process.argv[3] ? { executablePath: process.argv[3] } : {}) });
@@ -53,6 +56,9 @@ if (allowed.every(file => file in assets)) {
     page.on('pageerror', error => report.browser_errors.push(error.message));
     await page.goto('http://gc-eval.invalid/', { waitUntil: 'load', timeout: 15000 });
     await page.waitForTimeout(150);
+    report.public_functions = await page.evaluate(() => Object.fromEntries(
+      ['createGame', 'wallAt', 'move', 'shoot', 'reload', 'tick', 'updateBots', 'render']
+        .map(name => [name, typeof window.G?.[name]])));
     const functional = await page.evaluate(() => {
       const checks = [];
       const test = (name, fn) => { try { checks.push({ name, pass: Boolean(fn()) }); }

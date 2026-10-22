@@ -172,6 +172,12 @@ public:
     // becomes Live. Retirement is sticky and refcount churn cannot postpone
     // the last producer's completion publication.
     bool publish_write(const Lease & writer);
+    // A request-private tail may grow before it is sealed. Growing records
+    // remain Writing to observers and cannot retire, publish or close a Host
+    // producer claim. Only the original writer may extend the valid prefix.
+    bool open_append(const Lease & writer);
+    bool extend_append(const Lease & writer, uint32_t valid_tokens);
+    bool seal_append(const Lease & writer);
     // Storage calls this only after the resource's entire admitted span and
     // every required layer are complete, under its content synchronization.
     // Irreversibly closes future writer use of that component. The producer

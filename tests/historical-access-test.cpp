@@ -3460,37 +3460,49 @@ static void compare_redundancy_selection(llama_memory_kvmem & mem) {
 // Small native benchmark: identical finite requests, one model/context, a full
 // warmup per mode, and rotating mode order. No product instrumentation or HTTP
 // chunk timestamps. Never interpret this synthetic fixture as task quality.
-static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redundancy = false) {
-    constexpr uint32_t input = 256, output = 32, capacity = 64;
-    constexpr uint32_t low = 32, high = 48, batch_size = 64;
+static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redundancy = false,
+        bool mentor = false) {
+    // The mentor fixture keeps the accepted IQ3/32-token memory configuration.
+    // Use enough prompt blocks to trigger GC, and more than 32 decode samples.
+    // Output reservation remains 16K even though the timed work is 256 steps.
+    const uint32_t input = mentor ? 6144 : 256, output = mentor ? 256 : 32;
+    const uint32_t capacity = mentor ? 1024 : 64;
+    const uint32_t low = mentor ? 352 : 32, high = mentor ? 384 : 48;
+    constexpr uint32_t batch_size = 64;
     llama_kvmem_params kp{};
     kp.enabled = true;
     kp.historical_gc_policy = redundancy ? 1 : 0;
     kp.method = 0;
     kp.block_tokens = 32;
-    kp.budget = 1536;
-    kp.gen_reserve = 256;
+    kp.budget = mentor ? 36864 : 1536;
+    kp.gen_reserve = mentor ? 16384 : 256;
+    kp.sink_tokens = mentor ? 1024 : 0;
+    kp.recent_tokens = 0;
     kp.query_begin = kp.query_end = kp.force_pos = -1;
     llama_kvmem_set_params(&kp);
     auto cp = llama_context_default_params();
-    cp.n_ctx = 2048;
+    cp.n_ctx = mentor ? 65536 : 2048;
     cp.n_batch = batch_size;
     cp.n_ubatch = 16;
     cp.n_seq_max = 1;
     cp.n_threads = cp.n_threads_batch = 4;
-    cp.type_k = cp.type_v = GGML_TYPE_F16;
+    cp.type_k = cp.type_v = mentor ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
     cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     std::unique_ptr<llama_context, decltype(&llama_free)> ctx(llama_init_from_model(model, cp), llama_free);
     require(bool(ctx), "GC benchmark context init failed");
     auto * mem = dynamic_cast<llama_memory_kvmem *>(llama_get_memory(ctx.get()));
-    require(mem != nullptr, "GC benchmark requires a non-hybrid KVMem adapter");
+    if (auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get())))
+        mem = hybrid->attn_kvmem();
+    require(mem != nullptr, "GC benchmark requires a KVMem attention adapter");
+    if (mentor) require(kvmem_transfer_test_access::gpu_slots(*mem) == 1664,
+            "mentor GC benchmark changed the 36K+16K physical GPU pool");
     // Immutable short spans can each consume a full physical GPU slot. A
     // token-count-only budget does not establish stable residency.
     require(kvmem_transfer_test_access::gpu_slots(*mem) >= input / cp.n_ubatch + output,
             "GC benchmark lacks physical slots for the worst-case short spans");
     const auto * vocab = llama_model_get_vocab(model);
     std::string prompt;
-    for (unsigned i = 0; i < 80; ++i)
+    for (unsigned i = 0; i < (mentor ? 1024u : 80u); ++i)
         prompt += "Archive note: retain the first section, process the next item, and summarize the stored records.\n";
     const int count = -llama_tokenize(vocab, prompt.data(), prompt.size(), nullptr, 0, true, true);
     require(count >= int(input), "GC benchmark input is too short");
@@ -3506,21 +3518,30 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redun
         return std::chrono::duration<double, std::milli>(elapsed).count();
     };
     std::printf("KVMEM_GC_BENCH_CONFIG {\"policy\":\"%s\",\"input_tokens\":%u,\"decode_steps\":%u,\"capacity\":%u,"
-        "\"low\":%u,\"high\":%u,\"gpu_budget\":1536,\"generation_reserve\":256,\"gpu_slots\":%u,"
+        "\"low\":%u,\"high\":%u,\"gpu_budget\":%u,\"generation_reserve\":%u,\"gpu_slots\":%u,"
+        "\"context\":%u,\"block_tokens\":32,\"sink_tokens\":%u,\"recent_tokens\":0,\"kv_dtype\":\"%s\","
+        "\"output_reservation\":%u,\"fixture\":\"%s\","
         "\"rounds\":%u,\"warmups_per_mode\":1,\"threads\":4,\"ignore_eos\":true,\"prompt_tokens\":[",
-        redundancy ? "redundancy" : "lru", input, output, capacity, low, high, kvmem_transfer_test_access::gpu_slots(*mem), rounds);
+        redundancy ? "redundancy" : "lru", input, output, capacity, low, high,
+        kp.budget, kp.gen_reserve, kvmem_transfer_test_access::gpu_slots(*mem), cp.n_ctx,
+        mentor ? 1024u : 32u, mentor ? "q8_0" : "f16", mentor ? kp.gen_reserve : output,
+        mentor ? "mentor-27b" : "legacy-short", rounds);
     for (size_t i = 0; i < tokens.size(); ++i) std::printf("%s%d", i ? "," : "", tokens[i]);
     std::puts("]}");
+    // A long prompt spans stdout buffers; finish this JSON line before the
+    // stderr BEGIN marker or backend messages can interleave with its tail.
+    std::fflush(stdout);
     for (unsigned round = 0; round <= rounds; ++round) {
         for (unsigned index = 0; index < 3; ++index) {
             const unsigned mode = (round + index) % 3;
             std::fprintf(stderr, "KVMEM_GC_BENCH_BEGIN round=%u mode=%s\n", round, names[mode]);
             std::weak_ptr<kvmem::HistoricalKvRawStore> previous;
             if (initialized) previous = kvmem_transfer_test_access::capture_storage(*mem);
-            require(initialized ? llama_kvmem_historical_capture_reset_begin(ctx.get(), capacity, input, output,
-                        input / batch_size + output) :
-                    llama_kvmem_historical_capture_begin(ctx.get(), capacity, input, output,
-                        input / batch_size + output), "GC benchmark admission failed");
+            const uint32_t reserved_output = mentor ? kp.gen_reserve : output;
+            require(initialized ? llama_kvmem_historical_capture_reset_begin(ctx.get(), capacity, input, reserved_output,
+                        input / batch_size + reserved_output) :
+                    llama_kvmem_historical_capture_begin(ctx.get(), capacity, input, reserved_output,
+                        input / batch_size + reserved_output), "GC benchmark admission failed");
             initialized = true;
             // Exclude old-request cleanup from the new request measurement.
             const auto deadline = Clock::now() + std::chrono::seconds(10);
@@ -3535,7 +3556,7 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redun
             }
             mem->end_prefill_capture();
             const double prefill_ms = ms(Clock::now() - prefill_start);
-            if (redundancy && round == 0 && mode == 0) compare_redundancy_selection(*mem);
+            if (redundancy && !mentor && round == 0 && mode == 0) compare_redundancy_selection(*mem);
             // Isolate already-running decode: all input has acquired its GPU
             // execution permission before deletion can close new admission.
             // This does not qualify the GC-enabled prefill path.
@@ -3607,14 +3628,14 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redun
 int main(int argc, char ** argv) {
     constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 43 : 35;
     if (argc != 2 && argc != 3 && argc != 4 && argc != 6) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --gc-bench 1..20 | --gc-redundancy-bench 1..20 | --gc-policy-bench 1..20 | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --gc-bench 1..20 | --gc-redundancy-bench 1..20 | --gc-mentor-redundancy-bench 1..20 | --gc-policy-bench 1..20 | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
     }
     try {
         unsigned first_scenario = 0, end_scenario = scenario_count;
         unsigned scenario_rounds = 1;
         unsigned soak_seconds = 0, reset_soak_seconds = 0, gc_bench_rounds = 0;
-        bool redundancy_bench = false, policy_bench = false;
+        bool redundancy_bench = false, policy_bench = false, mentor_bench = false;
         bool run_repeated = true, run_reset = true, run_closed_capture = true;
         const char * trace = std::getenv("KVMEM_TEST_MODEL_TRACE");
         trace_model_stages = trace && *trace && *trace != '0';
@@ -3643,8 +3664,10 @@ int main(int argc, char ** argv) {
         } else if (argc == 4) {
             const std::string selection = argv[2];
             const auto number = decimal(argv[3]);
-            if (selection == "--gc-bench" || selection == "--gc-redundancy-bench" || selection == "--gc-policy-bench") {
-                redundancy_bench = selection == "--gc-redundancy-bench";
+            if (selection == "--gc-bench" || selection == "--gc-redundancy-bench" ||
+                    selection == "--gc-policy-bench" || selection == "--gc-mentor-redundancy-bench") {
+                mentor_bench = selection == "--gc-mentor-redundancy-bench";
+                redundancy_bench = selection == "--gc-redundancy-bench" || mentor_bench;
                 policy_bench = selection == "--gc-policy-bench";
                 require(number > 0 && number <= 20, "GC benchmark rounds must be 1..20");
                 gc_bench_rounds = static_cast<unsigned>(number);
@@ -3683,7 +3706,7 @@ int main(int argc, char ** argv) {
                 // its own full warmups before measuring collection + GC cost.
                 for (bool red : {false, true, true, false})
                     benchmark_gc_decode(model.get(), gc_bench_rounds, red);
-            } else benchmark_gc_decode(model.get(), gc_bench_rounds, redundancy_bench);
+            } else benchmark_gc_decode(model.get(), gc_bench_rounds, redundancy_bench, mentor_bench);
             model.reset();
             llama_backend_free();
             return 0;

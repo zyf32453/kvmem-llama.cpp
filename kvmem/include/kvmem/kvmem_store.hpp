@@ -374,7 +374,8 @@ public:
 
     // Register newly-appended context tokens as blocks. Called as the context
     // grows. An unmanaged partial tail extends until full. A bound historical
-    // span is immutable, so append starts a new (possibly non-aligned) block.
+    // span is fixed to generic callers; only its admitting request may grow
+    // an explicitly open private tail through extend_historical_tail().
     void register_append(uint32_t n_new_tokens);
     // Remaining room in the current mutable tail; zero for fixed spans.
     uint32_t append_tail_room() const noexcept;

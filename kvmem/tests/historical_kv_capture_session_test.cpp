@@ -68,6 +68,84 @@ static void complete(const HistoricalKvShadowDirectory::Producer & task, uint32_
     check(s->publish_complete(task->repository(), task->writer(), task->handle()), "complete task did not publish");
 }
 
+static void packed_32_token_tail_and_short_finish() {
+    auto runtime_cfg = runtime_config();
+    runtime_cfg.store.block_tokens = 32;
+    KvMemRuntime runtime(runtime_cfg);
+    auto storage_cfg = storage_config();
+    storage_cfg.max_tokens_per_slot = 32;
+    auto request = demand(31, 2, 33);
+    request.pack_append_tails = true;
+    auto session = HistoricalKvCaptureSession::try_create(runtime, storage_cfg, 2, request);
+    check(session && session->reserved_blocks() == 2 && session->prepare_gpu_window() == false,
+          "packed request did not reserve two physical blocks");
+    const auto repository = session->repository();
+    HistoricalKvShadowDirectory::Producer first;
+    for (uint32_t pos = 0; pos < 31; ++pos) {
+        allocation_budget = 0;
+        const bool appended = session->append(1);
+        allocation_budget = -1;
+        check(appended && runtime.store().block_count() == 1 &&
+              runtime.store().blocks()[0].n_tokens == pos + 1,
+              "single-token append did not reuse the first 32-token slot");
+        if (!first) first = runtime.historical_shadow_directory().find(0)->writer_context;
+        check(runtime.historical_shadow_directory().find(0)->writer_context == first,
+              "tail extension replaced the original writer");
+        const uint8_t k[2] = {uint8_t(pos), uint8_t(pos + 1)};
+        const uint8_t v[3] = {uint8_t(pos + 2), uint8_t(pos + 3), uint8_t(pos + 4)};
+        check(first->storage()->write_packed_k_slice(first->writer(), first->handle(), 0, pos, 1, k, sizeof(k)) &&
+              first->storage()->write_packed_v_slice(first->writer(), first->handle(), 0, pos, 1, v, sizeof(v)),
+              "tail prefix write failed");
+        session->producers_captured();
+        check(repository->completion_state(first->handle()) == HistoricalKvRepository::CompletionState::Unfinished &&
+              repository->retire(first->handle()) == HistoricalKvRepository::RetireResult::NotPermitted &&
+              !repository->acquire_read(first->handle()),
+              "growing block was published or retired early");
+    }
+    check(session->end_input(), "packed input did not end");
+    check(session->append(1) && runtime.store().block_count() == 1 &&
+          runtime.store().blocks()[0].n_tokens == 32, "first block did not seal at 32 tokens");
+    const uint8_t k[2] = {31, 32}, v[3] = {33, 34, 35};
+    check(first->storage()->write_packed_k_slice(first->writer(), first->handle(), 0, 31, 1, k, sizeof(k)) &&
+          first->storage()->write_packed_v_slice(first->writer(), first->handle(), 0, 31, 1, v, sizeof(v)) &&
+          first->storage()->publish_complete(*repository, first->writer(), first->handle()),
+          "full 32-token block did not publish");
+    session->producers_captured();
+    const auto first_handle = first->handle();
+    first.reset();
+    check(session->append(1) && runtime.store().block_count() == 2 &&
+          runtime.store().blocks()[1].orig_pos_start == 32 &&
+          runtime.store().blocks()[1].n_tokens == 1, "second short tail was not admitted");
+    auto second = runtime.historical_shadow_directory().find(1)->writer_context;
+    const uint8_t k2[2] = {36, 37}, v2[3] = {38, 39, 40};
+    check(second->storage()->write_packed_k_slice(second->writer(), second->handle(), 0, 0, 1, k2, sizeof(k2)) &&
+          second->storage()->write_packed_v_slice(second->writer(), second->handle(), 0, 0, 1, v2, sizeof(v2)),
+          "short tail write failed");
+    session->producers_captured();
+    check(repository->completion_state(second->handle()) == HistoricalKvRepository::CompletionState::Unfinished &&
+          !second->storage()->publish_complete(*repository, second->writer(), second->handle()),
+          "short tail published before request boundary");
+    second.reset();
+    check(session->finish() && session->live_blocks_at_finish() == 2,
+          "request boundary did not seal and publish its short tail");
+    auto first_read = runtime.historical_shadow_directory().acquire_read(0);
+    auto second_read = runtime.historical_shadow_directory().acquire_read(1);
+    check(first_read && second_read &&
+          repository->inspect(first_handle)->valid_tokens == 32 &&
+          second_read.lease.metadata()->valid_tokens == 1,
+          "sealed blocks lost their token counts");
+    const auto first_bytes = first_read.storage->read_layer(first_read.lease, first_handle, 0);
+    const auto second_bytes = second_read.storage->read_layer(second_read.lease,
+        second_read.lease.handle(), 0);
+    check(first_bytes && second_bytes && first_bytes->packed_k.size() == 64 &&
+          first_bytes->packed_v.size() == 96 &&
+          first_bytes->packed_k[0] == 0 && first_bytes->packed_k[62] == 31 &&
+          first_bytes->packed_v[2] == 4 && first_bytes->packed_v[95] == 35 &&
+          second_bytes->packed_k.size() == 2 && second_bytes->packed_v.size() == 3 &&
+          second_bytes->packed_k[0] == 36 && second_bytes->packed_v[2] == 40,
+          "growing and sealed tail lost or reordered payload bytes");
+}
+
 static void quotas_and_handoff() {
     KvMemRuntime runtime(runtime_config());
     auto session = HistoricalKvCaptureSession::try_create(runtime, storage_config(), 6, demand(6, 3, 5));
@@ -886,6 +964,7 @@ static void finite_gpu_window_keeps_permission_not_host_payload() {
 
 int main() {
     try {
+        packed_32_token_tail_and_short_finish();
         finite_gpu_window_keeps_permission_not_host_payload();
         quotas_and_handoff();
         retired_blocks_do_not_invalidate_completed_request();

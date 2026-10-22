@@ -183,6 +183,7 @@ bool HistoricalKvRawStore::required_layer(uint32_t layer) const noexcept {
 
 void HistoricalKvRawStore::mark_layer_complete(Block & block,
                                                 Layer & layer) const noexcept {
+    if (block.appendable) return;
     if (!layer.packed_complete && layer.k_written_tokens == block.valid_tokens &&
         layer.v_written_tokens == block.valid_tokens) {
         layer.packed_complete = true;
@@ -413,6 +414,65 @@ bool HistoricalKvRawStore::install_payload(
         // is how one worst-case reservation backs a short/non-aligned tail.
     }
     slot.block = std::move(block);
+    return true;
+}
+
+bool HistoricalKvRawStore::open_append(HistoricalKvRepository & repository,
+        const HistoricalKvRepository::Lease & writer, HistoricalKvHandle handle) {
+    if (!repository.owns_writer(writer) || !same(writer.handle(), handle) || handle.slot >= slots_.size()) return false;
+    auto & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    auto * block = slot.block.get();
+    if (!block || block->repository_id != repository.repository_id() || !same(block->handle, handle) ||
+        block->appendable || block->written_layers || block->packed_complete_layers ||
+        block->mean_complete_layers || block->disk || block->pinned ||
+        !repository.open_append(writer)) return false;
+    block->appendable = true;
+    return true;
+}
+
+bool HistoricalKvRawStore::extend_append(HistoricalKvRepository & repository,
+        const HistoricalKvRepository::Lease & writer, HistoricalKvHandle handle,
+        uint32_t old_tokens, uint32_t new_tokens) {
+    if (!repository.owns_writer(writer) || !same(writer.handle(), handle) || handle.slot >= slots_.size() ||
+        new_tokens <= old_tokens || new_tokens > config_.max_tokens_per_slot) return false;
+    auto & slot = *slots_[handle.slot];
+    std::lock_guard<std::mutex> lock(slot.mu);
+    auto * block = slot.block.get();
+    if (!block || block->repository_id != repository.repository_id() || !same(block->handle, handle) ||
+        !block->appendable || block->valid_tokens != old_tokens) return false;
+    const auto k_bytes = size_t(new_tokens) * config_.packed_k_bytes_per_token;
+    const auto v_bytes = size_t(new_tokens) * config_.packed_v_bytes_per_token;
+    for (uint32_t il = 0; il < config_.n_layer; ++il) {
+        if (!required_layer(il)) continue;
+        if (block->layers[il].packed_k.capacity() < k_bytes ||
+            block->layers[il].packed_v.capacity() < v_bytes) return false;
+    }
+    if (!repository.extend_append(writer, new_tokens)) return false;
+    for (uint32_t il = 0; il < config_.n_layer; ++il) {
+        if (!required_layer(il)) continue;
+        block->layers[il].packed_k.resize(k_bytes);
+        block->layers[il].packed_v.resize(v_bytes);
+    }
+    block->valid_tokens = new_tokens;
+    return true;
+}
+
+bool HistoricalKvRawStore::seal_append(HistoricalKvRepository & repository,
+        const HistoricalKvRepository::Lease & writer, HistoricalKvHandle handle) {
+    if (!repository.owns_writer(writer) || !same(writer.handle(), handle) || handle.slot >= slots_.size()) return false;
+    {
+        auto & slot = *slots_[handle.slot];
+        std::lock_guard<std::mutex> lock(slot.mu);
+        auto * block = slot.block.get();
+        if (!block || block->repository_id != repository.repository_id() || !same(block->handle, handle) ||
+            !block->appendable || !repository.seal_append(writer)) return false;
+        block->appendable = false;
+        for (uint32_t il = 0; il < config_.n_layer; ++il)
+            if (required_layer(il)) mark_layer_complete(*block, block->layers[il]);
+    }
+    // Pending producers may finish later; they use the same original writer.
+    publish_complete(repository, writer, handle);
     return true;
 }
 
@@ -661,6 +721,7 @@ bool HistoricalKvRawStore::publish_complete(
     std::lock_guard<std::mutex> lock(slot.mu);
     Block * block = slot.block.get();
     if (!block || block->repository_id != repository.repository_id() || !same(block->handle, handle)) return false;
+    if (block->appendable) return false;
     const auto required = config_.attention_layers.empty() ? config_.n_layer : config_.attention_layers.size();
     if (block->pinned && block->packed_complete_layers == required && !block->pinned_filled) {
         // The slot lock serializes this copy with the GC close callback. Copy
