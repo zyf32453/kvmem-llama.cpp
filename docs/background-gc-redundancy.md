@@ -4,6 +4,9 @@
 策略决定哪些 CPU 历史块退休；原 manager 继续负责身份复核、关闭新访问、等待已有读写结束和释放。
 已经准入的 GPU 工作集仍按原有规则运行。本次没有替换 GPU retrieval selector。
 
+多轮游戏开发的补充案例、测试干扰与实际结果见
+[浏览器 FPS 质量案例](background-gc-browser-fps.md)。该案例不能替代下述原配置的验收。
+
 ## 用法与支持范围
 
 CLI 和 server 在原有 historical 参数上增加：
