@@ -1,5 +1,8 @@
 # 多轮浏览器 FPS：CPU historical GC 质量案例
 
+本文保留早期单 token / 旧模型的实验过程。当前已恢复 32 tokens/block，并使用 IQ3 27B；
+最新配置与结论以 [导师配置记录](background-gc-mentor-27b.md) 和 [参数复测记录](background-gc-parameter-retest.md) 为准。
+
 这是一个固定八轮的编程案例，不是 DeepSWE 或具备文件/终端工具的自主 agent。
 目标是让模型完成离线浏览器射击游戏原型，再修改它，观察旧要求保留和功能正确性。
 不要求复刻商业游戏；不使用商业素材，也不把“生成了网页”当成质量通过。
@@ -135,3 +138,72 @@ node scripts/check_browser_fps.mjs /path/to/output /path/to/chromium
 `77d1bf9f9a200d3f2e5ee2e93b72e39a540e783d60ddb5e5ec4f6d338a5b796c`。
 Python/JavaScript 语法检查和 `git diff --check` 通过；浏览器验收返回失败属于如实记录的
 模型任务失败，不能将其改写成测试全通过。
+
+## 有限浏览器反馈与回收进度诊断
+
+第二阶段先建立能运行的无 GC 基线，保持产品评分公式、权重和后台配置不变。
+`browser-fps-feedback-workload.json` 保留原来的八轮功能要求和验收检查，去掉每文件
+1600 字符的软限制，明确只有 state.js 初始化 G，其他模块必须扩展已有 G。
+这是明确接口约定，并未提供实现代码或把最终答案回填给模型。
+
+`run_browser_fps_feedback.py` 启动远端现有服务器，本地 Chromium 验收完整八轮输出，
+最多把三次真实失败反馈给同一个模型会话，每次只替换一个文件。按状态、移动、武器、
+敌人、渲染、页面集成的固定顺序选择出错模块；缺失公共函数优先修复其所属模块。
+每轮浏览器报告、反馈正文和模型输出分别保存。通过即停止；达到上限、截断、前缀复用
+失败或服务拒绝都算失败，没有人工修补、隐式重试或服务器重启。
+修复后的成功与初始生成成功分开报告，不能把反馈后修好的数值算作无提示记忆正确。
+
+为容纳完整任务及有限修复，新基线设逻辑上下文 16384、GPU budget 12288、生成预留与
+每轮输出上限 1024、CPU historical 槽容量 16384。仍使用单 token 块及稳定文本模板，
+显式指定 sink=1、recent=0；线程 4、batch 64、microbatch 16、seed=42、temperature=0、
+F16 KV、全部模型层加载 GPU。该基线不与上一版不同预算的耗时直接比较。
+预检尝试减少 GPU 加载层数时，服务在第一轮推理前拒绝了请求：historical capture
+要求所有注意力 KV 位于单张 CUDA 卡上。失败记录保留，后续恢复受支持配置。
+
+运行示例（控制端须有 Python、SSH/scp、Node、Playwright、Chromium）：
+
+```sh
+python scripts/run_browser_fps_feedback.py \
+  --host user@host --remote-root /path/to/existing-isolated-build \
+  --model /path/to/model.gguf --name fps-feedback-baseline \
+  --output /path/to/new-local-evidence --node /path/to/node \
+  --chromium /path/to/chromium --capacity 1024 --max-repairs 0
+```
+
+上述是 mode=off 的基线调用。当前控制器已支持 off/shadow/delete，以及 lru/redundancy，
+并统一使用 mentor-27b 预设；开启 GC 还需显式提供 `--low/--high`。
+早期阶段只运行 off 的限制已解除；不同配置的结果仍应分开报告。
+
+回收进度的排查已有两类相互吻合的证据：
+
+- 原始模型运行中 redundancy 完成 46 轮评分、提交并成功退休 736 块，恰好每轮 16 块；
+  missing=0、no_query=0、skipped_queries=0、retry=0，没有策略或 worker 失败。
+  累计读特征 108824 次、做相似度比较 3480896 次，许多未回收块在后续轮次重复计算。
+  736 块退休中，完成边界已有 720 块提前释放 CPU payload。因此主要进度缺口发生在
+  提交回收之前，不能用完整槽暂时仍受 GPU 引用保护来解释全部差距。
+- 独立诊断 `kvmem/tests/historical_kv_progress_probe.cpp` 使用实际 manager、policy 和
+  repository，提供始终有效的合成特征，以及无引用阻碍、可立即释放的真实 CPU 小块。
+  8192 槽中放入 2048 个 Live 块，目标释放 1024 块，推进 2000 次 manual_tick：
+  LRU（scan=64/batch=16）退休并释放 192 块；现有 redundancy（16/16）释放 32 块。
+  仅在诊断实例改为 scan=64/batch=16 时释放 160 块；改为 16/64 时释放 128 块。
+  特征和评分公式没有变化，产品参数也没有修改。
+
+原因是 adapter 把 redundancy 的 scan 设为 16，而这个预算既限制特征处理，也限制
+manager 收集整个槽目录。容量 8192 时，单次收集就要 512 个 tick；worker 每个 tick
+之后再睡 5 ms。收集、评分完成后只输出最多 16 个候选，下一轮重新收集及计算。
+受控诊断首次提交需要 767 个 tick，对应仅轮询等待就至少 3.83 秒；LRU 为 159 个 tick、
+0.79 秒。该程序没有实际 sleep，测得的短计算时间使用八维合成特征，不能当成真实模型
+的计算耗时或前台延迟；等待下界和重复工作的结构性开销则来自现行控制流程。
+
+独立编译诊断时须链接当前服务器使用的库，避免误用构建目录内遗留的旧静态库：
+
+```sh
+g++ -O2 -std=c++17 -pthread -I kvmem/include \
+  kvmem/tests/historical_kv_progress_probe.cpp -L build-cuda/kvmem -lkvmem \
+  -Wl,-rpath,"$PWD/build-cuda/kvmem" -o /tmp/historical-kv-progress-probe
+/tmp/historical-kv-progress-probe
+```
+
+后续优化应先考虑把目录扫描预算与昂贵的特征计算预算分开，或在保证身份、内容版本、
+压力复核和代表块保护的前提下复用一轮评分结果、分批输出。不能简单无限增大每次工作量，
+因为仍需验证对前台 decode 延迟的影响。本阶段只诊断，不实施这些产品改动。

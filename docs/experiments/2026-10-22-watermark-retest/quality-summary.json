@@ -1,0 +1,89 @@
+{
+  "runs": [
+    {
+      "run": 1,
+      "directory": "artifacts\\mentor-27b-config\\iq3-browser-redundancy-watermark352-384-r1",
+      "checks_passed": 29,
+      "checks_total": 29,
+      "failed_checks": [],
+      "completed_requests": 8,
+      "prefix_reused": true,
+      "client_history_preserved": true,
+      "first_gc_request_end": 8,
+      "gc_final": {
+        "proposed": 54,
+        "committed": 54,
+        "shadow": 0,
+        "reclaimed": 0,
+        "deferred": 9808,
+        "retry": 0,
+        "policy_failures": 0,
+        "worker_failures": 0,
+        "ready": 330,
+        "payload_bytes": 754974720,
+        "host_released_early": 54,
+        "partial_resource_releases": 0
+      },
+      "gc_failure_observed": false,
+      "actual_gc": true,
+      "repair_requests": 0,
+      "generated_tokens": 4668,
+      "per_turn_output_sha256": [
+        "7e91a8582395252dba84c3021e009765650a1969b5c10edac4703396ba3eae73",
+        "7f2ca9343aad5b9d70f3334a98cd38a368cdb3779165c5b7025bfadadbb380bb",
+        "86c920f8465e07d3f02c6bbb4e50e50e06fb7bfd8d01e7bfef045b46153afda0",
+        "a3a302b8298986fbcd39d25144e45c5142a3ab127c043a8fd009cb7b2b72f64b",
+        "b2fb2798613ebb81e81c21a8dbf21de01e5d3a6588c8e27134f936fe1ea1a05a",
+        "64edc45b78cc2845969ee5725abfcb59e0aff713ada1e71d1c2926a8727737cf",
+        "6d7300b3b6f1d071f217e1686a40bb251de0b5959d55b07c2dcb060b60eb6829",
+        "135102878c5241ac41f11a1061e40bd962283759fb6077c98907fcd624244fd1"
+      ]
+    },
+    {
+      "run": 2,
+      "directory": "artifacts\\mentor-27b-config\\iq3-browser-redundancy-watermark352-384-r2",
+      "checks_passed": 29,
+      "checks_total": 29,
+      "failed_checks": [],
+      "completed_requests": 8,
+      "prefix_reused": true,
+      "client_history_preserved": true,
+      "first_gc_request_end": 8,
+      "gc_final": {
+        "proposed": 54,
+        "committed": 54,
+        "shadow": 0,
+        "reclaimed": 16,
+        "deferred": 8170,
+        "retry": 0,
+        "policy_failures": 0,
+        "worker_failures": 0,
+        "ready": 346,
+        "payload_bytes": 754974720,
+        "host_released_early": 38,
+        "partial_resource_releases": 0
+      },
+      "gc_failure_observed": false,
+      "actual_gc": true,
+      "repair_requests": 0,
+      "generated_tokens": 4668,
+      "per_turn_output_sha256": [
+        "7e91a8582395252dba84c3021e009765650a1969b5c10edac4703396ba3eae73",
+        "7f2ca9343aad5b9d70f3334a98cd38a368cdb3779165c5b7025bfadadbb380bb",
+        "86c920f8465e07d3f02c6bbb4e50e50e06fb7bfd8d01e7bfef045b46153afda0",
+        "a3a302b8298986fbcd39d25144e45c5142a3ab127c043a8fd009cb7b2b72f64b",
+        "b2fb2798613ebb81e81c21a8dbf21de01e5d3a6588c8e27134f936fe1ea1a05a",
+        "64edc45b78cc2845969ee5725abfcb59e0aff713ada1e71d1c2926a8727737cf",
+        "6d7300b3b6f1d071f217e1686a40bb251de0b5959d55b07c2dcb060b60eb6829",
+        "135102878c5241ac41f11a1061e40bd962283759fb6077c98907fcd624244fd1"
+      ]
+    }
+  ],
+  "quality_gate_passed": true,
+  "scope": "Eight-turn fixed task; first reclamation occurs in final turn. Not sustained post-reclamation quality or agent acceptance.",
+  "capacity": 1024,
+  "ready_low": 352,
+  "ready_high": 384,
+  "checker_sha256": "045fda951b6dcf274016a2847ab18abc4639373dc9425bdab5713491f603c150",
+  "workload_sha256": "0d348daadf7f010d284457b2d8de5c9c0062a96fecfa0bc5da7c4dd161b3ce52"
+}

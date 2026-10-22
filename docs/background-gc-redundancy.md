@@ -7,6 +7,9 @@
 多轮游戏开发的补充案例、测试干扰与实际结果见
 [浏览器 FPS 质量案例](background-gc-browser-fps.md)。该案例不能替代下述原配置的验收。
 
+当前 IQ3 27B / 32-token 块的接入与最新验收见 [导师配置记录](background-gc-mentor-27b.md)
+及 [参数复测记录](background-gc-parameter-retest.md)；后者也是本次提交的代码检查与数据入口。
+
 ## 用法与支持范围
 
 CLI 和 server 在原有 historical 参数上增加：

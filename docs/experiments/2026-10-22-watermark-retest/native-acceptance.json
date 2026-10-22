@@ -1,0 +1,184 @@
+{
+  "targets": {
+    "p95_increase_max_percent": 5,
+    "throughput_decrease_max_percent": 3
+  },
+  "measured_requests": 15,
+  "decode_steps_per_run": 256,
+  "steps_per_mode": 1280,
+  "paired_rounds": [
+    {
+      "round": 1,
+      "off_p95_ms": 69.67311325,
+      "delete_p95_ms": 63.28318925,
+      "p95_change_percent": -9.171291050353636,
+      "off_tokens_per_second": 16.685638440712715,
+      "delete_tokens_per_second": 16.587631479602802,
+      "throughput_change_percent": -0.5873731560116835,
+      "delete_committed_in_decode": 64,
+      "delete_cpu_early_releases_in_decode": 64,
+      "delete_full_reclaims_in_decode": 0,
+      "active_release_steps": 4,
+      "max_off_step_ms": 77.73789,
+      "max_delete_step_ms": 68.554185
+    },
+    {
+      "round": 2,
+      "off_p95_ms": 65.78452225,
+      "delete_p95_ms": 67.02243849999999,
+      "p95_change_percent": 1.8817743257229402,
+      "off_tokens_per_second": 16.654588423014538,
+      "delete_tokens_per_second": 16.779732935902143,
+      "throughput_change_percent": 0.7514116212843147,
+      "delete_committed_in_decode": 64,
+      "delete_cpu_early_releases_in_decode": 64,
+      "delete_full_reclaims_in_decode": 0,
+      "active_release_steps": 4,
+      "max_off_step_ms": 70.634453,
+      "max_delete_step_ms": 71.506693
+    },
+    {
+      "round": 3,
+      "off_p95_ms": 63.01416125,
+      "delete_p95_ms": 64.71294775,
+      "p95_change_percent": 2.695880523205396,
+      "off_tokens_per_second": 16.498995004773423,
+      "delete_tokens_per_second": 16.493234084501776,
+      "throughput_change_percent": -0.034916795053163696,
+      "delete_committed_in_decode": 64,
+      "delete_cpu_early_releases_in_decode": 64,
+      "delete_full_reclaims_in_decode": 0,
+      "active_release_steps": 4,
+      "max_off_step_ms": 71.016413,
+      "max_delete_step_ms": 71.077428
+    },
+    {
+      "round": 4,
+      "off_p95_ms": 65.720293,
+      "delete_p95_ms": 72.3607385,
+      "p95_change_percent": 10.104102092180266,
+      "off_tokens_per_second": 16.543544644359947,
+      "delete_tokens_per_second": 16.521695590154913,
+      "throughput_change_percent": -0.13206996852687114,
+      "delete_committed_in_decode": 64,
+      "delete_cpu_early_releases_in_decode": 64,
+      "delete_full_reclaims_in_decode": 0,
+      "active_release_steps": 4,
+      "max_off_step_ms": 74.36915,
+      "max_delete_step_ms": 74.694027
+    },
+    {
+      "round": 5,
+      "off_p95_ms": 65.945212,
+      "delete_p95_ms": 67.69423675,
+      "p95_change_percent": 2.6522391800029466,
+      "off_tokens_per_second": 16.44743803587392,
+      "delete_tokens_per_second": 16.489562355789293,
+      "throughput_change_percent": 0.2561147810588915,
+      "delete_committed_in_decode": 64,
+      "delete_cpu_early_releases_in_decode": 64,
+      "delete_full_reclaims_in_decode": 0,
+      "active_release_steps": 4,
+      "max_off_step_ms": 70.575268,
+      "max_delete_step_ms": 72.006029
+    }
+  ],
+  "paired_median_changes": {
+    "tokens_per_second": {
+      "median": -0.034916795053163696,
+      "range": [
+        -0.5873731560116835,
+        0.7514116212843147
+      ],
+      "rounds": [
+        -0.5873731560116835,
+        0.7514116212843147,
+        -0.034916795053163696,
+        -0.13206996852687114,
+        0.2561147810588915
+      ]
+    },
+    "generation_ms": {
+      "median": 0.03492899113741732,
+      "range": [
+        -0.7458075367805517,
+        0.5908436127872063
+      ],
+      "rounds": [
+        0.5908436127872063,
+        -0.7458075367805517,
+        0.03492899113741732,
+        0.1322446239601094,
+        -0.25546050893572314
+      ]
+    },
+    "p50_step_ms": {
+      "median": -0.5965066133466923,
+      "range": [
+        -0.9104272870525176,
+        1.8002142429780932
+      ],
+      "rounds": [
+        1.8002142429780932,
+        -0.8093977627783633,
+        -0.5965066133466923,
+        -0.9104272870525176,
+        -0.17265602834867222
+      ]
+    },
+    "p95_step_ms": {
+      "median": 2.6522391800029466,
+      "range": [
+        -9.171291050353636,
+        10.104102092180266
+      ],
+      "rounds": [
+        -9.171291050353636,
+        1.8817743257229402,
+        2.695880523205396,
+        10.104102092180266,
+        2.6522391800029466
+      ]
+    },
+    "p99_step_ms": {
+      "median": 2.4729244344704915,
+      "range": [
+        -12.169339260513246,
+        7.276110770673161
+      ],
+      "rounds": [
+        -12.169339260513246,
+        0.8422220218760934,
+        7.276110770673161,
+        3.887752781615106,
+        2.4729244344704915
+      ]
+    },
+    "prefill_ms": {
+      "median": 0.056881502913075366,
+      "range": [
+        -1.384020399304442,
+        0.5470154137700689
+      ],
+      "rounds": [
+        -1.384020399304442,
+        0.2220935481447306,
+        0.056881502913075366,
+        0.5470154137700689,
+        -0.08551264296798866
+      ]
+    }
+  },
+  "all_rounds_p95_within_target": false,
+  "all_rounds_throughput_within_target": true,
+  "all_outputs_identical": true,
+  "all_gpu_windows_stable": true,
+  "monitoring": {
+    "peak_gpu_mib": 13756.0,
+    "max_gpu_c": 83.0,
+    "peak_process_rss_mib": 11935.140625,
+    "whole_process_average_cpu_cores": 1.0203350309475778
+  },
+  "verdict": "Throughput within target in all five pairs; p95 exceeded 5% in round 4. Do not claim stable efficiency acceptance.",
+  "scope": "Native sampling+decode+synchronize steps; GC starts after prefill; off retains redundancy feature collection. Not HTTP TBT, a long-run guarantee, or total feature-collection overhead."
+}
