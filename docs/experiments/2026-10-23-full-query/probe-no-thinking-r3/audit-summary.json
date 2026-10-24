@@ -1,0 +1,136 @@
+{
+  "revision": "full-query-all-decode-r3",
+  "scope": "full_question_capture_and_generated_query_observation_without_thinking",
+  "server_binary_sha256": "824f31ba118e6baeae288b3a8e4ffe663246629958a6446cdf2646cccfd466b3",
+  "local_raw_directory": "tmp/full-query-20261023/full-query-no-thinking-r3",
+  "driver_exit": 1,
+  "driver_failure_condition": "required_gc_activity_observed=false; completed requests, full coverage, prefix reuse and no worker/policy failure otherwise satisfy driver checks",
+  "independent_checker_exit": 0,
+  "enable_thinking": false,
+  "thinking_policy_armed": false,
+  "turns": [
+    {
+      "turn": 1,
+      "http_status": 200,
+      "done": true,
+      "finish_reason": "stop",
+      "completion_tokens": 52,
+      "reasoning_characters": 0,
+      "content": "{\n  \"package_tag\": \"AMBER-KESTREL-741\",\n  \"review_zone\": \"north-loft-593\",\n  \"seal_code\": \"moss-clock-826\"\n}"
+    },
+    {
+      "turn": 2,
+      "http_status": 200,
+      "done": true,
+      "finish_reason": "stop",
+      "completion_tokens": 52,
+      "reasoning_characters": 0,
+      "content": "{\n  \"package_tag\": \"COBALT-OTTER-268\",\n  \"review_zone\": \"west-gallery-417\",\n  \"seal_code\": \"reed-lantern-935\"\n}"
+    },
+    {
+      "turn": 3,
+      "http_status": 200,
+      "done": true,
+      "finish_reason": "stop",
+      "completion_tokens": 51,
+      "reasoning_characters": 0,
+      "content": "{\n  \"package_tag\": \"IVORY-BADGER-609\",\n  \"review_zone\": \"east-studio-782\",\n  \"seal_code\": \"fern-compass-154\"\n}"
+    }
+  ],
+  "slow_observation_cumulative": [
+    1,
+    2,
+    3
+  ],
+  "fast_observation_cumulative": [
+    45,
+    90,
+    134
+  ],
+  "final_gc": {
+    "proposed": 0,
+    "committed": 0,
+    "shadow": 0,
+    "reclaimed": 0,
+    "deferred": 0,
+    "retry": 0,
+    "policy_failures": 0,
+    "worker_failures": 0,
+    "ready": 335,
+    "payload_bytes": 812777472,
+    "host_released_early": 0,
+    "partial_resource_releases": 0
+  },
+  "actual_gc_activity": false,
+  "gc_quality_accepted": false,
+  "performance_accepted": false,
+  "per_decode_timing_measured": false,
+  "raw_files": [
+    {
+      "name": "browser-results.json",
+      "bytes": 3113,
+      "sha256": "c8d3b6c93a35f0011e36bb4cb1125e89ab4454de14661ca0c99913fe03ffa11a"
+    },
+    {
+      "name": "command.json",
+      "bytes": 874,
+      "sha256": "ac3fc5e60ad2815be8d41f5a0abac66e2bf716f764e2c33aab7221a14ff30db7"
+    },
+    {
+      "name": "experiment-config.json",
+      "bytes": 572,
+      "sha256": "0880725aa1777aafa6e2c0a678c56af2a4d339a4342861364f57932ea03f17d4"
+    },
+    {
+      "name": "full-query-probe-check.json",
+      "bytes": 2954,
+      "sha256": "96bc3aa1bfafd85849fd8a9895c5baf8406e3d25b98ad5c489247ce8de1de373"
+    },
+    {
+      "name": "gpu-memory.csv",
+      "bytes": 2040,
+      "sha256": "c5f15f371922756322a9058454c7e8ade922e2dfe17dca5612448c60491c095e"
+    },
+    {
+      "name": "process-memory.jsonl",
+      "bytes": 4341,
+      "sha256": "a539183cb40c2a7f05cd1978b0a92a748b42c96d6ed3110266cd4f11ba915e61"
+    },
+    {
+      "name": "props.json",
+      "bytes": 11174,
+      "sha256": "b1024654cc62461a26ed715dc2503c42a9d217aaa9e1b84563882740c6516a97"
+    },
+    {
+      "name": "requests.json",
+      "bytes": 65395,
+      "sha256": "487d8886959fa68ebbf5ba85b0327c49cd10dd671fc32e2894a4072d82b2599a"
+    },
+    {
+      "name": "results.json",
+      "bytes": 156091,
+      "sha256": "93678f3452fbbb67844b7f1003e2ff9d719e2a22f4b5a5b737c21c0cbe956663"
+    },
+    {
+      "name": "server.log",
+      "bytes": 129674,
+      "sha256": "8a9d269c122a55ffe77adc703243923f187c2b7bbd7eb6a96db448146ed1757a"
+    },
+    {
+      "name": "summary.json",
+      "bytes": 4360,
+      "sha256": "7e0c4946805ba54a0f3960d4379ad9dd60e737d345ecad9e4521de0b8516a4d0"
+    },
+    {
+      "name": "workload.json",
+      "bytes": 32776,
+      "sha256": "6f727c95754931efe9faf07f1f5afabfa0df216adfd8ce0e76b8457b56492500"
+    }
+  ],
+  "limitations": [
+    "No-thinking generation produced slow and fast Query observations, while complete user Query spans were captured.",
+    "Cumulative observation counters do not prove observation freshness at every decode.",
+    "No GC activity occurred; this does not validate GC deletion quality or reclamation progress.",
+    "No p95 or throughput acceptance is performed."
+  ]
+}

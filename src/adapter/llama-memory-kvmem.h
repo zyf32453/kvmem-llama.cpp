@@ -147,12 +147,23 @@ public:
     bool want_prefill_capture() const {
         return prefill_capture_ && !retrieval_pinned_ && !replay_;
     }
-    // Recapture Q for retrieval even while replaying a cached query span.
+    // Historical importance observes all generated Q. Thinking eligibility
+    // restricts the blocks GC may retire, never the demand used to score them.
     bool want_q_capture() const {
-        if (historical_redundancy_) return prefill_capture_ && !replay_;
+        if (historical_redundancy_) {
+            return !replay_;
+        }
         return method_ == 1 && !retrieval_pinned_ && !query_frozen_ &&
             (explicit_spans_ ? !turn_spans_.query.empty() : query_begin_ >= 0);
     }
+    // Redundancy Q: the complete configured prefill question span, followed
+    // by every generated position, including answers and no-thinking turns.
+    bool redundancy_ubatch_wants_q(uint32_t n_tokens, const llama_pos * pos) const;
+    void arm_thinking_policy();
+    void disarm_thinking_policy();
+    void set_thinking_span(uint64_t begin, uint64_t end, bool closed);
+    // Independent of the retrieval Query cap: the complete current question.
+    void set_gc_query_span(int32_t begin, int32_t end);
     bool want_decode_mean() const {
         if (historical_redundancy_) return !replay_;
         return retrieval_pinned_ && method_ == 1 && !replay_;
@@ -252,6 +263,9 @@ public:
 private:
     bool continue_historical_capture(uint32_t capacity, uint64_t input_tokens,
                                      uint64_t max_output_tokens, uint64_t max_appends);
+    void attach_redundancy_source(const std::shared_ptr<kvmem::HistoricalKvMeanKeySource> & source);
+    void publish_redundancy_query(int il, const llama_pos * positions,
+                                  const float * rows, uint32_t count, uint32_t width);
     size_t row_metadata_index(uint32_t logical) const;
     friend struct kvmem_transfer_test_access;
     struct SlotBackend : public kvmem::KvMemBackend {
@@ -645,6 +659,9 @@ private:
     std::unique_ptr<kvmem::HistoricalKvGc> historical_gc_;
     int historical_gc_mode_ = 0;
     std::shared_ptr<kvmem::HistoricalKvMeanKeySource> historical_redundancy_;
+    std::shared_ptr<kvmem::HistoricalKvThinkingRanges> thinking_ranges_;
+    bool historical_query_span_set_ = false;
+    int32_t historical_query_begin_ = -1, historical_query_end_ = -1;
     std::unique_ptr<kvmem::HistoricalKvActiveSet> historical_active_;
     struct HistoricalStageIn {
         kvmem::HistoricalKvShadowDirectory::StageInAccess source;

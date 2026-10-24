@@ -1,0 +1,10 @@
+KVMEM_TRACE gc_query_full begin=221 end=448 tokens=227 located=1
+1.08.099.650 I KVMEM_HISTORICAL_GC finish mode=delete proposed=0 committed=0 shadow=0 reclaimed=0 deferred=0 retry=0 policy_failures=0 worker_failures=0 ready=497 payload_bytes=621674496 host_released_early=0 partial_resource_releases=0
+1.08.099.656 I KVMEM_HISTORICAL_REDUNDANCY features=0 missing=0 pairs=0 rounds=0 max_round_features=0 representatives=0 lossy=0 no_query=0 query_samples=1 observation_samples=22 fast_samples=805 skipped_queries=0 question_tokens=227 question_segments=8 question_bytes=787968 question_score_evals=0 question_score_yields=0 invalid_questions=0
+KVMEM_TRACE gc_query_full begin=1822 end=1924 tokens=102 located=1
+8.16.228.535 I KVMEM_HISTORICAL_GC finish mode=delete proposed=0 committed=0 shadow=0 reclaimed=0 deferred=0 retry=0 policy_failures=0 worker_failures=0 ready=451 payload_bytes=675938304 host_released_early=0 partial_resource_releases=0
+8.16.228.540 I KVMEM_HISTORICAL_REDUNDANCY features=0 missing=0 pairs=0 rounds=0 max_round_features=0 representatives=0 lossy=0 no_query=0 query_samples=2 observation_samples=204 fast_samples=7046 skipped_queries=0 question_tokens=102 question_segments=4 question_bytes=393984 question_score_evals=0 question_score_yields=0 invalid_questions=0
+KVMEM_TRACE gc_query_full begin=9364 end=9508 tokens=144 located=1
+16.58.970.008 I KVMEM_HISTORICAL_GC finish mode=delete proposed=170 committed=170 shadow=0 reclaimed=0 deferred=1074935 retry=0 policy_failures=0 worker_failures=0 ready=214 payload_bytes=754974720 host_released_early=170 partial_resource_releases=0
+16.58.970.025 I KVMEM_HISTORICAL_REDUNDANCY features=626 missing=0 pairs=30886 rounds=11 max_round_features=53 representatives=70 lossy=48 no_query=2 query_samples=3 observation_samples=359 fast_samples=12918 skipped_queries=0 question_tokens=144 question_segments=5 question_bytes=492480 question_score_evals=1343 question_score_yields=0 invalid_questions=0
+KVMEM_TRACE gc_query_full begin=17323 end=17423 tokens=100 located=1

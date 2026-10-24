@@ -1,0 +1,33 @@
+{
+  "revision": "full-query-all-decode-r2",
+  "base_commit": "660e46ae4a1a2079e771b8c43be5ceb03c4d75b5",
+  "upstream_pin": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "created_utc": "2026-10-23T12:26:00.441091+00:00",
+  "files": {
+    "kvmem/CMakeLists.txt": "237f86795526a63c23d69a174788fd9f711947ebcf8a870c26a074e9cdfb08c8",
+    "kvmem/include/kvmem/historical_kv_policy.hpp": "79339d215f6cbd4f9118c369f82bb41c5d8a4deb8425910163633f2eff8b3b9b",
+    "kvmem/include/kvmem/historical_kv_redundancy.hpp": "64237809b30a5457ee6c609f4299e0cde12e7f087349068d65300109c33e9281",
+    "kvmem/include/kvmem/thinking_span_tracker.hpp": "12f355d088dc7a1af96cb416e7d9d7005773b1924b4c2a249b95bd2e2aea7380",
+    "kvmem/src/host/historical_kv_redundancy.cpp": "272e20ff098616f5b4fd6f753adf3d2709240e870653d55de3f46aa302abb370",
+    "kvmem/tests/historical_kv_progress_probe.cpp": "faa47a7b0adb2fdef5b083958097b1ce017b9e96525884e08c38823afc4698f4",
+    "kvmem/tests/historical_kv_query_coverage_test.cpp": "465d5b4c21bc83d72697977dee6523d4222f8830e1b1fc95f0a34b3849c143ab",
+    "kvmem/tests/historical_kv_redundancy_test.cpp": "2b4d02d6878140ddc5110991c2889c744482788cac52e402dc3e516a5b45bd08",
+    "kvmem/tests/thinking_span_tracker_test.cpp": "ef4ba6f656368ae24f5218d2d4a4c0ddb38c3784d50d210f57bcb5afd63344eb",
+    "scripts/run_browser_fps_feedback.py": "28f9a7e1ee00238da18e63ef2edfcbde7d0542cf9e4fa6f5c0f69c7b8ece8616",
+    "scripts/test_server_historical_workload.py": "70a1b9717fc1936b729e2795572627787c55fbf8ca354211e6e69c6c1641014c",
+    "src/adapter/llama-kvmem-capture.cpp": "04cd07a29403e746fcd10d67585ae0ec40dd924dc5c39d4e0f921341828c4499",
+    "src/adapter/llama-kvmem-hooks.h": "5d6f66f537465d86e4bd49143e51e4dbff9db82db33f03de9912ffafdce66ba4",
+    "src/adapter/llama-memory-kvmem.cpp": "4e62a9379bb2e05405f1f65a4fd03b911d2b27f1b9205907a2d5a63b6f27a294",
+    "src/adapter/llama-memory-kvmem.h": "9b0e1b412976f72d9a41d6e221f8340d9c104b147b6e5f92a92d6f47e4c53949",
+    "tests/test_historical_query_log.py": "269de951768afd7fbc06f0b0a5c6a98f4ce16d646c29333fbda942ec4e79e267",
+    "tools/llama-kvmem-server.cpp": "507f1842a166f679636f315e79999dd9005f9bd6de079be180d2b31bb5c6d343",
+    "tests/historical-access-test.cpp": "3d509a1f2547243a40ce480141a43b14d8c9544c1b1ec81cc7333f961b1d6293",
+    "scripts/summarize_historical_gc_bench.py": "f9334cf7038d8d0675942f10cc567e0ec52537aea6f143dc43d8f0b823032b40",
+    "tests/test_historical_gc_bench_summary.py": "b7036b962949118456cc926369473b426c3e8963e662afa9b60eba01f33b3dbc",
+    "scripts/check_full_query_probe.py": "de0dea9eff38da4555b7523bc9a9ede1d16af457be22cc788eb6125101b448a7",
+    "tests/test_full_query_probe.py": "52febb6b77ff8a6f3bdcf20a0e70afdf0501d17fe5cad0568b59b59a067c68a5",
+    "scripts/check_browser_fps_movement.mjs": "72297b8a4a09f55c0c5bfed0c29044459b908dece4ce258860955613f8b4a192",
+    "scripts/fixtures/browser-fps-explicit-movement-workload.json": "22b256c4eb333b6a07614aa7ad2ad26bdbaebb45ca8d71d076ebb835c4b2dc77",
+    "scripts/fixtures/full-query-coverage-workload.json": "5fe33f2d6dea3b5107d134b3bcbe418f9fa39ba4be6b24a55ecfae273ab01bce"
+  }
+}

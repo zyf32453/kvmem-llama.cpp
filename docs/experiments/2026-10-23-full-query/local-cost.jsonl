@@ -1,0 +1,3 @@
+{"tokens":512,"layers":4,"head_dim":128,"kv_heads":8,"query_heads":32,"segments":16,"question_bytes":1051648,"capture_ms":9.24,"first_block_score_ms":0.2908,"slices":2,"max_slice_ms":0.1562,"cached_block_score_ms":0.008895}
+{"tokens":4096,"layers":4,"head_dim":128,"kv_heads":8,"query_heads":32,"segments":128,"question_bytes":8413184,"capture_ms":78.6169,"first_block_score_ms":2.6512,"slices":16,"max_slice_ms":0.3498,"cached_block_score_ms":0.009368}
+{"tokens":16384,"layers":4,"head_dim":128,"kv_heads":8,"query_heads":32,"segments":512,"question_bytes":33652736,"capture_ms":323.975,"first_block_score_ms":9.4541,"slices":64,"max_slice_ms":0.2068,"cached_block_score_ms":0.008863}

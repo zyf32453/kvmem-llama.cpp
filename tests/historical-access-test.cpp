@@ -400,8 +400,14 @@ struct kvmem_transfer_test_access {
     static kvmem::HistoricalKvGc::Stats optional_gc_stats(const llama_memory_kvmem & mem) {
         return mem.historical_gc_ ? mem.historical_gc_->stats() : kvmem::HistoricalKvGc::Stats{};
     }
+    static kvmem::HistoricalKvPolicy::Metrics optional_gc_policy_metrics(const llama_memory_kvmem & mem) {
+        return mem.historical_gc_ ? mem.historical_gc_->policy_metrics() : kvmem::HistoricalKvPolicy::Metrics{};
+    }
     static std::shared_ptr<kvmem::HistoricalKvMeanKeySource> redundancy_source(llama_memory_kvmem & mem) {
         return mem.historical_redundancy_;
+    }
+    static bool thinking_policy_armed(const llama_memory_kvmem & mem) {
+        return mem.thinking_ranges_ && mem.thinking_ranges_->armed();
     }
     static uint64_t gpu_window_id(const llama_memory_kvmem & mem) {
         return mem.historical_capture_->gpu_window_id();
@@ -3461,7 +3467,8 @@ static void compare_redundancy_selection(llama_memory_kvmem & mem) {
 // warmup per mode, and rotating mode order. No product instrumentation or HTTP
 // chunk timestamps. Never interpret this synthetic fixture as task quality.
 static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redundancy = false,
-        bool mentor = false) {
+        bool mentor = false, bool full_query = false) {
+    require(!full_query || (mentor && redundancy), "full Query benchmark requires the mentor redundancy fixture");
     // The mentor fixture keeps the accepted IQ3/32-token memory configuration.
     // Use enough prompt blocks to trigger GC, and more than 32 decode samples.
     // Output reservation remains 16K even though the timed work is 256 steps.
@@ -3525,9 +3532,23 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redun
         redundancy ? "redundancy" : "lru", input, output, capacity, low, high,
         kp.budget, kp.gen_reserve, kvmem_transfer_test_access::gpu_slots(*mem), cp.n_ctx,
         mentor ? 1024u : 32u, mentor ? "q8_0" : "f16", mentor ? kp.gen_reserve : output,
-        mentor ? "mentor-27b" : "legacy-short", rounds);
+        full_query ? "mentor-full-query-synthetic-thinking" : mentor ? "mentor-27b" : "legacy-short", rounds);
     for (size_t i = 0; i < tokens.size(); ++i) std::printf("%s%d", i ? "," : "", tokens[i]);
     std::puts("]}");
+    if (full_query) {
+        // Only the synthetic archive prompt is labeled as thinking. Timed
+        // output has no thinking annotation: its Q must still be observed,
+        // while only the annotated input remains eligible for thinking GC.
+        // This is not evidence that the model emitted reasoning tokens.
+        std::printf("KVMEM_GC_FULL_QUERY_CONFIG {\"fixture\":\"mentor-full-query-synthetic-thinking\","
+            "\"full_query_span\":[0,%u],\"synthetic_thinking_span\":[0,%u],"
+            "\"thinking_span_is_synthetic\":true,\"generated_query_capture\":true,"
+            "\"generated_tokens_marked_thinking\":false,"
+            "\"off_thinking_policy_armed\":false,"
+            "\"thinking_pool_limit\":56,\"off_includes_query_collection\":true,"
+            "\"worker_starts_after_prefill\":true,\"task_quality_evaluation\":false}\n",
+            input, input);
+    }
     // A long prompt spans stdout buffers; finish this JSON line before the
     // stderr BEGIN marker or backend messages can interleave with its tail.
     std::fflush(stdout);
@@ -3543,6 +3564,17 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redun
                     llama_kvmem_historical_capture_begin(ctx.get(), capacity, input, reserved_output,
                         input / batch_size + reserved_output), "GC benchmark admission failed");
             initialized = true;
+            if (full_query) {
+                mem->set_gc_query_span(0, int32_t(input));
+                if (mode) {
+                    mem->arm_thinking_policy();
+                    mem->set_thinking_span(0, input, false);
+                } else {
+                    // Also exercise capture with thinking disabled entirely.
+                    // All modes must still collect the same generated Q.
+                    mem->disarm_thinking_policy();
+                }
+            }
             // Exclude old-request cleanup from the new request measurement.
             const auto deadline = Clock::now() + std::chrono::seconds(10);
             while (!previous.expired() && Clock::now() < deadline)
@@ -3556,6 +3588,16 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redun
             }
             mem->end_prefill_capture();
             const double prefill_ms = ms(Clock::now() - prefill_start);
+            const auto query_source = full_query ? kvmem_transfer_test_access::redundancy_source(*mem) : nullptr;
+            if (full_query) {
+                require(query_source && query_source->query_samples() > 0 &&
+                        query_source->question_tokens() == input &&
+                        query_source->question_segments() == (input + 31) / 32 &&
+                        query_source->question_bytes() > 0 && query_source->invalid_questions() == 0,
+                        "full Query benchmark did not capture the entire input");
+            }
+            const auto observation_before = query_source ? query_source->observation_samples() : 0;
+            const auto fast_before = query_source ? query_source->fast_samples() : 0;
             if (redundancy && !mentor && round == 0 && mode == 0) compare_redundancy_selection(*mem);
             // Isolate already-running decode: all input has acquired its GPU
             // execution permission before deletion can close new admission.
@@ -3612,6 +3654,56 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redun
             for (size_t i = 0; i < generated.size(); ++i) std::printf("%s%d", i ? "," : "", generated[i]);
             std::puts("]}");
             std::fflush(stdout);
+            if (full_query) {
+                // Drain only after the timed decode interval. Do not replace
+                // `last`: release counted below must happen during decoding.
+                mem->harvest_flush();
+                const auto metrics = kvmem_transfer_test_access::optional_gc_policy_metrics(*mem);
+                const auto observation_after = query_source->observation_samples();
+                const auto fast_after = query_source->fast_samples();
+                const bool full_coverage = query_source->question_tokens() == input &&
+                    query_source->question_segments() == (input + 31) / 32 &&
+                    query_source->invalid_questions() == 0;
+                std::printf("KVMEM_GC_FULL_QUERY {\"round\":%u,\"warmup\":%s,\"mode\":\"%s\","
+                    "\"fixture\":\"mentor-full-query-synthetic-thinking\",\"thinking_span_is_synthetic\":true,"
+                    "\"generated_tokens_marked_thinking\":false,\"thinking_policy_armed\":%s,"
+                    "\"full_question_coverage\":%s,\"question_tokens\":%llu,\"question_segments\":%llu,"
+                    "\"question_bytes\":%llu,\"query_samples\":%llu,\"invalid_questions\":%llu,"
+                    "\"observation_samples_before_decode\":%llu,\"observation_samples_after_decode\":%llu,"
+                    "\"fast_samples_before_decode\":%llu,\"fast_samples_after_decode\":%llu,"
+                    "\"question_score_evals\":%llu,\"question_score_yields\":%llu,"
+                    "\"feature_blocks\":%llu,\"pair_comparisons\":%llu,\"scored_rounds\":%llu,"
+                    "\"max_round_features\":%llu,\"thinking_pool_limit\":56}\n",
+                    round, round == 0 ? "true" : "false", names[mode],
+                    kvmem_transfer_test_access::thinking_policy_armed(*mem) ? "true" : "false",
+                    full_coverage ? "true" : "false",
+                    (unsigned long long) query_source->question_tokens(),
+                    (unsigned long long) query_source->question_segments(),
+                    (unsigned long long) query_source->question_bytes(),
+                    (unsigned long long) query_source->query_samples(),
+                    (unsigned long long) query_source->invalid_questions(),
+                    (unsigned long long) observation_before, (unsigned long long) observation_after,
+                    (unsigned long long) fast_before, (unsigned long long) fast_after,
+                    (unsigned long long) query_source->question_score_evaluations(),
+                    (unsigned long long) query_source->question_score_yields(),
+                    (unsigned long long) metrics.feature_blocks, (unsigned long long) metrics.comparisons,
+                    (unsigned long long) metrics.scored_rounds, (unsigned long long) metrics.max_round_features);
+                std::fflush(stdout);
+                require(full_coverage && observation_after > observation_before && fast_after > fast_before,
+                        "full Query benchmark did not exercise complete input and generated Query capture");
+                require(kvmem_transfer_test_access::thinking_policy_armed(*mem) == (mode != 0),
+                        "full Query benchmark did not exercise the intended thinking policy state");
+                if (mode) {
+                    require(query_source->question_score_evaluations() > 0 && metrics.feature_blocks > 0 &&
+                            metrics.comparisons > 0 && metrics.scored_rounds > 0 &&
+                            metrics.max_round_features > 0 && metrics.max_round_features <= 56,
+                            "full Query benchmark did not exercise the bounded thinking pool");
+                } else {
+                    require(query_source->question_score_evaluations() == 0 && metrics.scored_rounds == 0 &&
+                            last.ticks == 0 && last.committed == 0 && last.shadow == 0,
+                            "full Query off baseline unexpectedly ran the GC worker");
+                }
+            }
             require(stable_window && same_output, "GC benchmark changed GPU window or output; timings are not equivalent work");
             require(!last.policy_failures && !last.worker_failures, "GC benchmark worker or policy failed");
             if (mode == 2) require(active_release_steps > 0 && last.committed > before.committed,
@@ -3628,14 +3720,14 @@ static void benchmark_gc_decode(llama_model * model, unsigned rounds, bool redun
 int main(int argc, char ** argv) {
     constexpr unsigned scenario_count = KVMEM_ENABLE_NVME ? 43 : 35;
     if (argc != 2 && argc != 3 && argc != 4 && argc != 6) {
-        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --gc-bench 1..20 | --gc-redundancy-bench 1..20 | --gc-mentor-redundancy-bench 1..20 | --gc-policy-bench 1..20 | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
+        std::fprintf(stderr, "Usage: %s model.gguf [--repeated | --reset | --closed-capture | --gc-bench 1..20 | --gc-redundancy-bench 1..20 | --gc-mentor-redundancy-bench 1..20 | --gc-full-query-bench 1..20 | --gc-policy-bench 1..20 | --soak-seconds 1..86400 | --reset-soak-seconds 1..86400 | --scenario 0..%u | --scenario-range FIRST LAST ROUNDS] (zero-based inclusive range; 1..1000 rounds; requires CUDA)\n", argv[0], scenario_count - 1);
         return argc == 1 ? 77 : 1;
     }
     try {
         unsigned first_scenario = 0, end_scenario = scenario_count;
         unsigned scenario_rounds = 1;
         unsigned soak_seconds = 0, reset_soak_seconds = 0, gc_bench_rounds = 0;
-        bool redundancy_bench = false, policy_bench = false, mentor_bench = false;
+        bool redundancy_bench = false, policy_bench = false, mentor_bench = false, full_query_bench = false;
         bool run_repeated = true, run_reset = true, run_closed_capture = true;
         const char * trace = std::getenv("KVMEM_TEST_MODEL_TRACE");
         trace_model_stages = trace && *trace && *trace != '0';
@@ -3665,8 +3757,10 @@ int main(int argc, char ** argv) {
             const std::string selection = argv[2];
             const auto number = decimal(argv[3]);
             if (selection == "--gc-bench" || selection == "--gc-redundancy-bench" ||
-                    selection == "--gc-policy-bench" || selection == "--gc-mentor-redundancy-bench") {
-                mentor_bench = selection == "--gc-mentor-redundancy-bench";
+                    selection == "--gc-policy-bench" || selection == "--gc-mentor-redundancy-bench" ||
+                    selection == "--gc-full-query-bench") {
+                full_query_bench = selection == "--gc-full-query-bench";
+                mentor_bench = selection == "--gc-mentor-redundancy-bench" || full_query_bench;
                 redundancy_bench = selection == "--gc-redundancy-bench" || mentor_bench;
                 policy_bench = selection == "--gc-policy-bench";
                 require(number > 0 && number <= 20, "GC benchmark rounds must be 1..20");
@@ -3706,7 +3800,7 @@ int main(int argc, char ** argv) {
                 // its own full warmups before measuring collection + GC cost.
                 for (bool red : {false, true, true, false})
                     benchmark_gc_decode(model.get(), gc_bench_rounds, red);
-            } else benchmark_gc_decode(model.get(), gc_bench_rounds, redundancy_bench, mentor_bench);
+            } else benchmark_gc_decode(model.get(), gc_bench_rounds, redundancy_bench, mentor_bench, full_query_bench);
             model.reset();
             llama_backend_free();
             return 0;

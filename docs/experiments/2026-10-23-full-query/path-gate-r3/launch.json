@@ -1,0 +1,13 @@
+{
+  "command": [
+    "/tmp/kvmem-full-query-20261023/build-cuda/bin/kvmem-historical-access-test",
+    "/home/yifan/models/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+    "--gc-full-query-bench",
+    "1"
+  ],
+  "revision": "full-query-all-decode-r3",
+  "binary_sha256": "87b351669448174c59c660e6b28b47019f2dcb32da62be230db4e8127ba3e980",
+  "scope": "Functional path diagnostic: complete input, all-phase generated Q, bounded candidate pool and actual CPU release. One measured round is not formal latency/throughput acceptance.",
+  "formal_performance_accepted": false,
+  "started": 1792759124.4119213
+}

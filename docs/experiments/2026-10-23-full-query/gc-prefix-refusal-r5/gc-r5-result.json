@@ -1,0 +1,164 @@
+{
+  "contexts_created": 0,
+  "inference_executed": false,
+  "n_gpu_layers": 0,
+  "transitions": [
+    {
+      "api_reconstructed_text_equals_canonical": true,
+      "api_reconstruction_bytes": 8566,
+      "canonical_generation_bytes": 8566,
+      "canonical_generation_tokens_standalone": 2433,
+      "canonical_prefix_tokens_without_turn_close": 2888,
+      "from_turn": 1,
+      "previous_input_text_is_exact_prefix": true,
+      "previous_input_token_prefix": 455,
+      "recorded_cache_hit": 2888,
+      "recorded_cached_token_count": 2888,
+      "recorded_generation_tokens": 2433,
+      "to_turn": 2
+    },
+    {
+      "api_reconstructed_text_equals_canonical": true,
+      "api_reconstruction_bytes": 33042,
+      "canonical_generation_bytes": 33042,
+      "canonical_generation_tokens_standalone": 9925,
+      "canonical_prefix_tokens_without_turn_close": 12926,
+      "from_turn": 2,
+      "previous_input_text_is_exact_prefix": true,
+      "previous_input_token_prefix": 3001,
+      "recorded_cache_hit": 12926,
+      "recorded_cached_token_count": 12926,
+      "recorded_generation_tokens": 9925,
+      "to_turn": 3
+    },
+    {
+      "api_reconstructed_text_equals_canonical": true,
+      "api_reconstruction_bytes": 55274,
+      "canonical_generation_bytes": 55274,
+      "canonical_generation_tokens_standalone": 15648,
+      "canonical_prefix_tokens_without_turn_close": 28729,
+      "from_turn": 3,
+      "previous_input_text_is_exact_prefix": true,
+      "previous_input_token_prefix": 13081,
+      "recorded_cache_hit": 28729,
+      "recorded_cached_token_count": 28729,
+      "recorded_generation_tokens": 15648,
+      "to_turn": 4
+    },
+    {
+      "api_reconstructed_text_equals_canonical": true,
+      "api_reconstruction_bytes": 51914,
+      "canonical_generation_bytes": 51914,
+      "canonical_generation_tokens_standalone": 15244,
+      "canonical_prefix_tokens_without_turn_close": 44084,
+      "from_turn": 4,
+      "previous_input_text_is_exact_prefix": true,
+      "previous_input_token_prefix": 28840,
+      "recorded_cache_hit": 44084,
+      "recorded_cached_token_count": 44084,
+      "recorded_generation_tokens": 15244,
+      "to_turn": 5
+    },
+    {
+      "api_reconstructed_text_equals_canonical": true,
+      "api_reconstruction_bytes": 43665,
+      "canonical_generation_bytes": 43665,
+      "canonical_generation_tokens_standalone": 14371,
+      "canonical_prefix_tokens_without_turn_close": 58573,
+      "from_turn": 5,
+      "previous_input_text_is_exact_prefix": true,
+      "previous_input_token_prefix": 44202,
+      "recorded_cache_hit": 58573,
+      "recorded_cached_token_count": 58573,
+      "recorded_generation_tokens": 14371,
+      "to_turn": 6
+    },
+    {
+      "api_reconstructed_text_equals_canonical": true,
+      "api_reconstruction_bytes": 9437,
+      "canonical_generation_bytes": 9437,
+      "canonical_generation_tokens_standalone": 2540,
+      "canonical_prefix_tokens_without_turn_close": 61245,
+      "from_turn": 6,
+      "previous_input_text_is_exact_prefix": true,
+      "previous_input_token_prefix": 58705,
+      "recorded_cache_hit": 61245,
+      "recorded_cached_token_count": 61245,
+      "recorded_generation_tokens": 2540,
+      "to_turn": 7
+    },
+    {
+      "api_reconstructed_text_equals_canonical": true,
+      "api_reconstruction_bytes": 37279,
+      "canonical_generation_bytes": 37279,
+      "canonical_generation_tokens_standalone": 10287,
+      "canonical_prefix_tokens_without_turn_close": 71635,
+      "from_turn": 7,
+      "previous_input_text_is_exact_prefix": true,
+      "previous_input_token_prefix": 61348,
+      "recorded_cache_hit": null,
+      "recorded_cached_token_count": 71636,
+      "recorded_generation_tokens": 10288,
+      "to_turn": 8
+    }
+  ],
+  "turns": [
+    {
+      "count_matches": true,
+      "http_status": 200,
+      "recorded_prompt_tokens": 455,
+      "rendered_prompt_tokens": 455,
+      "turn": 1
+    },
+    {
+      "count_matches": true,
+      "http_status": 200,
+      "recorded_prompt_tokens": 3001,
+      "rendered_prompt_tokens": 3001,
+      "turn": 2
+    },
+    {
+      "count_matches": true,
+      "http_status": 200,
+      "recorded_prompt_tokens": 13081,
+      "rendered_prompt_tokens": 13081,
+      "turn": 3
+    },
+    {
+      "count_matches": true,
+      "http_status": 200,
+      "recorded_prompt_tokens": 28840,
+      "rendered_prompt_tokens": 28840,
+      "turn": 4
+    },
+    {
+      "count_matches": true,
+      "http_status": 200,
+      "recorded_prompt_tokens": 44202,
+      "rendered_prompt_tokens": 44202,
+      "turn": 5
+    },
+    {
+      "count_matches": true,
+      "http_status": 200,
+      "recorded_prompt_tokens": 58705,
+      "rendered_prompt_tokens": 58705,
+      "turn": 6
+    },
+    {
+      "count_matches": true,
+      "http_status": 200,
+      "recorded_prompt_tokens": 61348,
+      "rendered_prompt_tokens": 61348,
+      "turn": 7
+    },
+    {
+      "count_matches": null,
+      "http_status": 503,
+      "recorded_prompt_tokens": null,
+      "rendered_prompt_tokens": 71735,
+      "turn": 8
+    }
+  ],
+  "vocab_only": true
+}

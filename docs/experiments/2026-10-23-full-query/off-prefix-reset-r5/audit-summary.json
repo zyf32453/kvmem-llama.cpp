@@ -1,0 +1,263 @@
+{
+  "recorded_utc": "2026-10-23T16:01:26.440260+00:00",
+  "run_name": "off-thinking-native-262k-r5",
+  "product_revision": "full-query-all-decode-r3",
+  "test_revision": "quality-sampling-r4",
+  "binary_sha256": "824f31ba118e6baeae288b3a8e4ffe663246629958a6446cdf2646cccfd466b3",
+  "terminal": true,
+  "controller_exit_code": 1,
+  "driver_exit_code": 1,
+  "model_process_confirmed_exited": true,
+  "gc_mode": "off",
+  "repairs": 0,
+  "planned_turns": 8,
+  "complete_turns": 8,
+  "truncated_turns": 0,
+  "all_continuations_reused_history": false,
+  "prefix_miss_turn": 8,
+  "input_recomputed_tokens": 66670,
+  "prefix_miss_root_cause": "Exact token-prefix predicate failed. Template whitespace normalization and retokenization are hypotheses, not yet distinguished.",
+  "controller_browser_feedback_executed": false,
+  "independent_browser_check": {
+    "passed": 29,
+    "total": 29,
+    "all_passed": true,
+    "browser_errors": [],
+    "blocked_requests": [],
+    "original_checker_sha256": "045fda951b6dcf274016a2847ab18abc4639373dc9425bdab5713491f603c150"
+  },
+  "off_functional_quality_reference_passed": true,
+  "strict_continuation_accepted": false,
+  "gc_quality_accepted": false,
+  "formal_performance_accepted": false,
+  "turns": [
+    {
+      "turn": 1,
+      "output_file": "state.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 117.33432792080566,
+      "usage": {
+        "completion_tokens": 2433,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 455,
+        "prompt_tokens": 455,
+        "total_tokens": 2888
+      },
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 114528.739103,
+        "predicted_n": 2433,
+        "predicted_per_second": 21.243576232965523,
+        "predicted_per_token_ms": 47.07305347431155,
+        "prompt_ms": 2313.41636,
+        "prompt_n": 455,
+        "prompt_per_second": 196.67882006332832,
+        "prompt_per_token_ms": 5.084431560439561
+      }
+    },
+    {
+      "turn": 2,
+      "output_file": "physics.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 642.193752347026,
+      "usage": {
+        "completion_tokens": 9925,
+        "prompt_cache_hit_tokens": 2888,
+        "prompt_cache_miss_tokens": 113,
+        "prompt_tokens": 3001,
+        "total_tokens": 12926
+      },
+      "timings": {
+        "cache_n": 2888,
+        "predicted_ms": 641249.610748,
+        "predicted_n": 9925,
+        "predicted_per_second": 15.4775922412222,
+        "predicted_per_token_ms": 64.60953256906801,
+        "prompt_ms": 582.323774,
+        "prompt_n": 113,
+        "prompt_per_second": 194.05012305061754,
+        "prompt_per_token_ms": 5.153307734513274
+      }
+    },
+    {
+      "turn": 3,
+      "output_file": "weapons.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 1148.7340304260142,
+      "usage": {
+        "completion_tokens": 15634,
+        "prompt_cache_hit_tokens": 12926,
+        "prompt_cache_miss_tokens": 155,
+        "prompt_tokens": 13081,
+        "total_tokens": 28715
+      },
+      "timings": {
+        "cache_n": 12926,
+        "predicted_ms": 1147428.622971,
+        "predicted_n": 15634,
+        "predicted_per_second": 13.625248391938653,
+        "predicted_per_token_ms": 73.39315741147499,
+        "prompt_ms": 877.264784,
+        "prompt_n": 155,
+        "prompt_per_second": 176.68553762440783,
+        "prompt_per_token_ms": 5.6597728
+      }
+    },
+    {
+      "turn": 4,
+      "output_file": "bots.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 762.9731039570179,
+      "usage": {
+        "completion_tokens": 9380,
+        "prompt_cache_hit_tokens": 28715,
+        "prompt_cache_miss_tokens": 111,
+        "prompt_tokens": 28826,
+        "total_tokens": 38206
+      },
+      "timings": {
+        "cache_n": 28715,
+        "predicted_ms": 761607.894972,
+        "predicted_n": 9380,
+        "predicted_per_second": 12.316048798765209,
+        "predicted_per_token_ms": 81.19487153219616,
+        "prompt_ms": 839.515582,
+        "prompt_n": 111,
+        "prompt_per_second": 132.2191063274392,
+        "prompt_per_token_ms": 7.563203441441441
+      }
+    },
+    {
+      "turn": 5,
+      "output_file": "render.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 822.8179446749855,
+      "usage": {
+        "completion_tokens": 9440,
+        "prompt_cache_hit_tokens": 38206,
+        "prompt_cache_miss_tokens": 118,
+        "prompt_tokens": 38324,
+        "total_tokens": 47764
+      },
+      "timings": {
+        "cache_n": 38206,
+        "predicted_ms": 821193.152228,
+        "predicted_n": 9440,
+        "predicted_per_second": 11.495468483131035,
+        "predicted_per_token_ms": 86.99080002415255,
+        "prompt_ms": 1048.565489,
+        "prompt_n": 118,
+        "prompt_per_second": 112.53469739170482,
+        "prompt_per_token_ms": 8.886148211864407
+      }
+    },
+    {
+      "turn": 6,
+      "output_file": "index.html",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 425.7694628459867,
+      "usage": {
+        "completion_tokens": 4659,
+        "prompt_cache_hit_tokens": 47764,
+        "prompt_cache_miss_tokens": 132,
+        "prompt_tokens": 47896,
+        "total_tokens": 52555
+      },
+      "timings": {
+        "cache_n": 47764,
+        "predicted_ms": 423935.195169,
+        "predicted_n": 4659,
+        "predicted_per_second": 10.98988725893048,
+        "predicted_per_token_ms": 90.99274418737927,
+        "prompt_ms": 1167.176523,
+        "prompt_n": 132,
+        "prompt_per_second": 113.09343308304359,
+        "prompt_per_token_ms": 8.842246386363637
+      }
+    },
+    {
+      "turn": 7,
+      "output_file": "weapons.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 1279.9430725160055,
+      "usage": {
+        "completion_tokens": 13913,
+        "prompt_cache_hit_tokens": 52555,
+        "prompt_cache_miss_tokens": 103,
+        "prompt_tokens": 52658,
+        "total_tokens": 66571
+      },
+      "timings": {
+        "cache_n": 52555,
+        "predicted_ms": 1278150.299809,
+        "predicted_n": 13913,
+        "predicted_per_second": 10.885261304620501,
+        "predicted_per_token_ms": 91.86733988420902,
+        "prompt_ms": 999.343624,
+        "prompt_n": 103,
+        "prompt_per_second": 103.0676511325798,
+        "prompt_per_token_ms": 9.702365281553398
+      }
+    },
+    {
+      "turn": 8,
+      "output_file": "state.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 512.0011024419218,
+      "usage": {
+        "completion_tokens": 1371,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 66670,
+        "prompt_tokens": 66670,
+        "total_tokens": 68041
+      },
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 126068.534421,
+        "predicted_n": 1371,
+        "predicted_per_second": 10.875037187484144,
+        "predicted_per_token_ms": 91.95370854923414,
+        "prompt_ms": 383399.347181,
+        "prompt_n": 66670,
+        "prompt_per_second": 173.89179321822263,
+        "prompt_per_token_ms": 5.750702672581371
+      }
+    }
+  ],
+  "memory": {
+    "sample_count": 5731,
+    "max_rss_kib": 12222320,
+    "max_hwm_kib": 12222320,
+    "last_rss_kib": 9037976,
+    "max_gpu_mib": 13901,
+    "scope": "Whole process including loading and history recomputation; not incremental Query/GC memory."
+  },
+  "local_raw_directory": "tmp\\full-query-20261023\\off-thinking-native-262k-r5\\remote",
+  "remote_directory": "/tmp/kvmem-full-query-20261023/redundancy-gc/off-thinking-native-262k-r5",
+  "raw_sha256": {
+    "results.json": "7586b3e8979ed57694aa504f36a78d2a4c9f2eeba7433609ccad0e15cd0fe69a",
+    "browser-results.json": "dcca755df7cf154c86ed5ecc15d0979f4b3fc87e5f62f801f71f65d680fa1d66",
+    "requests.json": "39ccf5207df8313f7e4b5db1e32c216d49f41d1f4a912512e7f5496809ce660a",
+    "server.log": "a026170963881421fd8e89e204a3c2b786cf2af22b81486beba87d8ba261dcba",
+    "process-memory.jsonl": "9783bcd94f496d820802d27a36304d561f893c92c48d07bab0f0790c470b52d5",
+    "gpu-memory.csv": "2a48e2dee08dc5159e3adc0935a5538d4712a041fb57cced123b8e7fa06644ca",
+    "props.json": "3a65fb9f596412ef0a10abbe6e865be29c196926d8673bfef0d00e31a6435c00",
+    "native-chat-template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+  },
+  "app_sha256": {
+    "bots.js": "022bd1b30000663abd4a48624e08841eebe2702daa081b8fa3841009dfd49de0",
+    "index.html": "5a83b7eca34a0a4884e71db463825a550436388f29cfbfa4b4ded765cb1555f6",
+    "physics.js": "c129a2586fff013c4ee3f604d8fa294b6d8e97ab13c37217ba128cec4b29abb3",
+    "render.js": "1324ca56cace83dc1f771c1b9afe0639a908fd68591f6b1a8533c01e65cd9770",
+    "state.js": "1d1a25f82104ea0dbc1bdee2d312410a924912d315c662a81cb5c151711bbc4f",
+    "weapons.js": "61896d2a46de2ac4787b4eed13b4ca08902ebb1fcf0a0d61fb690f88b75eca5b"
+  }
+}

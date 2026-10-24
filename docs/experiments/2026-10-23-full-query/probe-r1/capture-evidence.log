@@ -1,0 +1,9 @@
+KVMEM_TRACE gc_query_full begin=82 end=1895 tokens=1813 located=1
+0.23.465.953 I KVMEM_HISTORICAL_GC finish mode=delete proposed=0 committed=0 shadow=0 reclaimed=0 deferred=0 retry=0 policy_failures=0 worker_failures=0 ready=452 payload_bytes=674758656 host_released_early=0 partial_resource_releases=0
+0.23.465.960 I KVMEM_HISTORICAL_REDUNDANCY features=0 missing=0 pairs=0 rounds=0 max_round_features=0 representatives=0 lossy=0 no_query=0 query_samples=1 observation_samples=2 fast_samples=56 skipped_queries=0 question_tokens=1813 question_segments=57 question_bytes=5614272 question_score_evals=0 question_score_yields=0 invalid_questions=0
+KVMEM_TRACE gc_query_full begin=2009 end=3822 tokens=1813 located=1
+0.37.401.792 I KVMEM_HISTORICAL_GC finish mode=delete proposed=0 committed=0 shadow=0 reclaimed=0 deferred=0 retry=0 policy_failures=0 worker_failures=0 ready=392 payload_bytes=745537536 host_released_early=0 partial_resource_releases=0
+0.37.401.808 I KVMEM_HISTORICAL_REDUNDANCY features=0 missing=0 pairs=0 rounds=0 max_round_features=0 representatives=0 lossy=0 no_query=0 query_samples=2 observation_samples=4 fast_samples=113 skipped_queries=0 question_tokens=1813 question_segments=57 question_bytes=5614272 question_score_evals=0 question_score_yields=0 invalid_questions=0
+KVMEM_TRACE gc_query_full begin=3938 end=5750 tokens=1812 located=1
+0.50.687.384 I KVMEM_HISTORICAL_GC finish mode=delete proposed=4 committed=4 shadow=0 reclaimed=0 deferred=157 retry=0 policy_failures=0 worker_failures=0 ready=331 payload_bytes=812777472 host_released_early=4 partial_resource_releases=0
+0.50.687.388 I KVMEM_HISTORICAL_REDUNDANCY features=7 missing=0 pairs=6 rounds=3 max_round_features=3 representatives=1 lossy=2 no_query=26 query_samples=3 observation_samples=6 fast_samples=152 skipped_queries=0 question_tokens=1812 question_segments=57 question_bytes=5614272 question_score_evals=350 question_score_yields=43 invalid_questions=0

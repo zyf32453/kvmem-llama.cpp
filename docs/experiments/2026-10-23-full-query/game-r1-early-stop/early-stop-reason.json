@@ -1,0 +1,11 @@
+{
+  "status": "stopped_early_after_confirmed_functional_failure",
+  "driver_pid": 585371,
+  "signal": "SIGINT",
+  "reason": "The unmodified turn-2 physics.js fails the existing diagonal movement check in real Chrome; later workload turns never update physics.js and max_repairs is 0. No GC retirements occurred before this file was generated. Stop rather than consume GPU time on a run already unable to satisfy all checks.",
+  "full_browser_suite_completed": false,
+  "not_a_gc_crash": true,
+  "local_evidence": "tmp/full-query-20261023/game-pre-gc-diagonal-check/report.json",
+  "physics_sha256": "dd649052899485b889d264d4f50265a5b12c85305d5d46aca202bc7384842d57",
+  "unix_time": 1792757297.4443133
+}

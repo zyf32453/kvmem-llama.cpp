@@ -64,6 +64,7 @@ static void probe(bool redundancy, unsigned scan, unsigned batch) {
         << ",\"committed\":" << stats.committed << ",\"released\":" << *released
         << ",\"scored_rounds\":" << metrics.scored_rounds << ",\"feature_reads\":" << metrics.feature_blocks
         << ",\"pairs\":" << metrics.comparisons << ",\"representatives\":" << metrics.representatives
+        << ",\"lossy\":" << metrics.lossy_intents
         << ",\"missing\":" << metrics.missing_features << ",\"no_query\":" << metrics.no_query_rounds
         << ",\"compute_seconds_without_poll_sleep\":" << elapsed << "}\n";
     // Explicitly drain the remaining fixture payloads after reporting.

@@ -20,6 +20,7 @@
 #include "kvmem-session-files.h"
 #include "kvmem-session-transfer.h"
 #include "kvmem/session_memory.hpp"
+#include "kvmem/thinking_span_tracker.hpp"
 
 #include "chat.h"
 #include "kvmem-responses.h"
@@ -1195,6 +1196,36 @@ static int decode_span_maybe_spec(ServerState & st, const llama_token * toks, in
 #include "kvmem-multimodal-server.h"
 #include "kvmem-lane-conversations.h"
 
+struct ThinkingTracker {
+    kvmem::ThinkingSpanTracker tracker;
+
+    ThinkingTracker(const common_params_sampling & sampling, bool enable)
+        : tracker(std::vector<kvmem::ThinkingSpanTracker::Token>(
+                      sampling.reasoning_budget_start.begin(), sampling.reasoning_budget_start.end()),
+                  sequences(sampling.reasoning_budget_end), enable) {}
+
+    void observe_prompt(const std::vector<llama_token> & toks) {
+        tracker.observe_prompt(std::vector<kvmem::ThinkingSpanTracker::Token>(toks.begin(), toks.end()));
+    }
+    void observe_generated(llama_token id, int position) { tracker.observe_generated(id, position); }
+    void publish() {
+        kvmem::ThinkingSpanTracker::SpanUpdate update;
+        if (!tracker.take_update(update)) return;
+        llama_kvmem_set_thinking_span(uint64_t(update.begin),
+            uint64_t(std::max(update.end, update.begin)), update.closed ? 1 : 0);
+    }
+
+private:
+    template <typename Ranges>
+    static std::vector<std::vector<kvmem::ThinkingSpanTracker::Token>> sequences(const Ranges & ends) {
+        std::vector<std::vector<kvmem::ThinkingSpanTracker::Token>> out;
+        out.reserve(ends.size());
+        for (const auto & end : ends)
+            out.emplace_back(end.begin(), end.end());
+        return out;
+    }
+};
+
 static bool historical_begin_request(ServerState & st, const std::vector<llama_token> & prompt,
                                      const std::function<bool()> & cancelled) {
     if (!st.historical.capacity) return true;
@@ -1772,7 +1803,7 @@ static bool find_last_user_role_block(const std::string & prompt, const std::str
     return content0 < content1;
 }
 
-static void derive_query_span(ServerState & st, const std::string & prompt, const std::string & last_user,
+static bool derive_query_span(ServerState & st, const std::string & prompt, const std::string & last_user,
                               const std::vector<llama_token> & toks, int & qbegin, int & qend) {
     qbegin = -1;
     qend = (int) toks.size();
@@ -1780,7 +1811,9 @@ static void derive_query_span(ServerState & st, const std::string & prompt, cons
     size_t c1 = 0;
     int n_blocks = 0;
     int pick = -1;
+    bool located = false;
     if (find_last_user_role_block(prompt, last_user, c0, c1, n_blocks, pick)) {
+        located = true;
         const std::string prefix = prompt.substr(0, c0);
         const std::string through = prompt.substr(0, c1);
         qbegin = (int) tokenize_text(st.vocab, prefix, true).size();
@@ -1793,6 +1826,7 @@ static void derive_query_span(ServerState & st, const std::string & prompt, cons
         qend = (int) toks.size();
     }
     if (qbegin < 0 || qend <= qbegin) {
+        located = false;
         qend = (int) toks.size();
         const int last = std::min(st.query_last_fallback, qend);
         qbegin = qend > last ? qend - last : 0;
@@ -1802,6 +1836,7 @@ static void derive_query_span(ServerState & st, const std::string & prompt, cons
     if (qbegin >= qend) {
         qbegin = 0;
     }
+    return located;
 }
 
 static bool derive_native_query_span(const ServerState & st, const std::string & formatted,
@@ -3515,10 +3550,11 @@ int main(int argc, char ** argv) {
                 (uint64_t) std::max(0, cr.max_tokens) + (st.spec.ok ? std::max(0, st.spec_n_max) + 1u : 0u));
         int qbegin = cr.query_begin;
         int qend = cr.query_end;
+        bool gc_query_located = qbegin >= 0 && qend > qbegin && qend <= (int) toks.size();
         st.turn_query_exact = false;
         st.turn_last_user = cr.last_user;
         if (qbegin < 0 || qend < 0) {
-            derive_query_span(st, prompt, cr.last_user, toks, qbegin, qend);
+            gc_query_located = derive_query_span(st, prompt, cr.last_user, toks, qbegin, qend);
         }
         if (st.query_policy_user) {
             st.turn_query_exact = cr.query_begin >= 0 && cr.query_end > cr.query_begin && cr.query_end <= (int) toks.size();
@@ -3533,6 +3569,10 @@ int main(int argc, char ** argv) {
             qend = (int) toks.size() - (st.spec.ok ? 1 : 0);
             qbegin = std::max(last_media_end, qend - st.query_max_tokens);
         }
+        // Preserve full input coverage for GC before retrieval applies its
+        // independent cap. An unlocated question is not a valid suffix proxy.
+        const int gc_qbegin = (gc_query_located || st.turn_query_exact) ? qbegin : -1;
+        const int gc_qend = (gc_query_located || st.turn_query_exact) ? qend : -1;
         clamp_query_span(st, qbegin, qend);
         if (st.turn_query_exact && std::find(toks.begin() + qbegin, toks.begin() + qend, LLAMA_TOKEN_NULL) != toks.begin() + qend) {
             st.turn_query_exact = false;
@@ -3540,6 +3580,12 @@ int main(int argc, char ** argv) {
         }
 
         const int force = force_pos_from_substr(st.vocab, toks, cr.force_substr);
+        // Arm before admission. An armed policy with no span yet deletes
+        // nothing, so the wait cannot retire prompt blocks to make room.
+        const bool thinking_on = cr.enable_thinking &&
+            !sparams.reasoning_budget_start.empty() && !sparams.reasoning_budget_end.empty();
+        if (thinking_on) llama_kvmem_arm_thinking_policy();
+        else llama_kvmem_disarm_thinking_policy();
         // Admission happens before committing SSE headers, so both response
         // transports return HTTP 503 when finite RAM cannot be reserved.
         if (!historical_begin_request(st, toks, cancelled)) {
@@ -3549,6 +3595,10 @@ int main(int argc, char ** argv) {
         }
         st.kparams.query_begin = qbegin;
         st.kparams.query_end = qend;
+        llama_kvmem_set_gc_query_span(gc_qbegin, gc_qend);
+        if (st.historical.capacity)
+            kvmem_diag("KVMEM_TRACE gc_query_full begin=%d end=%d tokens=%d located=%d\n",
+                gc_qbegin, gc_qend, gc_qbegin >= 0 ? gc_qend - gc_qbegin : 0, gc_qbegin >= 0);
         st.kparams.force_pos = force;
         if (st.kparams.enabled) {
             llama_kvmem_set_request_span(qbegin, qend, force);
@@ -3723,8 +3773,9 @@ int main(int argc, char ** argv) {
             res.set_header("X-Accel-Buffering", "no");
             res.set_chunked_content_provider("text/event-stream",
                 [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, parse_tools, formatted, stops,
-                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses](size_t, httplib::DataSink & sink) mutable {
+                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses, thinking_on](size_t, httplib::DataSink & sink) mutable {
                     kvmem_execution_scope execution(st.execution.get());
+                    ThinkingTracker thinking(sparams, thinking_on);
                     StreamIo io;
                     io.sink = &sink;
                     io.req = &req;
@@ -3770,6 +3821,8 @@ int main(int argc, char ** argv) {
                     }
                     const auto t_turn0 = std::chrono::steady_clock::now();
                     int n_cache_hit = 0;
+                    thinking.observe_prompt(toks);
+                    thinking.publish();
                     if (!run_prefill_retrieval(st, toks, &io, &n_cache_hit)) {
                         if (!io.aborted) {
                             send(json{{"error", st.mm_error.empty() ? "prefill/retrieval failed" : st.mm_error}}.dump());
@@ -3796,6 +3849,8 @@ int main(int argc, char ** argv) {
                     if (spec_stream) {
                         const auto gst = kvmem_spec_generate(st.ctx, st.model, st.spec, toks, max_tokens, sparams,
                             [&](llama_token id, const std::string & piece, bool) {
+                                thinking.observe_generated(id, (int) toks.size() + (int) gen.size());
+                                thinking.publish();
                                 gen.push_back(id);
                                 content += piece;
                                 emit_gen_wall((int) gen.size(), false);
@@ -3854,6 +3909,8 @@ int main(int argc, char ** argv) {
                                 break;
                             }
                             std::string piece = token_piece(vocab, id);
+                            thinking.observe_generated(id, (int) toks.size() + (int) gen.size());
+                            thinking.publish();
                             if (multimodal_decode_generated(st, id, (int) toks.size() + (int) gen.size()) != 0) {
                                 fprintf(stderr, "llama_decode(gen) failed\n");
                                 aborted = true;
@@ -4020,6 +4077,9 @@ int main(int argc, char ** argv) {
         } guard {st};
         StreamIo io;
         io.req = &req;
+        ThinkingTracker thinking(sparams, thinking_on);
+        thinking.observe_prompt(toks);
+        thinking.publish();
         const auto t_turn0 = std::chrono::steady_clock::now();
         if (!run_prefill_retrieval(st, toks, &io, &n_cache_hit)) {
             if (io.aborted) {
@@ -4046,6 +4106,8 @@ int main(int argc, char ** argv) {
             const kvmem_spec_gen_stats gst = kvmem_spec_generate(
                     ctx, st.model, st.spec, toks, cr.max_tokens, sparams,
                     [&](llama_token id, const std::string & piece, bool) {
+                        thinking.observe_generated(id, (int) toks.size() + (int) gen.size());
+                        thinking.publish();
                         gen.push_back(id);
                         content += piece;
                         st.progress.generated((int) gen.size());
@@ -4086,7 +4148,7 @@ int main(int argc, char ** argv) {
         }
 
         int next_row = (int) toks.size();
-        auto gen_one = [ctx, smpl, vocab, &st, &next_row](std::string & piece, bool & stopped, llama_token & id_out) -> bool {
+        auto gen_one = [ctx, smpl, vocab, &st, &next_row, &thinking](std::string & piece, bool & stopped, llama_token & id_out) -> bool {
             llama_token id = common_sampler_sample(smpl, ctx, -1);
             common_sampler_accept(smpl, id, true);
             if (llama_vocab_is_eog(vocab, id)) {
@@ -4095,6 +4157,8 @@ int main(int argc, char ** argv) {
             }
             id_out = id;
             piece = token_piece(vocab, id);
+            thinking.observe_generated(id, next_row);
+            thinking.publish();
             if (multimodal_decode_generated(st, id, next_row++) != 0) {
                 fprintf(stderr, "llama_decode(gen) failed\n");
                 return false;

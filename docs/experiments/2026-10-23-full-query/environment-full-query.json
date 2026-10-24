@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-10-23T19:41:24.631781+08:00",
+  "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "model_path": "/home/yifan/models/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+  "model_bytes": 12120016960,
+  "model_mtime_ns": 1792651798893333550,
+  "ctest_returncode": 0,
+  "gpu": "NVIDIA GeForce RTX 3080 Ti Laptop GPU, 16384 MiB, 596.08",
+  "test_fixture_hashes": {
+    "scripts/fixtures/full-query-coverage-workload.json": "5fe33f2d6dea3b5107d134b3bcbe418f9fa39ba4be6b24a55ecfae273ab01bce",
+    "scripts/check_full_query_probe.py": "de0dea9eff38da4555b7523bc9a9ede1d16af457be22cc788eb6125101b448a7",
+    "tests/test_full_query_probe.py": "52febb6b77ff8a6f3bdcf20a0e70afdf0501d17fe5cad0568b59b59a067c68a5"
+  }
+}

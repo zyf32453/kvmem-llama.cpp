@@ -1,0 +1,286 @@
+{
+  "recorded_utc": "2026-10-24T03:44:26.328781+00:00",
+  "run_name": "redundancy-thinking-native-262k-r5",
+  "status": "terminal-failed",
+  "old_controller_session": 16266,
+  "driver_exit_failure_observed": true,
+  "server_process_absent_verified": true,
+  "completed_turns": 7,
+  "attempted_turns": 8,
+  "truncated_turns": 0,
+  "repair_requests": 0,
+  "turns": [
+    {
+      "turn": 1,
+      "output_file": "state.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 122.92068913113326,
+      "usage": {
+        "completion_tokens": 2433,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 455,
+        "prompt_tokens": 455,
+        "total_tokens": 2888
+      },
+      "body_sha256": "c8597faf33d5d58fc3b43ca38ac2ed5e38d2c5d06dced538c583ec11ea6f4e17",
+      "error_body": null
+    },
+    {
+      "turn": 2,
+      "output_file": "physics.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 631.9806706379168,
+      "usage": {
+        "completion_tokens": 9925,
+        "prompt_cache_hit_tokens": 2888,
+        "prompt_cache_miss_tokens": 113,
+        "prompt_tokens": 3001,
+        "total_tokens": 12926
+      },
+      "body_sha256": "ced8b48bb4e2cd85a162ced5433b3a02bac1bfe1e78cb553e69ef74100564c89",
+      "error_body": null
+    },
+    {
+      "turn": 3,
+      "output_file": "weapons.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 1138.0670378049836,
+      "usage": {
+        "completion_tokens": 15648,
+        "prompt_cache_hit_tokens": 12926,
+        "prompt_cache_miss_tokens": 155,
+        "prompt_tokens": 13081,
+        "total_tokens": 28729
+      },
+      "body_sha256": "4de0bf7be369b41db1be2761fce2d803c3627e3c65e80c3d9658b57f2c71d93f",
+      "error_body": null
+    },
+    {
+      "turn": 4,
+      "output_file": "bots.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 1187.2090561278164,
+      "usage": {
+        "completion_tokens": 15244,
+        "prompt_cache_hit_tokens": 28729,
+        "prompt_cache_miss_tokens": 111,
+        "prompt_tokens": 28840,
+        "total_tokens": 44084
+      },
+      "body_sha256": "cd52c7cf24de3d5925f8db2a252a100fbc721aa2a2832cd9eb0921c115abeda7",
+      "error_body": null
+    },
+    {
+      "turn": 5,
+      "output_file": "render.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 1157.612266551936,
+      "usage": {
+        "completion_tokens": 14371,
+        "prompt_cache_hit_tokens": 44084,
+        "prompt_cache_miss_tokens": 118,
+        "prompt_tokens": 44202,
+        "total_tokens": 58573
+      },
+      "body_sha256": "509f5c5e7fdd00418beb8b1f04debd7a753fd71ed7c3b5b2bd83cf8178670a1b",
+      "error_body": null
+    },
+    {
+      "turn": 6,
+      "output_file": "index.html",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 205.94559779088013,
+      "usage": {
+        "completion_tokens": 2540,
+        "prompt_cache_hit_tokens": 58573,
+        "prompt_cache_miss_tokens": 132,
+        "prompt_tokens": 58705,
+        "total_tokens": 61245
+      },
+      "body_sha256": "91caf0b4fdf5342dc19975bf7b7f531b02697b2226a54c5981ad375ee3b87ab4",
+      "error_body": null
+    },
+    {
+      "turn": 7,
+      "output_file": "weapons.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 825.268149564974,
+      "usage": {
+        "completion_tokens": 10288,
+        "prompt_cache_hit_tokens": 61245,
+        "prompt_cache_miss_tokens": 103,
+        "prompt_tokens": 61348,
+        "total_tokens": 71636
+      },
+      "body_sha256": "2af7196f17b1de1d11bd61665b95fb56dfc3f151f51cde9174fb917651a058ce",
+      "error_body": null
+    },
+    {
+      "turn": 8,
+      "output_file": "state.js",
+      "http_status": 503,
+      "finish_reason": null,
+      "elapsed_seconds": 0.4891066539566964,
+      "usage": null,
+      "body_sha256": "da84a7cb254cfff53bdef1a1da23f82c8059baa45d454f66e6fe0a853821a2aa",
+      "error_body": "{\"error\":\"historical request reservation unavailable; no decode was started\"}"
+    }
+  ],
+  "refusal": {
+    "turn": 8,
+    "http_status": 503,
+    "reset": 1,
+    "input_tokens": 71735,
+    "output_max": 16384,
+    "no_decode_started": true,
+    "error_body": "{\"error\":\"historical request reservation unavailable; no decode was started\"}"
+  },
+  "last_gc": {
+    "proposed": 1792,
+    "committed": 1792,
+    "shadow": 0,
+    "reclaimed": 1705,
+    "deferred": 16160196,
+    "retry": 0,
+    "policy_failures": 0,
+    "worker_failures": 0,
+    "ready": 297,
+    "payload_bytes": 754974720,
+    "host_released_early": 1501,
+    "partial_resource_releases": 0
+  },
+  "last_policy": {
+    "features": 26059,
+    "missing": 0,
+    "pairs": 618877,
+    "rounds": 1294,
+    "max_round_features": 56,
+    "representatives": 3032,
+    "lossy": 661,
+    "no_query": 17,
+    "query_samples": 7,
+    "observation_samples": 2206,
+    "fast_samples": 70383,
+    "skipped_queries": 10,
+    "question_tokens": 92,
+    "question_segments": 3,
+    "question_bytes": 295488,
+    "question_score_evals": 9912,
+    "question_score_yields": 0,
+    "invalid_questions": 0
+  },
+  "query_coverage_completed_turns": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "browser": {
+    "passed": 27,
+    "total": 29,
+    "incomplete_turns": [
+      8
+    ],
+    "failed_checks": [
+      {
+        "name": "all requested outputs completed without truncation",
+        "pass": false
+      },
+      {
+        "name": "original tuning and final round field retained",
+        "pass": false
+      }
+    ],
+    "browser_errors": [],
+    "blocked_requests": [],
+    "scope": "Independent inspection of seven completed outputs; eighth refused. Original summary.browser_all_passed remains null."
+  },
+  "prefix_probe_last_transition": {
+    "api_reconstructed_text_equals_canonical": true,
+    "api_reconstruction_bytes": 37279,
+    "canonical_generation_bytes": 37279,
+    "canonical_generation_tokens_standalone": 10287,
+    "canonical_prefix_tokens_without_turn_close": 71635,
+    "from_turn": 7,
+    "previous_input_text_is_exact_prefix": true,
+    "previous_input_token_prefix": 61348,
+    "recorded_cache_hit": null,
+    "recorded_cached_token_count": 71636,
+    "recorded_generation_tokens": 10288,
+    "to_turn": 8
+  },
+  "memory": {
+    "samples": 5290,
+    "max_rss_kib": 12222584,
+    "max_hwm_kib": 12222584,
+    "last_rss_kib": 5834052,
+    "max_gpu_mib": 14078,
+    "scope": "Whole process including model load; not Query/GC incremental memory."
+  },
+  "raw_file_hashes": {
+    "command.json": {
+      "bytes": 848,
+      "sha256": "28b864e4fa81e346959a2a33a29d73b69ff3f2fd4bb0319a3bbab0d8a153fe7e"
+    },
+    "server.log": {
+      "bytes": 14522759,
+      "sha256": "8fb27af6e7ccb891ab532bec703f25a09b88bb65cdc7fb119595ab6ba5d6f472"
+    },
+    "results.json": {
+      "bytes": 68146497,
+      "sha256": "b94db47ce90097a8788ac311a74d80a58d9b4c40c9f2c9cedd96aeeb5d34f4cc"
+    },
+    "browser-results.json": {
+      "bytes": 250620,
+      "sha256": "cc88100a877534ca1046a77012b21af99c1a97831bd8f406cf8b459ac78de0f3"
+    },
+    "process-memory.jsonl": {
+      "bytes": 616701,
+      "sha256": "6a1e2bc578f7df7e0aa233c33c99151b3cd01aaefc4f91345f9f89cb961133d8"
+    },
+    "workload.json": {
+      "bytes": 5479,
+      "sha256": "4507d2e7463648eef91bd67f834d8df957b0ba80c67f51d20edd2784f2fa896d"
+    },
+    "summary.json": {
+      "bytes": 8497,
+      "sha256": "5208f2c4f3cf9fe1317d212dfc37501482c3158e5e4186400949961b78368845"
+    },
+    "requests.json": {
+      "bytes": 980326,
+      "sha256": "ac8e73e54ead2fda747326a494f11765eaa7e5f495e7ff4afd55f525f817e28f"
+    },
+    "experiment-config.json": {
+      "bytes": 655,
+      "sha256": "b872489bb87a5fb7a6f5a634b9858c618f8752f1705950ce4668952897d0788a"
+    },
+    "gpu-memory.csv": {
+      "bytes": 274907,
+      "sha256": "a5a7f1a5a8c15a3aaa0cce18dc404ae230b12a4e16b9852ffaade5a44b8e8864"
+    },
+    "props.json": {
+      "bytes": 11159,
+      "sha256": "caea4c6686507174a24ae0c72128c5fdf6114375755e32d66b5088b57d6d69d8"
+    }
+  },
+  "gc_quality_accepted": false,
+  "formal_performance_accepted": false,
+  "decode_gap_scheduling_accepted": false,
+  "known_policy_counterexample_fixed": false,
+  "limits": [
+    "Original sampled token IDs and pre-parser generation bytes were not archived; canonical re-tokenization count mismatch is proven but exact original differing token/cause is not.",
+    "GC lifecycle counters overlap and must not be summed.",
+    "End-to-end quality fails because the final request was refused; 27/29 is not task completion.",
+    "This run uses the existing periodic worker, not decode-gap scheduling."
+  ]
+}

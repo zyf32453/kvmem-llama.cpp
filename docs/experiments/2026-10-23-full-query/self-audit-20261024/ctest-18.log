@@ -1,0 +1,302 @@
+Start testing: Oct 24 00:56 中国标准时间
+----------------------------------------------------------
+6/28 Testing: historical_kv_gc_demo
+6/28 Test: historical_kv_gc_demo
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_gc_demo.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_gc_demo" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+[1] CPU store full: A(last_use=30), B(20), C(10). C has an existing reader.
+    payload_bytes=24; fourth block rejected immediately.
+[2] LRU proposed C and B; GC closed new use of both. Only A remains selectable.
+    B freed in background; C is still readable by its old reader.
+    payload_bytes=16; ready_slots=1.
+[3] C reader finished; background GC freed C. payload_bytes=8; ready_slots=2.
+[4] New block D reused a freed slot with a new generation; old handles stay invalid.
+    payload_bytes=16.
+[5] Shutdown drained all four allocations in background. payload_bytes=0.
+PASS: LRU -> retire -> drain existing reader -> free CPU payload -> reuse slot.
+<end of output>
+Test time =   0.17 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_gc_demo" end time: Oct 24 00:56 中国标准时间
+"historical_kv_gc_demo" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/28 Testing: historical_kv_active_set_test
+11/28 Test: historical_kv_active_set_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_active_set_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_active_set_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+historical KV active-set checks passed: prepared storage, 64 generation reuses, fresh permission, bounded admission
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_active_set_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_active_set_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/28 Testing: historical_kv_append_test
+12/28 Test: historical_kv_append_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_append_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_append_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+PASS historical append: transaction, partial retirement, original spans, capacity
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_append_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_append_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/28 Testing: historical_kv_capture_session_test
+13/28 Test: historical_kv_capture_session_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_capture_session_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_capture_session_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+PASS historical capture session: private prepare/admit, immediate rollback, reserved metadata, bounded quotas, publication, cancellation, allocation faults
+<end of output>
+Test time =   0.64 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_capture_session_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_capture_session_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+14/28 Testing: historical_kv_cell_index_test
+14/28 Test: historical_kv_cell_index_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_cell_index_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_cell_index_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+PASS reserved cell indexes: real node faults, 512 operations without allocation/free, ordered lookup, rollback, copy capacity
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_cell_index_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_cell_index_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/28 Testing: historical_kv_cleanup_test
+15/28 Test: historical_kv_cleanup_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_cleanup_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_cleanup_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+PASS historical cleanup: bounded admission, no foreground allocation/free, readiness isolation, 320 concurrent handoffs
+<end of output>
+Test time =   1.35 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_cleanup_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_cleanup_test" time elapsed: 00:00:01
+----------------------------------------------------------
+
+16/28 Testing: historical_kv_gc_test
+16/28 Test: historical_kv_gc_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_gc_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_gc_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+[historical-kv-gc] policy disabled: test policy failure
+Historical KV manager tests passed
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_gc_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_gc_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/28 Testing: historical_kv_legacy_raw_bridge_test
+17/28 Test: historical_kv_legacy_raw_bridge_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_legacy_raw_bridge_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_legacy_raw_bridge_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+historical KV real RawKvStore GC bridge checks passed
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_legacy_raw_bridge_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_legacy_raw_bridge_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/28 Testing: historical_kv_policy_test
+18/28 Test: historical_kv_policy_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_policy_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_policy_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+Historical KV policy tests passed
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_policy_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_policy_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/28 Testing: historical_kv_redundancy_test
+19/28 Test: historical_kv_redundancy_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_redundancy_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_redundancy_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+EFFECT controlled fixture: LRU deletes unique old fact; redundancy removes 2 duplicates and retains its latest representative
+historical redundancy: passed
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_redundancy_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_redundancy_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/28 Testing: historical_kv_query_coverage_test
+20/28 Test: historical_kv_query_coverage_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_query_coverage_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_query_coverage_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+full-question coverage, bounded scoring and cache: passed (6.2752 ms; synthetic CPU test, not model decode performance)
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_query_coverage_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_query_coverage_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+21/28 Testing: thinking_span_tracker_test
+21/28 Test: thinking_span_tracker_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/thinking_span_tracker_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"thinking_span_tracker_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+thinking span tracker: passed
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"thinking_span_tracker_test" end time: Oct 24 00:56 中国标准时间
+"thinking_span_tracker_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+22/28 Testing: historical_kv_raw_store_test
+22/28 Test: historical_kv_raw_store_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_raw_store_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_raw_store_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+historical KV RAM payload checks passed
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_raw_store_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_raw_store_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+23/28 Testing: historical_kv_pinned_store_test
+23/28 Test: historical_kv_pinned_store_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_pinned_store_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_pinned_store_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+historical pinned store tests passed
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_pinned_store_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_pinned_store_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+24/28 Testing: historical_kv_repository_test
+24/28 Test: historical_kv_repository_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_repository_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_repository_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+historical KV repository checks passed
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_repository_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_repository_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+25/28 Testing: historical_kv_reservation_test
+25/28 Test: historical_kv_reservation_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_reservation_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_reservation_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+PASS historical RAM reservation: rollback, fragmentation, paused reclaim, no allocation on consume
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_reservation_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_reservation_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+26/28 Testing: historical_kv_shadow_directory_test
+26/28 Test: historical_kv_shadow_directory_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/historical_kv_shadow_directory_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"historical_kv_shadow_directory_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+OK
+<end of output>
+Test time =   0.18 sec
+----------------------------------------------------------
+Test Passed.
+"historical_kv_shadow_directory_test" end time: Oct 24 00:56 中国标准时间
+"historical_kv_shadow_directory_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+28/28 Testing: raw_kv_gc_release_test
+28/28 Test: raw_kv_gc_release_test
+Command: "C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/bin/raw_kv_gc_release_test.exe"
+Directory: C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host/kvmem
+"raw_kv_gc_release_test" start time: Oct 24 00:56 中国标准时间
+Output:
+----------------------------------------------------------
+raw historical GC release checks passed
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"raw_kv_gc_release_test" end time: Oct 24 00:56 中国标准时间
+"raw_kv_gc_release_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 24 00:56 中国标准时间

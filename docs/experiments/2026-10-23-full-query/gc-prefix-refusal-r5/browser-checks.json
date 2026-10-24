@@ -1,0 +1,176 @@
+{
+  "workload": "browser-fps-v2",
+  "incomplete_turns": [
+    8
+  ],
+  "checks": [
+    {
+      "name": "all requested outputs completed without truncation",
+      "pass": false
+    },
+    {
+      "name": "all six application files exist",
+      "pass": true
+    },
+    {
+      "name": "required public functions",
+      "pass": true
+    },
+    {
+      "name": "original tuning and final round field retained",
+      "pass": false
+    },
+    {
+      "name": "original map and boundary walls retained",
+      "pass": true
+    },
+    {
+      "name": "restart states share no mutable data",
+      "pass": true
+    },
+    {
+      "name": "out of bounds is solid",
+      "pass": true
+    },
+    {
+      "name": "movement uses original speed",
+      "pass": true
+    },
+    {
+      "name": "diagonal movement normalized",
+      "pass": true
+    },
+    {
+      "name": "large move cannot tunnel through wall",
+      "pass": true
+    },
+    {
+      "name": "miss consumes one bullet",
+      "pass": true
+    },
+    {
+      "name": "empty magazine never auto reloads",
+      "pass": true
+    },
+    {
+      "name": "reload cannot restart and uses original duration",
+      "pass": true
+    },
+    {
+      "name": "cannot fire while reloading",
+      "pass": true
+    },
+    {
+      "name": "large reload tick transfers once",
+      "pass": true
+    },
+    {
+      "name": "partial reserve cannot become negative",
+      "pass": true
+    },
+    {
+      "name": "wall blocks damage",
+      "pass": true
+    },
+    {
+      "name": "nearest target hit, original damage and no dead-bot rescoring",
+      "pass": true
+    },
+    {
+      "name": "last kill wins and stops movement/shooting",
+      "pass": true
+    },
+    {
+      "name": "bot attack can end round with zero HP",
+      "pass": true
+    },
+    {
+      "name": "bot attack cooldown",
+      "pass": true
+    },
+    {
+      "name": "render does not mutate state and draws scene",
+      "pass": true
+    },
+    {
+      "name": "page has game canvas",
+      "pass": true
+    },
+    {
+      "name": "W key drives animation loop movement",
+      "pass": true
+    },
+    {
+      "name": "R key starts manual reload",
+      "pass": true
+    },
+    {
+      "name": "Enter restarts a finished round",
+      "pass": true
+    },
+    {
+      "name": "canvas click fires",
+      "pass": true
+    },
+    {
+      "name": "no uncaught browser errors",
+      "pass": true
+    },
+    {
+      "name": "no unexpected network/dependency requests",
+      "pass": true
+    }
+  ],
+  "browser_errors": [],
+  "blocked_requests": [],
+  "limitations": "Deterministic browser checks only; no visual-playability score or general task-success claim.",
+  "public_functions": {
+    "createGame": "function",
+    "wallAt": "function",
+    "move": "function",
+    "shoot": "function",
+    "reload": "function",
+    "tick": "function",
+    "updateBots": "function",
+    "render": "function"
+  },
+  "isolated_final_state": {
+    "expected": {
+      "ammo": 7,
+      "reserve": 21,
+      "reloadSeconds": 1.25,
+      "damage": 20,
+      "speed": 3.5,
+      "magazine": 7,
+      "health": 100,
+      "botHealth": 40,
+      "round": 1
+    },
+    "actual": {
+      "ammo": 7,
+      "reserve": 21,
+      "reloadSeconds": 1.25,
+      "damage": 20,
+      "speed": 3.5,
+      "magazine": 7,
+      "health": 100,
+      "botHealth": 40
+    },
+    "retained": [
+      "ammo",
+      "reserve",
+      "reloadSeconds",
+      "damage",
+      "speed",
+      "magazine",
+      "health",
+      "botHealth"
+    ],
+    "missing_or_changed": [
+      "round"
+    ]
+  },
+  "passed": 27,
+  "total": 29,
+  "all_passed": false
+}

@@ -1,0 +1,50 @@
+{
+  "recorded_utc": "2026-10-23T16:15:26.806756+00:00",
+  "purpose": "Diagnose the OFF turn-8 exact-prefix miss without model inference",
+  "compile_exit_code": 0,
+  "run_exit_code": 0,
+  "elapsed_seconds": 2.27074159309268,
+  "vocab_only": true,
+  "n_gpu_layers": 0,
+  "inference_contexts_created": 0,
+  "compile_argv": [
+    "c++",
+    "-std=c++17",
+    "-O1",
+    "-I/tmp/kvmem-full-query-20261023/llama.cpp/include",
+    "-I/tmp/kvmem-full-query-20261023/llama.cpp/common",
+    "-I/tmp/kvmem-full-query-20261023/llama.cpp/ggml/include",
+    "-I/tmp/kvmem-full-query-20261023/llama.cpp/vendor/nlohmann",
+    "/tmp/kvmem-full-query-20261023/prefix-vocab-probe/probe.cpp",
+    "/tmp/kvmem-full-query-20261023/build-cuda/bin/libllama-common.so",
+    "/tmp/kvmem-full-query-20261023/build-cuda/bin/libllama.so",
+    "-Wl,-rpath,/tmp/kvmem-full-query-20261023/build-cuda/bin",
+    "-o",
+    "/tmp/kvmem-full-query-20261023/prefix-vocab-probe/probe"
+  ],
+  "run_argv": [
+    "/tmp/kvmem-full-query-20261023/prefix-vocab-probe/probe",
+    "/home/yifan/models/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+    "/tmp/kvmem-full-query-20261023/redundancy-gc/off-thinking-native-262k-r5/requests.json",
+    "/tmp/kvmem-full-query-20261023/redundancy-gc/off-thinking-native-262k-r5/browser-results.json"
+  ],
+  "observed": {
+    "all_eight_prompt_lengths_match_runtime": true,
+    "all_seven_api_reconstructions_equal_canonical_text": true,
+    "turn_7_recorded_generation_tokens": 13913,
+    "turn_7_canonical_retokenized_tokens": 13912,
+    "recorded_cached_prefix_tokens": 66571,
+    "canonical_prefix_tokens": 66570
+  },
+  "limits": [
+    "Original sampled token IDs and unparsed generation bytes were not archived.",
+    "API text reconstruction does not exclude hidden whitespace consumed by the response parser.",
+    "This locates the count mismatch but does not prove the exact original differing token or distinguish all normalization causes.",
+    "No product source or active GC experiment configuration was changed."
+  ],
+  "sha256": {
+    "prefix-vocab-probe.cpp": "b0b950ea066e402b017d483f627791fcd985d2a0518880a84e8130f2cf562332",
+    "prefix-vocab-probe-result.json": "b9d305790a7bc349e62b1e4c7f0cf94693fbc7bfaaf802382bb127bc273b6a85",
+    "prefix-vocab-probe-stderr.log": "fb18ae243f0235f7eedb9c02469cc1cda02a7f1eb8601f8d68d140c312d8d8a8"
+  }
+}

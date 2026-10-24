@@ -47,6 +47,39 @@ MENTOR_27B = {
 }
 
 
+def full_question_report(lines, expected):
+    """Match each located request span to its own finish-boundary evidence.
+
+    Duplicate cumulative finish logs cannot substitute for a missing request.
+    Counts prove collection coverage, not preservation of language semantics.
+    """
+    spans = []
+    invalid = False
+    for line in lines:
+        invalid |= 'full_question_invalid=1' in line
+        if 'KVMEM_TRACE gc_query_full ' in line:
+            span = {key: int(value) for key, value in re.findall(r'(\w+)=(-?\d+)', line)}
+            span['finish_samples'] = 0
+            span['coverage_matches'] = (span.get('located') == 1 and span.get('begin', -1) >= 0 and
+                                        span.get('tokens', 0) > 0 and
+                                        span.get('end', -1) - span.get('begin', 0) == span.get('tokens'))
+            spans.append(span)
+        if 'KVMEM_HISTORICAL_REDUNDANCY features=' in line:
+            row = {key: int(value) for key, value in re.findall(r'(\w+)=(\d+)', line)}
+            invalid |= row.get('invalid_questions', 0) > 0
+            if spans:
+                spans[-1]['finish_samples'] += 1
+                spans[-1]['coverage_matches'] &= (row.get('question_tokens') == spans[-1].get('tokens') and
+                                                  row.get('question_segments', 0) > 0)
+    return {
+        'full_question_spans': spans,
+        'full_question_invalid_seen': invalid,
+        'full_question_coverage_observed': (
+            len(spans) >= expected > 0 and not invalid and
+            all(span['finish_samples'] > 0 and span['coverage_matches'] for span in spans)),
+    }
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--server', type=Path, required=True)
@@ -66,6 +99,10 @@ def main():
     p.add_argument('--require-prefix-reuse', action='store_true',
                    help='fail if any continuation recomputes its history instead of extending it')
     p.add_argument('--trace', action='store_true')
+    p.add_argument('--enable-thinking', action='store_true',
+                   help='enable the model native thinking path; omit for the previous non-thinking control')
+    p.add_argument('--sampling-profile', choices=['greedy', 'server-defaults'], default='greedy',
+                   help='greedy preserves previous runs; server-defaults inherits sampling while retaining the fixed seed')
     p.add_argument('--gpu-layers', type=int, default=99)
     p.add_argument('--kv-dtype', choices=['f16', 'q8_0'],
                    help='default f16; mentor-27b uses the documented IQ3 recipe KV type q8_0')
@@ -147,7 +184,8 @@ def main():
     (out / 'workload.json').write_text(json.dumps(workload, indent=2, ensure_ascii=False), encoding='utf-8')
     experiment_config = {field: getattr(args, field) for field in
         ('preset', 'budget', 'gen_reserve', 'max_tokens', 'block_tokens', 'sink_tokens',
-         'recent_tokens', 'kv_dtype', 'context_size', 'capacity', 'low', 'high', 'mode', 'policy')}
+         'recent_tokens', 'kv_dtype', 'context_size', 'capacity', 'low', 'high', 'mode', 'policy',
+         'enable_thinking', 'sampling_profile', 'seed')}
     experiment_config.update(model_path=str(args.model),
         requested_model='Qwen3.8-27B' if args.preset else None,
         chat_template='stable_qwen_text_fixture' if args.stable_qwen_template else 'native',
@@ -167,8 +205,12 @@ def main():
         '--kvmem-sink-tokens', str(args.sink_tokens), '--kvmem-recent-tokens', str(args.recent_tokens),
         '--kvmem-gen-reserve', str(args.gen_reserve), '--kvmem-historical-capture', str(args.capacity),
         '--kvmem-historical-gc-mode', args.mode, '--kvmem-historical-gc-policy', args.policy,
-        '--reasoning-effort', 'none', '-lv', '4']
-    if args.trace:
+        '-lv', '4']
+    command += ['--enable-thinking' if args.enable_thinking else '--no-think']
+    if not args.enable_thinking:
+        command += ['--reasoning-effort', 'none']
+    # Redundancy acceptance needs request span lengths even without thinking.
+    if args.trace or args.enable_thinking or (args.policy == 'redundancy' and args.mode != 'off'):
         command += ['--kvmem-trace']
     if args.stable_qwen_template:
         # Qwen's native template removes the empty thinking prefix when a reply
@@ -284,9 +326,10 @@ def main():
             while i < (len(bodies) if args.replay else len(turns)):
                 if not args.replay:
                     messages.append({'role': 'user', 'content': turns[i]})
-                    body = {'messages': list(messages), 'max_tokens': args.max_tokens, 'temperature': 0,
-                            'presence_penalty': 0, 'frequency_penalty': 0, 'repeat_penalty': 1,
+                    body = {'messages': list(messages), 'max_tokens': args.max_tokens,
                             'seed': args.seed, 'stream': True}
+                    if args.sampling_profile == 'greedy':
+                        body.update(temperature=0, presence_penalty=0, frequency_penalty=0, repeat_penalty=1)
                     bodies.append(body)
                 else:
                     body = bodies[i]
@@ -400,10 +443,20 @@ def main():
         complete = sum(row['done'] and row.get('http_status') == 200 and
                        not row.get('error') and row.get('finish_reason') == 'stop' for row in results)
         gc_samples = []
+        redundancy_samples = []
+        thinking_sampling_seen = False
+        thinking_pool_armed_seen = False
+        server_lines = []
         if (out / 'server.log').exists():
-            for line in (out / 'server.log').read_text(encoding='utf-8', errors='replace').splitlines():
+            server_lines = (out / 'server.log').read_text(encoding='utf-8', errors='replace').splitlines()
+            for line in server_lines:
                 if 'KVMEM_HISTORICAL_GC finish ' in line:
                     gc_samples.append({key: int(value) for key, value in re.findall(r'(\w+)=(\d+)', line)})
+                if 'KVMEM_HISTORICAL_REDUNDANCY features=' in line:
+                    redundancy_samples.append({key: int(value) for key, value in re.findall(r'(\w+)=(\d+)', line)})
+                thinking_sampling_seen |= 'KVMEM_TRACE sampling thinking=1 ' in line
+                thinking_pool_armed_seen |= ('KVMEM_HISTORICAL_REDUNDANCY thinking_pool=' in line and
+                                             ' armed=1' in line)
         # These are finish-boundary observations. Do not sum them: repeated
         # requests in the same domain may report overlapping cumulative stats.
         # GPU permission can keep identity alive after CPU payload release.
@@ -425,7 +478,19 @@ def main():
             'sink_tokens_effective': max(1, args.sink_tokens // args.block_tokens) * args.block_tokens,
             'recent_tokens_effective': args.recent_tokens // args.block_tokens * args.block_tokens,
             'seed': args.seed if not args.replay else None,  # Replay bodies own their sampling settings.
+            'sampling_profile': args.sampling_profile if not args.replay else 'replay-bodies',
             'chat_template': 'stable_qwen_text_fixture' if args.stable_qwen_template else 'native',
+            'enable_thinking': args.enable_thinking,
+            'thinking_sampling_seen': thinking_sampling_seen,
+            'thinking_pool_armed_seen': thinking_pool_armed_seen,
+            'max_observation_samples': max((row.get('observation_samples', 0)
+                                            for row in redundancy_samples), default=0),
+            'max_fast_samples': max((row.get('fast_samples', 0)
+                                    for row in redundancy_samples), default=0),
+            'max_round_features': max((row.get('max_round_features', 0)
+                                       for row in redundancy_samples), default=0),
+            'redundancy_finish_samples': redundancy_samples,
+            **full_question_report(server_lines, expected),
             'conversation': 'fixed_reference_replay' if args.replay else 'own_response_continuation',
             'workload_turns': len(workload['turns']), 'partial_workload': len(turns) < len(workload['turns']),
             'prompt_cache_hit_tokens': prefix_hits, 'all_continuations_reused_history': reused,
@@ -445,9 +510,19 @@ def main():
             'browser_feedback_wait_seconds': feedback_waits,
         }
         (out / 'summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+    thinking_proven = (
+        not args.enable_thinking or
+        (thinking_sampling_seen and (
+            args.policy != 'redundancy' or args.mode == 'off' or
+            (thinking_pool_armed_seen and
+             (summary['max_observation_samples'] > 0 or summary['max_fast_samples'] > 0))
+        ))
+    )
     if (not summary['all_requests_completed_without_truncation'] or not activity or gc_failed or
+            not thinking_proven or
+            (args.policy == 'redundancy' and args.mode != 'off' and not summary['full_question_coverage_observed']) or
             (args.require_prefix_reuse and not reused) or (args.browser_feedback and browser_passed is not True)):
-        raise RuntimeError('requests incomplete, GC pressure/failures, or required prefix reuse failed; see summary.json')
+        raise RuntimeError('requests incomplete, GC/think path missing, or required checks failed; see summary.json')
 
 
 if __name__ == '__main__':

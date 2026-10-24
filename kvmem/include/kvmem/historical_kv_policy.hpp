@@ -120,6 +120,8 @@ public:
     struct Metrics {
         uint64_t feature_blocks = 0, missing_features = 0, comparisons = 0;
         uint64_t scored_rounds = 0, representatives = 0, no_query_rounds = 0;
+        uint64_t lossy_intents = 0;
+        uint64_t max_round_features = 0;
     };
     virtual ~HistoricalKvPolicy() = default;
     // Revalidate delayed decisions against the same generation's current

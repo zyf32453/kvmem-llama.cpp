@@ -1,0 +1,53 @@
+{
+  "scope": "one_original_browser_assertion_on_unmodified_first_two_turns",
+  "checked_at": "2026-10-23T12:07:44.753Z",
+  "source": "C:\\Users\\25468\\.codex\\worktrees\\d87d\\kvmem-llama.cpp\\tmp\\full-query-20261023\\game-progress-turn2.json",
+  "snapshot_sha256": "0a1ad42d8dc57e783b1c02912eea3ec516dcd6928b72804abaca1ca91e43cc68",
+  "browser_version": "156.0.8078.47",
+  "playwright_version": "1.62.1",
+  "source_files": [
+    {
+      "file": "state.js",
+      "turn": 1,
+      "content_sha256": "00d980fe073772f87cb1d9ff709b85fcd93b829d84386290911c72169ae5695c",
+      "extracted_source_sha256": "546bda42b10f57310f10d52e0818ebe78046c5aac7182d4518064a73c24f6a87"
+    },
+    {
+      "file": "physics.js",
+      "turn": 2,
+      "content_sha256": "857ff0a593db8ffd808e9034c74cbe87ab174b51492b27c0fe220787931eb72c",
+      "extracted_source_sha256": "dd649052899485b889d264d4f50265a5b12c85305d5d46aca202bc7384842d57"
+    }
+  ],
+  "checks": [
+    {
+      "name": "diagonal movement normalized",
+      "pass": false,
+      "initial": {
+        "x": 2.5,
+        "y": 2.5,
+        "angle": 0,
+        "speed": 3.5,
+        "status": "playing"
+      },
+      "input": {
+        "forward": 1,
+        "strafe": 1,
+        "turn": 0,
+        "dt": 0.1
+      },
+      "final": {
+        "x": 2.849999999999999,
+        "y": 2.849999999999999
+      },
+      "actual_displacement": 0.4949747468305822,
+      "expected_displacement": 0.35,
+      "tolerance": 0.01,
+      "absolute_error": 0.1449747468305822
+    }
+  ],
+  "browser_errors": [],
+  "blocked_requests": [],
+  "passed": false,
+  "limitations": "Only the diagonal movement assertion ran. This is not the complete 29-check acceptance. GC activity is established separately by the root run logs."
+}

@@ -1,0 +1,94 @@
+{
+  "scope": "off_baseline_first_two_turns_movement_pilot",
+  "source_revision": "prior full-query r1, not full-query-all-decode-r3",
+  "server_binary_sha256": "0799b3f6b667ce8dff192ba5dd43df6f08756cf2ad459de71e90690b2d4eb672",
+  "local_raw_directory": "tmp/full-query-20261023/movement-baseline-pilot-r1",
+  "driver_exit_code": 1,
+  "mode": "off",
+  "actual_gc_activity": false,
+  "fixture_difference": {
+    "changed_turn_numbers": [
+      2
+    ],
+    "system_unchanged": true,
+    "file_contract_unchanged": true,
+    "original_fixture": "scripts/fixtures/browser-fps-feedback-workload.json",
+    "original_fixture_sha256": "0d348daadf7f010d284457b2d8de5c9c0062a96fecfa0bc5da7c4dd161b3ce52",
+    "meaning": "Only existing turn-2 movement requirement clarified. Original fixture and checks were not relaxed."
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "output_file": "state.js",
+      "done": true,
+      "http_status": 200,
+      "finish_reason": "stop",
+      "completion_tokens": 1363,
+      "content_characters": 834,
+      "reasoning_characters": 3307,
+      "elapsed_seconds": 64.84916512807831
+    },
+    {
+      "turn": 2,
+      "output_file": "physics.js",
+      "done": true,
+      "http_status": 200,
+      "finish_reason": "length",
+      "completion_tokens": 16384,
+      "content_characters": 0,
+      "reasoning_characters": 53334,
+      "elapsed_seconds": 1034.7452066638507
+    }
+  ],
+  "movement_check": {
+    "planned_checks": 4,
+    "executed_checks": 0,
+    "passed_checks": 0,
+    "reason": "Turn 2 hit length limit with empty final content; physics.js was not generated."
+  },
+  "gc_quality_accepted": false,
+  "performance_accepted": false,
+  "raw_files": [
+    {
+      "name": "browser-results.json",
+      "bytes": 60418,
+      "sha256": "feac6ebd19619f284b628a62a57f605510f635424d20f6a5beb2d0f7ab6ad305"
+    },
+    {
+      "name": "command.json",
+      "bytes": 763,
+      "sha256": "58be64dcb0fcfedb9f3d8f0b28c140176223023c291284ae179cf038b3412a69"
+    },
+    {
+      "name": "experiment-config.json",
+      "bytes": 569,
+      "sha256": "e4aa0d8fa84ac45c3bb7d7f3882c7fd4c65f77d9e0f6d578e19c31125b6e742f"
+    },
+    {
+      "name": "movement-checks.json",
+      "bytes": 774,
+      "sha256": "55c4a192f496fc8cbd28454fd850c6d094b82640a0441de2f5d33f5260fc2c62"
+    },
+    {
+      "name": "results.json",
+      "bytes": 60418,
+      "sha256": "feac6ebd19619f284b628a62a57f605510f635424d20f6a5beb2d0f7ab6ad305"
+    },
+    {
+      "name": "summary.json",
+      "bytes": 1751,
+      "sha256": "03b52112bafc53d60158b2db99021dd33df8f1fce4f176339270c8c5870f67d8"
+    },
+    {
+      "name": "workload.json",
+      "bytes": 6230,
+      "sha256": "8a43655658f2d096ef246671f74ef5320ee2a0c38dc53022b26745ba08b1ad4c"
+    }
+  ],
+  "limitations": [
+    "GC was off; this is not evidence of GC-induced task failure.",
+    "This run used the old r1 binary and does not validate r3.",
+    "The four movement checks were not executed: report 0/0, not 0/4.",
+    "Raw reasoning is retained only in the original tmp results, with SHA-256 here."
+  ]
+}

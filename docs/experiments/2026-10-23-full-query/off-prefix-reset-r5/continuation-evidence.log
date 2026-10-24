@@ -1,0 +1,26 @@
+0.03.460.467 I srv    KVMEM_HISTORICAL_HTTP admitted reset=0 cached=0 input=455 output_max=16384
+KVMEM_TRACE gc_query_full begin=221 end=448 tokens=227 located=1
+2.00.303.170 KVMEM_TRACE cache_commit n_prompt=455 n_gen=2433 n_cached=2888 stored=2888
+KVMEM_TRACE gc_query_full begin=2892 end=2994 tokens=102 located=1
+2.00.815.726 I srv    KVMEM_HISTORICAL_HTTP admitted reset=0 cached=2888 input=113 output_max=16384
+KVMEM_TRACE cache_commit n_prompt=3001 n_gen=9925 n_cached=12926 stored=12926
+KVMEM_TRACE gc_query_full begin=12930 end=13074 tokens=144 located=1
+12.43.857.138 I srv    KVMEM_HISTORICAL_HTTP admitted reset=0 cached=12926 input=155 output_max=16384
+KVMEM_TRACE cache_commit n_prompt=13081 n_gen=15634 n_cached=28715 stored=28715
+KVMEM_TRACE gc_query_full begin=28719 end=28819 tokens=100 located=1
+31.54.469.333 I srv    KVMEM_HISTORICAL_HTTP admitted reset=0 cached=28715 input=111 output_max=16384
+KVMEM_TRACE cache_commit n_prompt=28826 n_gen=9380 n_cached=38206 stored=38206
+KVMEM_TRACE gc_query_full begin=38210 end=38317 tokens=107 located=1
+44.39.933.496 I srv    KVMEM_HISTORICAL_HTTP admitted reset=0 cached=38206 input=118 output_max=16384
+KVMEM_TRACE cache_commit n_prompt=38324 n_gen=9440 n_cached=47764 stored=47764
+KVMEM_TRACE gc_query_full begin=47768 end=47889 tokens=121 located=1
+58.25.904.484 I srv    KVMEM_HISTORICAL_HTTP admitted reset=0 cached=47764 input=132 output_max=16384
+KVMEM_TRACE cache_commit n_prompt=47896 n_gen=4659 n_cached=52555 stored=52555
+KVMEM_TRACE gc_query_full begin=52559 end=52651 tokens=92 located=1
+65.35.327.899 I srv    KVMEM_HISTORICAL_HTTP admitted reset=0 cached=52555 input=103 output_max=16384
+KVMEM_TRACE cache_commit n_prompt=52658 n_gen=13913 n_cached=66571 stored=66571
+KVMEM_TRACE gc_query_full begin=66574 end=66663 tokens=89 located=1
+87.01.510.544 I KVMEM_HISTORICAL_CAPTURE reset capacity=8192 reserved=2596 input=66670 output_max=16384 gc=off
+87.01.510.572 I KVMEM_HISTORICAL_PAYLOAD_BUDGET reset used=5519572992 limit=19327352832 refusals=0
+87.01.510.581 I srv    KVMEM_HISTORICAL_HTTP admitted reset=1 cached=0 input=66670 output_max=16384
+KVMEM_TRACE cache_commit n_prompt=66670 n_gen=1371 n_cached=68041 stored=68041

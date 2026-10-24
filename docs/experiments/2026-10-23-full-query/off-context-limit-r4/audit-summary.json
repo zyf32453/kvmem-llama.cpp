@@ -1,0 +1,185 @@
+{
+  "recorded_utc": "2026-10-23T14:19:20.946877+00:00",
+  "product_revision": "full-query-all-decode-r3",
+  "test_revision": "quality-sampling-r4",
+  "binary_sha256": "824f31ba118e6baeae288b3a8e4ffe663246629958a6446cdf2646cccfd466b3",
+  "run_name": "off-thinking-native-full-r4",
+  "remote_directory": "/tmp/kvmem-full-query-20261023/redundancy-gc/off-thinking-native-full-r4",
+  "local_raw_directory": "tmp/full-query-20261023/off-thinking-native-full-r4/remote",
+  "controller_exit_code": 1,
+  "driver_exit_code": 1,
+  "terminal": true,
+  "model_process_confirmed_exited": true,
+  "gc_mode": "off",
+  "repairs": 0,
+  "planned_turns": 8,
+  "attempted_requests": 7,
+  "complete_turns": 6,
+  "truncated_turns": 0,
+  "failure_kind": "logical_context_admission_limit",
+  "error_body": "{\"error\":\"prompt + max_tokens exceeds n_ctx\"}",
+  "logical_context_limit": 65536,
+  "max_tokens_per_request": 16384,
+  "last_completed_total_tokens": 52555,
+  "lower_bound_next_prompt_plus_reserve": 68939,
+  "all_completed_continuations_reused_prefix": true,
+  "turns": [
+    {
+      "turn": 1,
+      "output_file": "state.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 115.32970884512179,
+      "usage": {
+        "completion_tokens": 2433,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 455,
+        "prompt_tokens": 455,
+        "total_tokens": 2888
+      },
+      "error_body": null
+    },
+    {
+      "turn": 2,
+      "output_file": "physics.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 619.9100875977892,
+      "usage": {
+        "completion_tokens": 9925,
+        "prompt_cache_hit_tokens": 2888,
+        "prompt_cache_miss_tokens": 113,
+        "prompt_tokens": 3001,
+        "total_tokens": 12926
+      },
+      "error_body": null
+    },
+    {
+      "turn": 3,
+      "output_file": "weapons.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 1140.4783191918395,
+      "usage": {
+        "completion_tokens": 15634,
+        "prompt_cache_hit_tokens": 12926,
+        "prompt_cache_miss_tokens": 155,
+        "prompt_tokens": 13081,
+        "total_tokens": 28715
+      },
+      "error_body": null
+    },
+    {
+      "turn": 4,
+      "output_file": "bots.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 758.3301927039865,
+      "usage": {
+        "completion_tokens": 9380,
+        "prompt_cache_hit_tokens": 28715,
+        "prompt_cache_miss_tokens": 111,
+        "prompt_tokens": 28826,
+        "total_tokens": 38206
+      },
+      "error_body": null
+    },
+    {
+      "turn": 5,
+      "output_file": "render.js",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 820.296510301996,
+      "usage": {
+        "completion_tokens": 9440,
+        "prompt_cache_hit_tokens": 38206,
+        "prompt_cache_miss_tokens": 118,
+        "prompt_tokens": 38324,
+        "total_tokens": 47764
+      },
+      "error_body": null
+    },
+    {
+      "turn": 6,
+      "output_file": "index.html",
+      "http_status": 200,
+      "finish_reason": "stop",
+      "elapsed_seconds": 425.2635031188838,
+      "usage": {
+        "completion_tokens": 4659,
+        "prompt_cache_hit_tokens": 47764,
+        "prompt_cache_miss_tokens": 132,
+        "prompt_tokens": 47896,
+        "total_tokens": 52555
+      },
+      "error_body": null
+    },
+    {
+      "turn": 7,
+      "output_file": "weapons.js",
+      "http_status": 400,
+      "finish_reason": null,
+      "elapsed_seconds": 0.1381014680955559,
+      "usage": null,
+      "error_body": "{\"error\":\"prompt + max_tokens exceeds n_ctx\"}"
+    }
+  ],
+  "browser": {
+    "checker_unchanged": true,
+    "generated_files_unmodified": true,
+    "passed": 27,
+    "total": 29,
+    "incomplete_turns": [
+      7,
+      8
+    ],
+    "failed_checks": [
+      {
+        "name": "all requested outputs completed without truncation",
+        "pass": false
+      },
+      {
+        "name": "original tuning and final round field retained",
+        "pass": false
+      }
+    ],
+    "missing_final_fields": [
+      "round"
+    ],
+    "errors": [],
+    "blocked_requests": []
+  },
+  "memory": {
+    "sample_count": 3894,
+    "max_sampled_rss_kib": 12222604,
+    "max_reported_hwm_kib": 12222604,
+    "final_sampled_rss_kib": 5261576,
+    "max_gpu_mib": 13891,
+    "scope": "whole process/GPU including loading; not GC or Query incremental memory"
+  },
+  "raw_sha256": {
+    "browser-results.json": "960fdd47ef23dc823d848f4923e88282dd7d4464bb15ac1c8e8b67057c7505db",
+    "results.json": "1de328b7bde592011f1f8e478a50502177ca9609eb62c42d76a9704bf819940d",
+    "requests.json": "22b1c5860927e90dadebe4966dda482d6e0a65c87f2eb3af546a6060ab627880",
+    "server.log": "590b74ad2933b5989061d164b8f434861f14f865d653708c3a1aeb4e3e4e7596",
+    "process-memory.jsonl": "5404279b1fec5e577cb11e8cd166efd1305a7090eac17bcfc2e3c1d8821f7fbf",
+    "gpu-memory.csv": "32e8b52e1a9b694e0b2fb43c3f403342d694a8dc3f717f1b4f40ea929c30bc16"
+  },
+  "generated_sha256": {
+    "bots.js": "022bd1b30000663abd4a48624e08841eebe2702daa081b8fa3841009dfd49de0",
+    "index.html": "5a83b7eca34a0a4884e71db463825a550436388f29cfbfa4b4ded765cb1555f6",
+    "physics.js": "c129a2586fff013c4ee3f604d8fa294b6d8e97ab13c37217ba128cec4b29abb3",
+    "render.js": "1324ca56cace83dc1f771c1b9afe0639a908fd68591f6b1a8533c01e65cd9770",
+    "state.js": "bba10921847827b36ed70523a316eb6e0f188067611aca2ad5330f930800c78f",
+    "weapons.js": "fe6eb1cdf59cb8c037955063b51b8892c7afd4fff82dd7b3eb99643f9e6909d5"
+  },
+  "quality_accepted": false,
+  "gc_quality_accepted": false,
+  "formal_performance_accepted": false,
+  "limitations": [
+    "This is an incomplete six-of-eight-turn off reference, not full task acceptance.",
+    "The two failed checks correspond to unfinished turns and the round field introduced by turn eight; no other checked function failed.",
+    "Off mode collects Query but does not emit GC finish counters; absent counters are not evidence of absent capture.",
+    "No actual GC occurs in this run; it cannot prove deletion quality or performance."
+  ]
+}

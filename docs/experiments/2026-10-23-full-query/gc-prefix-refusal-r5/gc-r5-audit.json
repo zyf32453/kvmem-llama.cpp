@@ -1,0 +1,28 @@
+{
+  "compile_argv": [
+    "c++",
+    "-std=c++17",
+    "-O1",
+    "-I/tmp/kvmem-full-query-20261023/llama.cpp/include",
+    "-I/tmp/kvmem-full-query-20261023/llama.cpp/common",
+    "-I/tmp/kvmem-full-query-20261023/llama.cpp/ggml/include",
+    "-I/tmp/kvmem-full-query-20261023/llama.cpp/vendor/nlohmann",
+    "/tmp/kvmem-full-query-20261023/prefix-vocab-probe/gc-r5.cpp",
+    "/tmp/kvmem-full-query-20261023/build-cuda/bin/libllama-common.so",
+    "/tmp/kvmem-full-query-20261023/build-cuda/bin/libllama.so",
+    "-Wl,-rpath,/tmp/kvmem-full-query-20261023/build-cuda/bin",
+    "-o",
+    "/tmp/kvmem-full-query-20261023/prefix-vocab-probe/gc-r5"
+  ],
+  "run_argv": [
+    "/tmp/kvmem-full-query-20261023/prefix-vocab-probe/gc-r5",
+    "/home/yifan/models/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+    "/tmp/kvmem-full-query-20261023/redundancy-gc/redundancy-thinking-native-262k-r5/requests.json",
+    "/tmp/kvmem-full-query-20261023/redundancy-gc/redundancy-thinking-native-262k-r5/browser-results.json"
+  ],
+  "compile_exit_code": 0,
+  "run_exit_code": 0,
+  "elapsed_seconds": 1.9650862289126962,
+  "vocab_only": true,
+  "inference_contexts_created": 0
+}

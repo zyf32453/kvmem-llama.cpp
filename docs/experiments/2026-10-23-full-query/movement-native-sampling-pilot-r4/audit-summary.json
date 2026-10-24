@@ -1,0 +1,67 @@
+{
+  "scope": "Two-turn OFF quality pilot with original task and server sampling defaults",
+  "passed": true,
+  "product_revision": "full-query-all-decode-r3",
+  "binary_sha256": "824f31ba118e6baeae288b3a8e4ffe663246629958a6446cdf2646cccfd466b3",
+  "original_workload_unchanged": true,
+  "request_sampling_overrides_absent": true,
+  "sampling_trace": [
+    "KVMEM_TRACE sampling thinking=1 temperature=1 top_p=0.95 top_k=20 min_p=0 presence_penalty=0 frequency_penalty=0 repetition_penalty=1 seed=42",
+    "KVMEM_TRACE sampling thinking=1 temperature=1 top_p=0.95 top_k=20 min_p=0 presence_penalty=0 frequency_penalty=0 repetition_penalty=1 seed=42"
+  ],
+  "turns": [
+    {
+      "turn": 1,
+      "output_file": "state.js",
+      "done": true,
+      "finish_reason": "stop",
+      "elapsed_seconds": 114.98501944099553,
+      "usage": {
+        "completion_tokens": 2433,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 455,
+        "prompt_tokens": 455,
+        "total_tokens": 2888
+      },
+      "content_chars": 757,
+      "reasoning_chars": 7799
+    },
+    {
+      "turn": 2,
+      "output_file": "physics.js",
+      "done": true,
+      "finish_reason": "stop",
+      "elapsed_seconds": 618.9258671661373,
+      "usage": {
+        "completion_tokens": 9925,
+        "prompt_cache_hit_tokens": 2888,
+        "prompt_cache_miss_tokens": 113,
+        "prompt_tokens": 3001,
+        "total_tokens": 12926
+      },
+      "content_chars": 1233,
+      "reasoning_chars": 31799
+    }
+  ],
+  "browser_passed": 4,
+  "browser_total": 4,
+  "full_task_quality_accepted": false,
+  "gc_quality_accepted": false,
+  "performance_accepted": false,
+  "limitations": [
+    "Only the first two outputs were checked; the full 29 checks remain pending.",
+    "This is GC=off; no deletion semantics are evaluated.",
+    "Earlier failing runs differ in revision/mode or prompt, so this is not a clean one-variable causal experiment proving greedy sampling caused the old failure."
+  ],
+  "source_files": {
+    "browser-results.json": "49b1b0a7c425a7759cba3f46ca9d93fe27a37b88edd003f4fb7c29e95f35f426",
+    "command.json": "90ed8920909d6d981c3c8c72c235409ede333dd53010f22459d7b07bbc9a45b8",
+    "experiment-config.json": "96cdfc860d9913d8f25acf02371aeff52dc5b434157fc6813c69453eadbc4f9d",
+    "movement-checks.json": "028186152b12b4d6ba7241b22dc60570062b43ac3596e3bf9c761374491ddb14",
+    "requests.json": "25eb4ce3e736622a1235f0d478cfed5950f6332bd4e4fc0a72bd3aff2b580298",
+    "results.json": "49b1b0a7c425a7759cba3f46ca9d93fe27a37b88edd003f4fb7c29e95f35f426",
+    "server.log": "bf1782e78716614acf235303db0d3e28d47b52a306248f1eb9ef8738b7fe3d7b",
+    "summary.json": "4d00e0fc62c9600dcd044f67b7fb7363bfd08b56e15a7afe52e4c97c783e5d47",
+    "workload.json": "4507d2e7463648eef91bd67f834d8df957b0ba80c67f51d20edd2784f2fa896d"
+  }
+}

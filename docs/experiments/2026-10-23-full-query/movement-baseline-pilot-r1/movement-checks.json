@@ -1,0 +1,22 @@
+{
+  "scope": "first_two_turns_movement_early_failure_screen",
+  "workload": "browser-fps-v2",
+  "fixture_revision": "explicit-movement-v1: clarify the existing turn-2 speed requirement; unchanged APIs, tuning, other turns, and 29 browser checks",
+  "source_files": [
+    {
+      "file": "state.js",
+      "turn": 1,
+      "sha256": "546bda42b10f57310f10d52e0818ebe78046c5aac7182d4518064a73c24f6a87"
+    }
+  ],
+  "incomplete_turns": [
+    2
+  ],
+  "checks": [],
+  "browser_errors": [],
+  "blocked_requests": [],
+  "limitations": "These four checks use the original first two outputs only. Passing does not replace the full 29 checks, prove later outputs, or establish GC activity, quality, or performance.",
+  "passed_checks": 0,
+  "total_checks": 0,
+  "all_passed": false
+}

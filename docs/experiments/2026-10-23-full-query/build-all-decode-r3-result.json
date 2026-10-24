@@ -1,0 +1,21 @@
+{
+  "revision": "full-query-all-decode-r3",
+  "verified_files": 25,
+  "single_token_q_patch_verified": true,
+  "graph_sha256": "e5977ff27d08ce5b247c6eb9032f1ec427c473c6db8dc87c0e190577da9c8a1d",
+  "upstream_source_repository": "/home/yifan/kvmem-llama.cpp/llama.cpp",
+  "upstream_source_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "isolated_tree_has_git_metadata": false,
+  "unmodified_upstream_samples_match": [
+    "src/llama.cpp",
+    "CMakeLists.txt"
+  ],
+  "started": 1792758965.0723948,
+  "build_exit": 0,
+  "ctest_exit": 0,
+  "binary_sha256": {
+    "llama-kvmem-server": "824f31ba118e6baeae288b3a8e4ffe663246629958a6446cdf2646cccfd466b3",
+    "kvmem-historical-access-test": "87b351669448174c59c660e6b28b47019f2dcb32da62be230db4e8127ba3e980"
+  },
+  "ended": 1792759005.2483964
+}

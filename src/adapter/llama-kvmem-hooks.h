@@ -291,6 +291,15 @@ struct llama_kvmem_selection {
     std::vector<uint32_t> blocks;
 };
 LLAMA_API void llama_kvmem_set_turn_spans(const llama_kvmem_turn_spans & spans);
+// GC input Query is the full question, independent of retrieval's capped span.
+// Invalid/unknown bounds disable input scoring; do not fall back to a suffix.
+LLAMA_API void llama_kvmem_set_gc_query_span(int32_t begin, int32_t end);
+// Thinking-only redundancy. arm before admission so prompt blocks are not
+// evicted to make room for a thinking request. Spans are half-open token
+// positions; the same begin grows. closed flushes the observation query.
+LLAMA_API void llama_kvmem_arm_thinking_policy(void);
+LLAMA_API void llama_kvmem_disarm_thinking_policy(void);
+LLAMA_API void llama_kvmem_set_thinking_span(uint64_t begin, uint64_t end, int closed);
 LLAMA_API llama_kvmem_attention_view llama_kvmem_get_attention_view();
 LLAMA_API bool llama_kvmem_can_append(uint32_t end, uint32_t generation_rows, bool all_history, std::string & reason);
 LLAMA_API llama_kvmem_selection llama_kvmem_preview_retrieval();

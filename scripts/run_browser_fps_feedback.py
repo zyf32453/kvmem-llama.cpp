@@ -61,6 +61,9 @@ def main():
     p.add_argument('--model', required=True)
     p.add_argument('--name', required=True)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--workload', type=Path,
+                   default=Path(__file__).resolve().parent / 'fixtures/browser-fps-feedback-workload.json',
+                   help='workload JSON to copy to the runner; defaults to the original browser FPS fixture')
     p.add_argument('--node', default='node')
     p.add_argument('--chromium', required=True)
     p.add_argument('--policy', choices=['lru', 'redundancy'], default='lru')
@@ -73,7 +76,16 @@ def main():
     p.add_argument('--checkpoint-timeout', type=int, default=7200)
     p.add_argument('--dry-run', action='store_true', help='save the command without SSH or model execution')
     p.add_argument('--max-repairs', type=int, default=3)
+    p.add_argument('--enable-thinking', action='store_true',
+                   help='use the model native thinking path and exercise generation-time Query updates')
+    p.add_argument('--sampling-profile', choices=['greedy', 'server-defaults'], default='greedy',
+                   help='match the chosen baseline sampling profile; all paired GC modes must use the same profile')
+    p.add_argument('--candidate-blocks', type=int, default=0,
+                   help='experimental redundancy candidate pool; 0 keeps the existing strategy')
+    p.add_argument('--server-bin', help='remote server binary; defaults to remote-root/build-cuda/bin/llama-kvmem-server')
     args = p.parse_args()
+    if not args.workload.is_file():
+        p.error('workload must be an existing JSON file')
     if not re.fullmatch(r'[a-zA-Z0-9_.-]+', args.name) or not 0 <= args.max_repairs <= 3:
         p.error('name must be a simple directory name; max-repairs must be 0..3')
     if not 1 <= args.capacity <= 65536 or not 53248 <= args.context_size <= 262144:
@@ -83,9 +95,14 @@ def main():
     if args.mode != 'off' and (args.low is None or args.high is None or
                              not 0 < args.low < args.high <= args.capacity):
         p.error('GC requires explicit watermarks: 0 < low < high <= capacity')
+    if args.candidate_blocks and (args.policy != 'redundancy' or
+                                  not 2 <= args.candidate_blocks <= args.capacity):
+        p.error('candidate-blocks requires redundancy and must be 2..capacity')
     # scp remote paths are deliberately restricted, independent of shell quoting.
     if not re.fullmatch(r'/[a-zA-Z0-9_./-]+', args.remote_root):
         p.error('remote-root must be an absolute path without shell metacharacters')
+    if args.server_bin and not re.fullmatch(r'/[a-zA-Z0-9_./-]+', args.server_bin):
+        p.error('server-bin must be an absolute path without shell metacharacters')
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     scripts = Path(__file__).resolve().parent
@@ -107,22 +124,26 @@ def main():
     # Model identity, hybrid GC support and packed block occupancy must still
     # be checked before treating a completed run as acceptance.
     command = ['python3', '-u', inputs + '/test_server_historical_workload.py',
-        '--server', args.remote_root + '/build-cuda/bin/llama-kvmem-server', '--model', args.model,
-        '--workload', inputs + '/browser-fps-feedback-workload.json', '--output', remote,
+        '--server', args.server_bin or args.remote_root + '/build-cuda/bin/llama-kvmem-server', '--model', args.model,
+        '--workload', inputs + '/' + args.workload.name, '--output', remote,
         '--preset', 'mentor-27b', '--mode', args.mode, '--policy', args.policy,
         '--capacity', str(args.capacity), '--context-size', str(args.context_size),
-        '--gpu-layers', '99', '--seed', '42',
+        '--gpu-layers', '99', '--seed', '42', '--sampling-profile', args.sampling_profile,
         '--require-prefix-reuse', '--trace', '--browser-feedback',
         '--max-repairs', str(args.max_repairs)]
     if args.mode != 'off':
         command += ['--low', str(args.low), '--high', str(args.high)]
+    if args.enable_thinking:
+        command += ['--enable-thinking']
+    if args.candidate_blocks:
+        command = ['env', f'KVMEM_HISTORICAL_GC_MAX_CANDIDATES={args.candidate_blocks}'] + command
     (out / 'controller-command.json').write_text(json.dumps(command, indent=2), encoding='utf-8')
     if args.dry_run:
         print(json.dumps({'dry_run': True, 'command': command}), flush=True)
         return
     remote_run(['mkdir', inputs])
     run(['scp', '-q', str(scripts / 'test_server_historical_workload.py'),
-         str(scripts / 'fixtures/browser-fps-feedback-workload.json'), f'{args.host}:{inputs}/'])
+         str(args.workload.resolve()), f'{args.host}:{inputs}/'])
     inspections = []
     with (out / 'driver.log').open('wb') as log:
         process = subprocess.Popen(ssh + [shlex.join(command)], stdout=log, stderr=subprocess.STDOUT)

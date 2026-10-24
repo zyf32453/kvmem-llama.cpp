@@ -1,0 +1,112 @@
+{
+  "passed": true,
+  "scope": "full_query_capture_and_output_smoke",
+  "issues": [],
+  "turns": [
+    {
+      "turn": 1,
+      "passed": true,
+      "query_tokens": 1813,
+      "expected_segments": 57,
+      "observed_segments": [
+        57
+      ],
+      "prefix_cache_hit_tokens": 0,
+      "expected": {
+        "package_tag": "AMBER-KESTREL-741",
+        "review_zone": "north-loft-593",
+        "seal_code": "moss-clock-826"
+      },
+      "actual": {
+        "package_tag": "AMBER-KESTREL-741",
+        "review_zone": "north-loft-593",
+        "seal_code": "moss-clock-826"
+      },
+      "issues": []
+    },
+    {
+      "turn": 2,
+      "passed": true,
+      "query_tokens": 1813,
+      "expected_segments": 57,
+      "observed_segments": [
+        57
+      ],
+      "prefix_cache_hit_tokens": 1918,
+      "expected": {
+        "package_tag": "COBALT-OTTER-268",
+        "review_zone": "west-gallery-417",
+        "seal_code": "reed-lantern-935"
+      },
+      "actual": {
+        "package_tag": "COBALT-OTTER-268",
+        "review_zone": "west-gallery-417",
+        "seal_code": "reed-lantern-935"
+      },
+      "issues": []
+    },
+    {
+      "turn": 3,
+      "passed": true,
+      "query_tokens": 1812,
+      "expected_segments": 57,
+      "observed_segments": [
+        57
+      ],
+      "prefix_cache_hit_tokens": 3796,
+      "expected": {
+        "package_tag": "IVORY-BADGER-609",
+        "review_zone": "east-studio-782",
+        "seal_code": "fern-compass-154"
+      },
+      "actual": {
+        "package_tag": "IVORY-BADGER-609",
+        "review_zone": "east-studio-782",
+        "seal_code": "fern-compass-154"
+      },
+      "issues": []
+    }
+  ],
+  "coverage": {
+    "full_question_spans": [
+      {
+        "begin": 44,
+        "end": 1857,
+        "tokens": 1813,
+        "located": 1,
+        "finish_samples": 1,
+        "coverage_matches": true
+      },
+      {
+        "begin": 1922,
+        "end": 3735,
+        "tokens": 1813,
+        "located": 1,
+        "finish_samples": 1,
+        "coverage_matches": true
+      },
+      {
+        "begin": 3800,
+        "end": 5612,
+        "tokens": 1812,
+        "located": 1,
+        "finish_samples": 1,
+        "coverage_matches": true
+      }
+    ],
+    "full_question_invalid_seen": false,
+    "full_question_coverage_observed": true
+  },
+  "gc_activity_observed": false,
+  "generated_query_observation_samples": 3,
+  "generated_query_fast_samples": 134,
+  "gc_quality_accepted": false,
+  "performance_accepted": false,
+  "limitations": [
+    "Successful recall can come from ordinary model attention; it does not prove the GC ranking preserved it.",
+    "All-position segment coverage does not prove lossless token or semantic representation.",
+    "No GC activity is required for this short capture/output probe.",
+    "Generated Query observation counters are reported, not a freshness or quality acceptance gate.",
+    "No p95 or throughput acceptance is performed."
+  ]
+}

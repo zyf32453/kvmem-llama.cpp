@@ -1,0 +1,10 @@
+[  4%] Built target ggml-base
+[ 10%] Built target kvmem
+[ 16%] Built target ggml-cpu
+[ 84%] Built target ggml-cuda
+[ 84%] Built target ggml
+[100%] Built target llama
+Consolidate compiler generated dependencies of target kvmem-historical-access-test
+[100%] Building CXX object CMakeFiles/kvmem-historical-access-test.dir/tests/historical-access-test.cpp.o
+[100%] Linking CXX executable bin/kvmem-historical-access-test
+[100%] Built target kvmem-historical-access-test

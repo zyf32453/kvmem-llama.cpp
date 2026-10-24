@@ -1,0 +1,41 @@
+Test project C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host
+      Start  6: historical_kv_gc_demo
+ 1/18 Test  #6: historical_kv_gc_demo ..................   Passed    0.61 sec
+      Start 11: historical_kv_active_set_test
+ 2/18 Test #11: historical_kv_active_set_test ..........   Passed    0.37 sec
+      Start 12: historical_kv_append_test
+ 3/18 Test #12: historical_kv_append_test ..............   Passed    0.41 sec
+      Start 13: historical_kv_capture_session_test
+ 4/18 Test #13: historical_kv_capture_session_test .....   Passed    1.02 sec
+      Start 14: historical_kv_cell_index_test
+ 5/18 Test #14: historical_kv_cell_index_test ..........   Passed    0.40 sec
+      Start 15: historical_kv_cleanup_test
+ 6/18 Test #15: historical_kv_cleanup_test .............   Passed    1.67 sec
+      Start 16: historical_kv_gc_test
+ 7/18 Test #16: historical_kv_gc_test ..................   Passed    0.42 sec
+      Start 17: historical_kv_legacy_raw_bridge_test
+ 8/18 Test #17: historical_kv_legacy_raw_bridge_test ...   Passed    0.43 sec
+      Start 18: historical_kv_policy_test
+ 9/18 Test #18: historical_kv_policy_test ..............   Passed    0.48 sec
+      Start 19: historical_kv_redundancy_test
+10/18 Test #19: historical_kv_redundancy_test ..........   Passed    0.40 sec
+      Start 20: historical_kv_query_coverage_test
+11/18 Test #20: historical_kv_query_coverage_test ......   Passed    0.42 sec
+      Start 21: thinking_span_tracker_test
+12/18 Test #21: thinking_span_tracker_test .............   Passed    0.46 sec
+      Start 22: historical_kv_raw_store_test
+13/18 Test #22: historical_kv_raw_store_test ...........   Passed    0.44 sec
+      Start 23: historical_kv_pinned_store_test
+14/18 Test #23: historical_kv_pinned_store_test ........   Passed    0.45 sec
+      Start 24: historical_kv_repository_test
+15/18 Test #24: historical_kv_repository_test ..........   Passed    0.54 sec
+      Start 25: historical_kv_reservation_test
+16/18 Test #25: historical_kv_reservation_test .........   Passed    0.39 sec
+      Start 26: historical_kv_shadow_directory_test
+17/18 Test #26: historical_kv_shadow_directory_test ....   Passed    0.51 sec
+      Start 28: raw_kv_gc_release_test
+18/18 Test #28: raw_kv_gc_release_test .................   Passed    0.43 sec
+
+100% tests passed out of 18
+
+Total Test time (real) =   9.92 sec

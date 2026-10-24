@@ -107,6 +107,8 @@ static bool ubatch_overlaps_query(uint32_t n_tokens, uint32_t n_pos, const llama
 }
 
 bool kvmem_ubatch_needs_q_capture(uint32_t n_tokens, uint32_t n_pos, const llama_pos * pos) {
+    if (auto * mem = kvmem_current_execution().memory)
+        if (mem->redundancy_ubatch_wants_q(n_tokens, pos)) return true;
     return ubatch_overlaps_query(n_tokens, n_pos, pos);
 }
 

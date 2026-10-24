@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Offline FPS Prototype</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; }
+    canvas { display: block; margin: 12px auto; background: #000; border: 2px solid #444; }
+    .controls { text-align: center; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    WASD move &middot; Left/Right arrows turn &middot; Click shoot &middot; R reload &middot; Enter restart after win/loss
+  </div>
+
+  <canvas id="game" width="800" height="450"></canvas>
+
+  <script src="state.js"></script>
+  <script src="physics.js"></script>
+  <script src="weapons.js"></script>
+  <script src="bots.js"></script>
+  <script src="render.js"></script>
+
+  <script>
+  (function () {
+    var game = G.createGame();
+    window.game = game;
+
+    var canvas = document.getElementById('game');
+    var keys = {};
+    var last = null;
+    var TURN_RATE = 2.5;
+
+    function forwardInput() {
+      return (keys['KeyW'] ? 1 : 0) - (keys['KeyS'] ? 1 : 0);
+    }
+
+    function strafeInput() {
+      return (keys['KeyD'] ? 1 : 0) - (keys['KeyA'] ? 1 : 0);
+    }
+
+    function turnInput() {
+      return (keys['ArrowLeft'] ? 1 : 0) - (keys['ArrowRight'] ? 1 : 0);
+    }
+
+    function loop(now) {
+      if (last === null) {
+        last = now;
+      }
+
+      var dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
+      last = now;
+
+      G.move(game, forwardInput(), strafeInput(), turnInput() * TURN_RATE, dt);
+      G.tick(game, dt);
+      G.updateBots(game, dt);
+      G.render(game, canvas);
+
+      requestAnimationFrame(loop);
+    }
+
+    document.addEventListener('keydown', function (e) {
+      if (e.code.indexOf('Arrow') === 0) {
+        e.preventDefault();
+      }
+
+      if (e.code === 'KeyR' && !e.repeat) {
+        G.reload(game);
+      }
+
+      if (e.code === 'Enter' && !e.repeat && game.status !== 'playing') {
+        game = G.createGame();
+        window.game = game;
+      }
+
+      keys[e.code] = true;
+    });
+
+    document.addEventListener('keyup', function (e) {
+      keys[e.code] = false;
+    });
+
+    canvas.addEventListener('mousedown', function () {
+      G.shoot(game);
+    });
+
+    requestAnimationFrame(loop);
+  })();
+  </script>
+</body>
+</html>

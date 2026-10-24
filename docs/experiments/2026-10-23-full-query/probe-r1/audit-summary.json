@@ -1,0 +1,115 @@
+{
+  "scope": "full_query_capture_and_output_smoke",
+  "local_raw_directory": "tmp/full-query-20261023/full-query-probe-r1",
+  "remote_raw_directory": "/tmp/kvmem-full-query-20261023/redundancy-gc/full-query-probe-r1",
+  "archived_at_utc": "2026-10-23T11:51:20.7966019Z",
+  "raw_files": [
+    {
+      "name": "browser-results.json",
+      "bytes": 3675,
+      "sha256": "267bf85bafbc2d1d6caffd6ca9eeb3411cc0f946d40dd258ade3f8037d7c345c"
+    },
+    {
+      "name": "command.json",
+      "bytes": 847,
+      "sha256": "135d4e9600701878bcdb4ddac26f84ca78beb414b80c76d78920ddd3b6d1f2a1"
+    },
+    {
+      "name": "experiment-config.json",
+      "bytes": 572,
+      "sha256": "0880725aa1777aafa6e2c0a678c56af2a4d339a4342861364f57932ea03f17d4"
+    },
+    {
+      "name": "full-query-probe-check.json",
+      "bytes": 2953,
+      "sha256": "8cb5c9ed09ff635c31d9ac4880aa1ade82932bdee38788bd00d681bc6070c538"
+    },
+    {
+      "name": "gpu-memory.csv",
+      "bytes": 2695,
+      "sha256": "bdff0ebbf88ec52c7e3c6403c7a70eef3b2890f3f4b35a87ad03239582815cd7"
+    },
+    {
+      "name": "process-memory.jsonl",
+      "bytes": 5818,
+      "sha256": "c651a545aab554d58cb185be0cd96999490f16fc223d9aa2a98c890ef01a3cde"
+    },
+    {
+      "name": "props.json",
+      "bytes": 11158,
+      "sha256": "74c4f58867f038d754a1ac851e0017033d34d1d2def60c3dbf3502ac06053155"
+    },
+    {
+      "name": "requests.json",
+      "bytes": 66122,
+      "sha256": "b85ace56b7bdf54518227963fdbc09aa7ebcb481962b049ebe863da4909d8806"
+    },
+    {
+      "name": "results.json",
+      "bytes": 284450,
+      "sha256": "eb71d54f61968dad6fa8af0427532277e34626598178e090e331bca5369fce81"
+    },
+    {
+      "name": "server.log",
+      "bytes": 157356,
+      "sha256": "9b9eb54c03b78ce30ba80d3c53f444e5d0ee358e35e02c4d885316312d35462c"
+    },
+    {
+      "name": "summary.json",
+      "bytes": 4356,
+      "sha256": "2eee33d2eece6a02b9402832a45e5dbbb2575df7a6212cc00c654492d7044938"
+    },
+    {
+      "name": "workload.json",
+      "bytes": 32776,
+      "sha256": "6f727c95754931efe9faf07f1f5afabfa0df216adfd8ce0e76b8457b56492500"
+    }
+  ],
+  "memory": {
+    "units": "KiB from /proc status",
+    "samples": 51,
+    "sampling_interval_seconds": 1,
+    "max_sampled_VmRSS_KiB": 12222456.0,
+    "max_VmHWM_KiB": 12222456.0,
+    "final_VmRSS_KiB": 3483484,
+    "limitation": "Includes model loading and all server memory; not isolated Query/GC overhead and not a long-run memory bound."
+  },
+  "final_gc": {
+    "proposed": 4,
+    "committed": 4,
+    "shadow": 0,
+    "reclaimed": 0,
+    "deferred": 157,
+    "retry": 0,
+    "policy_failures": 0,
+    "worker_failures": 0,
+    "ready": 331,
+    "payload_bytes": 812777472,
+    "host_released_early": 4,
+    "partial_resource_releases": 0
+  },
+  "final_redundancy": {
+    "features": 7,
+    "missing": 0,
+    "pairs": 6,
+    "rounds": 3,
+    "max_round_features": 3,
+    "representatives": 1,
+    "lossy": 2,
+    "no_query": 26,
+    "query_samples": 3,
+    "observation_samples": 6,
+    "fast_samples": 152,
+    "skipped_queries": 0,
+    "question_tokens": 1812,
+    "question_segments": 57,
+    "question_bytes": 5614272,
+    "question_score_evals": 350,
+    "question_score_yields": 43,
+    "invalid_questions": 0
+  },
+  "gc_quality_accepted": false,
+  "performance_accepted": false,
+  "server_binary": "/tmp/kvmem-full-query-20261023/build-cuda/bin/llama-kvmem-server",
+  "server_binary_sha256_before_run": "0799b3f6b667ce8dff192ba5dd43df6f08756cf2ad459de71e90690b2d4eb672"
+}

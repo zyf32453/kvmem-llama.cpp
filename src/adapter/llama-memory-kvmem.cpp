@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -1244,6 +1245,7 @@ bool llama_memory_kvmem::begin_historical_capture(uint32_t capacity, uint64_t in
         auto redundancy = gc_policy == 1 && domain
             ? std::make_shared<kvmem::HistoricalKvMeanKeySource>(domain->repository(), domain->storage(),
                 n_embd_head_, n_head_kv_, n_head_) : nullptr;
+        attach_redundancy_source(redundancy);
         auto session = kvmem::HistoricalKvCaptureSession::try_prepare_next(domain, demand);
         if (!session) {
             LLAMA_LOG_ERROR("historical capture: insufficient reserved RAM or CPU cleanup capacity\n");
@@ -1504,6 +1506,7 @@ bool llama_memory_kvmem::reset_historical_capture(uint32_t capacity, uint64_t in
         auto redundancy = historical_redundancy_ && domain
             ? std::make_shared<kvmem::HistoricalKvMeanKeySource>(domain->repository(), domain->storage(),
                 n_embd_head_, n_head_kv_, n_head_) : nullptr;
+        attach_redundancy_source(redundancy);
         kvmem::HistoricalKvRamDemand demand;
         demand.uncached_input_tokens = input_tokens;
         demand.max_accepted_output_tokens = max_output_tokens;
@@ -1538,6 +1541,7 @@ bool llama_memory_kvmem::reset_historical_capture(uint32_t capacity, uint64_t in
         historical_redundancy_ = std::move(redundancy);
         historical_active_ = std::move(active);
         historical_gc_mode_ = 0;
+        if (thinking_ranges_) thinking_ranges_->clear_spans();
         historical_cleanup_ticket_.submit(std::move(historical_cleanup_));
         historical_cleanup_ticket_ = std::move(*ticket);
         historical_cleanup_ = std::move(cleanup);
@@ -1616,8 +1620,28 @@ bool llama_memory_kvmem::start_historical_gc(int mode, uint32_t ready_low,
         std::unique_ptr<kvmem::HistoricalKvPolicy> policy;
         if (historical_redundancy_) {
             cfg.scan_blocks = std::min<uint32_t>(repository->capacity(), 16);
+            kvmem::HistoricalKvRedundancyPolicy::Config policy_cfg;
+            policy_cfg.thinking = thinking_ranges_;
+            const uint32_t block = std::max<uint32_t>(block_tokens_, 1);
+            policy_cfg.segment_blocks = std::max<size_t>(1, (128 + block - 1) / block);
+            policy_cfg.pool_blocks = std::max<size_t>(1, (1536 + block - 1) / block) + policy_cfg.segment_blocks;
+            if (const char * value = std::getenv("KVMEM_HISTORICAL_GC_MAX_CANDIDATES")) {
+                char * end = nullptr;
+                errno = 0;
+                const unsigned long long limit = std::strtoull(value, &end, 10);
+                if (!*value || end == value || *end || errno == ERANGE ||
+                    limit < 2 || limit > repository->capacity())
+                    throw std::invalid_argument("KVMEM_HISTORICAL_GC_MAX_CANDIDATES must be 2..historical capacity");
+                policy_cfg.max_candidate_blocks = size_t(limit);
+                policy_cfg.pool_blocks = size_t(limit);
+                LLAMA_LOG_INFO("KVMEM_HISTORICAL_REDUNDANCY max_candidates=%zu full_pool_comparison=1\n",
+                    policy_cfg.max_candidate_blocks);
+            }
+            LLAMA_LOG_INFO("KVMEM_HISTORICAL_REDUNDANCY thinking_pool=%zu segment_blocks=%zu observation_tokens=%u armed=%d\n",
+                policy_cfg.pool_blocks, policy_cfg.segment_blocks, block,
+                thinking_ranges_ && thinking_ranges_->armed() ? 1 : 0);
             policy = std::make_unique<kvmem::HistoricalKvRedundancyPolicy>(repository->capacity(),
-                historical_redundancy_, kvmem::HistoricalKvRedundancyPolicy::Config{});
+                historical_redundancy_, policy_cfg);
         } else policy = std::make_unique<kvmem::HistoricalKvLruPolicy>(repository->capacity());
         auto manager = std::make_unique<kvmem::HistoricalKvGc>(repository, std::move(policy), cfg);
         manager->start();
@@ -1637,11 +1661,86 @@ void llama_memory_kvmem::fail_historical_capture() noexcept {
 }
 
 void llama_memory_kvmem::end_prefill_capture() {
+    // Query collection must see every selected layer of every prefill batch
+    // before its immutable full-question bank becomes visible to GC.
+    if (historical_redundancy_) {
+        harvest_flush();
+        const uint64_t expected = !historical_query_span_set_ ? UINT64_MAX :
+            (historical_query_begin_ >= 0 && historical_query_end_ > historical_query_begin_
+                ? uint64_t(historical_query_end_ - historical_query_begin_) : 0);
+        if (!historical_redundancy_->finish_question(expected))
+            LLAMA_LOG_WARN("KVMEM_HISTORICAL_REDUNDANCY full_question_invalid=1; scoring disabled until next question\n");
+    }
     if (historical_capture_ && !historical_capture_->end_input()) {
         historical_capture_->fail();
         LLAMA_LOG_ERROR("historical capture: input quota or producer handoff incomplete; context closed\n");
     }
     prefill_capture_ = false;
+}
+
+void llama_memory_kvmem::attach_redundancy_source(
+        const std::shared_ptr<kvmem::HistoricalKvMeanKeySource> & source) {
+    if (!source) return;
+    if (!thinking_ranges_)
+        thinking_ranges_ = std::make_shared<kvmem::HistoricalKvThinkingRanges>();
+    source->set_query_windows(32, std::max<uint32_t>(block_tokens_, 1), 8);
+}
+
+void llama_memory_kvmem::set_gc_query_span(int32_t begin, int32_t end) {
+    // Historical continuation is admitted only for an exact token prefix.
+    // A source reset has no old question bank, so same positions alone cannot
+    // import a question from a rewritten or unrelated conversation.
+    if (historical_redundancy_ && historical_query_span_set_ && begin >= 0 && end > begin &&
+        begin == historical_query_begin_ && end == historical_query_end_ && uint64_t(end) <= store_n_tokens())
+        historical_redundancy_->reuse_question(uint64_t(end - begin));
+    historical_query_span_set_ = true;
+    historical_query_begin_ = begin;
+    historical_query_end_ = end;
+}
+
+void llama_memory_kvmem::publish_redundancy_query(int il, const llama_pos * positions,
+        const float * rows, uint32_t count, uint32_t width) {
+    if (!historical_redundancy_ || !positions || !rows || !count) return;
+    // Phase is explicit, not inferred from batch size: a one-token prefill is
+    // still part of the question. end_prefill_capture() drains the harvest
+    // queue before changing this phase, and request finish/reset drain before
+    // begin_question(), so delayed GPU copies cannot cross a question epoch.
+    const bool observation = !prefill_capture_;
+    for (uint32_t run = 0; run < count;) {
+        while (run < count && !query_contains(positions[run])) ++run;
+        const uint32_t begin = run;
+        while (run < count && query_contains(positions[run]) &&
+                (run == begin || positions[run] == positions[run - 1] + 1)) ++run;
+        if (begin == run) continue;
+        const uint64_t end = uint64_t(positions[run - 1]) + 1;
+        const float * src = rows + size_t(begin) * width;
+        if (observation) historical_redundancy_->publish_observation(uint32_t(il), end, src, run - begin);
+        else historical_redundancy_->publish_query(uint32_t(il), end, src, run - begin);
+    }
+}
+
+bool llama_memory_kvmem::redundancy_ubatch_wants_q(uint32_t n_tokens, const llama_pos * pos) const {
+    if (!historical_redundancy_ || !want_q_capture() || !n_tokens) return false;
+    if (!pos) return true;
+    for (uint32_t i = 0; i < n_tokens; ++i) if (query_contains(pos[i])) return true;
+    return false;
+}
+
+void llama_memory_kvmem::arm_thinking_policy() {
+    if (!thinking_ranges_)
+        thinking_ranges_ = std::make_shared<kvmem::HistoricalKvThinkingRanges>();
+    thinking_ranges_->arm();
+}
+
+void llama_memory_kvmem::disarm_thinking_policy() {
+    if (thinking_ranges_) thinking_ranges_->disarm();
+}
+
+void llama_memory_kvmem::set_thinking_span(uint64_t begin, uint64_t end, bool closed) {
+    if (!thinking_ranges_)
+        thinking_ranges_ = std::make_shared<kvmem::HistoricalKvThinkingRanges>();
+    thinking_ranges_->note(begin, end);
+    if (closed && historical_redundancy_) historical_redundancy_->flush_observation();
 }
 
 void llama_memory_kvmem::set_mtp_follower(llama_memory_kvmem_mtp * mtp) {
@@ -1722,12 +1821,22 @@ bool llama_memory_kvmem::finish_historical_capture() {
             if (stats.policy_failures || stats.worker_failures) return false;
             if (historical_redundancy_) {
                 const auto m = historical_gc_->policy_metrics();
-                LLAMA_LOG_INFO("KVMEM_HISTORICAL_REDUNDANCY features=%llu missing=%llu pairs=%llu rounds=%llu representatives=%llu no_query=%llu query_samples=%llu skipped_queries=%llu\n",
+                LLAMA_LOG_INFO("KVMEM_HISTORICAL_REDUNDANCY features=%llu missing=%llu pairs=%llu rounds=%llu max_round_features=%llu representatives=%llu lossy=%llu no_query=%llu query_samples=%llu observation_samples=%llu fast_samples=%llu skipped_queries=%llu question_tokens=%llu question_segments=%llu question_bytes=%llu question_score_evals=%llu question_score_yields=%llu invalid_questions=%llu\n",
                     (unsigned long long)m.feature_blocks, (unsigned long long)m.missing_features,
                     (unsigned long long)m.comparisons, (unsigned long long)m.scored_rounds,
-                    (unsigned long long)m.representatives, (unsigned long long)m.no_query_rounds,
+                    (unsigned long long)m.max_round_features,
+                    (unsigned long long)m.representatives, (unsigned long long)m.lossy_intents,
+                    (unsigned long long)m.no_query_rounds,
                     (unsigned long long)historical_redundancy_->query_samples(),
-                    (unsigned long long)historical_redundancy_->skipped_query_samples());
+                    (unsigned long long)historical_redundancy_->observation_samples(),
+                    (unsigned long long)historical_redundancy_->fast_samples(),
+                    (unsigned long long)historical_redundancy_->skipped_query_samples(),
+                    (unsigned long long)historical_redundancy_->question_tokens(),
+                    (unsigned long long)historical_redundancy_->question_segments(),
+                    (unsigned long long)historical_redundancy_->question_bytes(),
+                    (unsigned long long)historical_redundancy_->question_score_evaluations(),
+                    (unsigned long long)historical_redundancy_->question_score_yields(),
+                    (unsigned long long)historical_redundancy_->invalid_questions());
             }
         }
         LLAMA_LOG_INFO("KVMEM_HISTORICAL_CAPTURE finish blocks=%u live_observed=%u task_references=0 rows=%u payload_bytes=%llu pinned_bytes=%llu gpu_deferred=%llu gpu_returned=%llu\n",
@@ -1767,6 +1876,7 @@ void llama_memory_kvmem::reset_turn_policy() {
     retrieval_pinned_ = false;
     keep_selected_ = false;
     prefill_capture_ = true;
+    if (historical_redundancy_) historical_redundancy_->begin_question();
 }
 
 void llama_memory_kvmem::reset_policy() {
@@ -4806,7 +4916,7 @@ void llama_memory_kvmem::harvest_from_host(const CaptureBatch & batch, int il, c
             return;
         }
         if (historical_redundancy_) {
-            historical_redundancy_->publish_query(il, uint64_t(batch.positions.back()) + 1, flat.data(), n);
+            publish_redundancy_query(il, batch.positions.data(), flat.data(), n, qdim);
             return;
         }
         for (uint32_t i = 0; i < n; ++i) {
@@ -4861,7 +4971,7 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
             return;
         }
         if (historical_redundancy_) {
-            historical_redundancy_->publish_query(il, uint64_t(cur_capture_.positions.back()) + 1, flat.data(), n);
+            publish_redundancy_query(il, cur_capture_.positions.data(), flat.data(), n, qdim);
             return;
         }
         for (uint32_t i = 0; i < n; ++i) {
@@ -5901,7 +6011,23 @@ void llama_memory_kvmem::set_turn_spans(const llama_kvmem_turn_spans & spans) {
 }
 
 bool llama_memory_kvmem::query_contains(llama_pos row) const {
-    if (historical_redundancy_) return prefill_capture_ && row >= 0;
+    if (historical_redundancy_) {
+        if (replay_ || row < 0) return false;
+        if (prefill_capture_) {
+            if (historical_query_span_set_)
+                return historical_query_begin_ >= 0 && row >= historical_query_begin_ && row < historical_query_end_;
+            if (explicit_spans_) {
+                for (const auto & range : turn_spans_.query)
+                    if (row >= range.begin && row < range.end) return true;
+                return false;
+            }
+            if (query_begin_ < 0) return true;
+            return row >= query_begin_ && (query_end_ <= 0 || row < query_end_);
+        }
+        // Generated Query expresses current demand even outside thinking.
+        // The thinking-only candidate filter remains in the GC policy.
+        return true;
+    }
     if (query_frozen_) return false;
     if (!explicit_spans_) return query_begin_ >= 0 && row >= query_begin_ && (query_end_ <= 0 || row < query_end_);
     for (const auto & r : turn_spans_.query) if (row >= r.begin && row < r.end) return true;
@@ -6720,6 +6846,22 @@ void llama_kvmem_set_request_span(int32_t query_begin, int32_t query_end, int32_
 
 void llama_kvmem_set_turn_spans(const llama_kvmem_turn_spans & spans) {
     if (auto * mem = kvmem_capture_active()) mem->set_turn_spans(spans);
+}
+
+void llama_kvmem_set_gc_query_span(int32_t begin, int32_t end) {
+    if (auto * mem = kvmem_capture_active()) mem->set_gc_query_span(begin, end);
+}
+
+void llama_kvmem_arm_thinking_policy(void) {
+    if (auto * mem = kvmem_capture_active()) mem->arm_thinking_policy();
+}
+
+void llama_kvmem_disarm_thinking_policy(void) {
+    if (auto * mem = kvmem_capture_active()) mem->disarm_thinking_policy();
+}
+
+void llama_kvmem_set_thinking_span(uint64_t begin, uint64_t end, int closed) {
+    if (auto * mem = kvmem_capture_active()) mem->set_thinking_span(begin, end, closed != 0);
 }
 
 llama_kvmem_attention_view llama_kvmem_get_attention_view() {

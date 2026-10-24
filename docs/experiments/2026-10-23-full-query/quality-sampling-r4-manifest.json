@@ -1,0 +1,16 @@
+{
+  "product_revision": "full-query-all-decode-r3",
+  "binary_sha256": "824f31ba118e6baeae288b3a8e4ffe663246629958a6446cdf2646cccfd466b3",
+  "test_revision": "quality-sampling-r4",
+  "changed_from_r3": [
+    "scripts/run_browser_fps_feedback.py",
+    "scripts/test_server_historical_workload.py"
+  ],
+  "files": {
+    "scripts/run_browser_fps_feedback.py": "07d6e566db362c82fe9b351465b72a6f9956e52e67a83d052e1357c473ebcc02",
+    "scripts/test_server_historical_workload.py": "439aba38b5456e8b522088f22d06101b14f6414a4af0ac57ed91df4eb3bad07a",
+    "scripts/fixtures/browser-fps-feedback-workload.json": "0d348daadf7f010d284457b2d8de5c9c0062a96fecfa0bc5da7c4dd161b3ce52",
+    "scripts/check_browser_fps.mjs": "045fda951b6dcf274016a2847ab18abc4639373dc9425bdab5713491f603c150",
+    "scripts/check_browser_fps_movement.mjs": "72297b8a4a09f55c0c5bfed0c29044459b908dece4ce258860955613f8b4a192"
+  }
+}

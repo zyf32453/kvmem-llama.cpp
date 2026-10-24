@@ -1,0 +1,61 @@
+{
+  "scope": "first_two_turns_movement_early_failure_screen",
+  "workload": "browser-fps-v2",
+  "fixture_revision": "original",
+  "source_files": [
+    {
+      "file": "state.js",
+      "turn": 1,
+      "sha256": "bba10921847827b36ed70523a316eb6e0f188067611aca2ad5330f930800c78f"
+    },
+    {
+      "file": "physics.js",
+      "turn": 2,
+      "sha256": "c129a2586fff013c4ee3f604d8fa294b6d8e97ab13c37217ba128cec4b29abb3"
+    }
+  ],
+  "incomplete_turns": [],
+  "checks": [
+    {
+      "name": "out of bounds is solid",
+      "pass": true
+    },
+    {
+      "name": "movement uses original speed",
+      "pass": true
+    },
+    {
+      "name": "diagonal movement normalized",
+      "pass": true
+    },
+    {
+      "name": "large move cannot tunnel through wall",
+      "pass": true
+    }
+  ],
+  "browser_errors": [],
+  "blocked_requests": [],
+  "limitations": "These four checks use the original first two outputs only. Passing does not replace the full 29 checks, prove later outputs, or establish GC activity, quality, or performance.",
+  "browser_version": "156.0.8078.47",
+  "measurements": {
+    "straight": {
+      "final_x": 2.8499999999999988,
+      "expected_x": 2.85,
+      "tolerance": 0.01
+    },
+    "diagonal": {
+      "final_x": 2.7474873734152916,
+      "final_y": 2.7474873734152916,
+      "actual_displacement": 0.35,
+      "expected_displacement": 0.35,
+      "tolerance": 0.01
+    },
+    "large_step": {
+      "final_x": 3.9999999999999947,
+      "final_y": 4.5
+    }
+  },
+  "passed_checks": 4,
+  "total_checks": 4,
+  "all_passed": true
+}

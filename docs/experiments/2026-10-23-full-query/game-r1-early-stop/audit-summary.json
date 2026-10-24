@@ -1,0 +1,161 @@
+{
+  "scope": "early_stop_on_pre_gc_generated_function_failure",
+  "local_raw_directory": "tmp/full-query-20261023/redundancy-full-query-thinking-r1/remote",
+  "remote_raw_directory": "/tmp/kvmem-full-query-20261023/redundancy-gc/redundancy-full-query-thinking-r1",
+  "completed_without_truncation": 3,
+  "attempted_requests": 4,
+  "expected_requests": 8,
+  "repair_requests": 0,
+  "output_status": [
+    {
+      "turn": 1,
+      "file": "state.js",
+      "done": true,
+      "http_status": 200,
+      "finish_reason": "stop",
+      "error": null,
+      "content_characters": 834
+    },
+    {
+      "turn": 2,
+      "file": "physics.js",
+      "done": true,
+      "http_status": 200,
+      "finish_reason": "stop",
+      "error": null,
+      "content_characters": 1507
+    },
+    {
+      "turn": 3,
+      "file": "weapons.js",
+      "done": true,
+      "http_status": 200,
+      "finish_reason": "stop",
+      "error": null,
+      "content_characters": 2213
+    },
+    {
+      "turn": 4,
+      "file": "bots.js",
+      "done": false,
+      "http_status": 200,
+      "finish_reason": null,
+      "error": null,
+      "content_characters": 0
+    }
+  ],
+  "first_two_rounds_gc": [
+    {
+      "proposed": 0,
+      "committed": 0,
+      "shadow": 0,
+      "reclaimed": 0,
+      "deferred": 0,
+      "retry": 0,
+      "policy_failures": 0,
+      "worker_failures": 0,
+      "ready": 497,
+      "payload_bytes": 621674496,
+      "host_released_early": 0,
+      "partial_resource_releases": 0
+    },
+    {
+      "proposed": 0,
+      "committed": 0,
+      "shadow": 0,
+      "reclaimed": 0,
+      "deferred": 0,
+      "retry": 0,
+      "policy_failures": 0,
+      "worker_failures": 0,
+      "ready": 451,
+      "payload_bytes": 675938304,
+      "host_released_early": 0,
+      "partial_resource_releases": 0
+    }
+  ],
+  "final_completed_round_gc": {
+    "proposed": 170,
+    "committed": 170,
+    "shadow": 0,
+    "reclaimed": 0,
+    "deferred": 1074935,
+    "retry": 0,
+    "policy_failures": 0,
+    "worker_failures": 0,
+    "ready": 214,
+    "payload_bytes": 754974720,
+    "host_released_early": 170,
+    "partial_resource_releases": 0
+  },
+  "full_browser_suite_completed": false,
+  "performance_started": false,
+  "gc_failure_observed": false,
+  "full_question_coverage_observed": false,
+  "invalid_question_seen": false,
+  "physics_sha256": "dd649052899485b889d264d4f50265a5b12c85305d5d46aca202bc7384842d57",
+  "old_final_r3_physics_sha256": "dd649052899485b889d264d4f50265a5b12c85305d5d46aca202bc7384842d57",
+  "raw_files": [
+    {
+      "name": "browser-results.json",
+      "bytes": 64897,
+      "sha256": "60df91d07783172b485d2f68b0ceda083fd03a67051f44b9d500eea6ce8c890f"
+    },
+    {
+      "name": "command.json",
+      "bytes": 847,
+      "sha256": "0e17bb3d8f62a9a53e4bc590b57eaa710413b4b8b92bb9b3c55c30dd88f819a9"
+    },
+    {
+      "name": "early-stop-reason.json",
+      "bytes": 702,
+      "sha256": "69bb111a0e022bff515c1444dc61b26b9b728a6715ed3df7f247f9c7fd7181a0"
+    },
+    {
+      "name": "experiment-config.json",
+      "bytes": 572,
+      "sha256": "0880725aa1777aafa6e2c0a678c56af2a4d339a4342861364f57932ea03f17d4"
+    },
+    {
+      "name": "gpu-memory.csv",
+      "bytes": 58406,
+      "sha256": "830c77d3036b222a190eb48c390d0b9a74df87efbc5e942752dcb87f53cfd795"
+    },
+    {
+      "name": "process-memory.jsonl",
+      "bytes": 130064,
+      "sha256": "74185aa664b4fa43bb7302c8696a3387c313e47091b612c6b91f6733a75361a2"
+    },
+    {
+      "name": "props.json",
+      "bytes": 11158,
+      "sha256": "74c4f58867f038d754a1ac851e0017033d34d1d2def60c3dbf3502ac06053155"
+    },
+    {
+      "name": "requests.json",
+      "bytes": 101349,
+      "sha256": "932da3dfaa6cf0fcdc3bfb0bcd1182a99feca09d8b6921cd8809de9c42f9da64"
+    },
+    {
+      "name": "results.json",
+      "bytes": 17441199,
+      "sha256": "0738c3aa7709c1d78ee1059eda4bdea68407e53281f70a5bef68fdc7dcfa113c"
+    },
+    {
+      "name": "server.log",
+      "bytes": 3698420,
+      "sha256": "306cd177fb08aeba41a479a9dedb8687569cb235706e290fad1e910e213ef44a"
+    },
+    {
+      "name": "summary.json",
+      "bytes": 4561,
+      "sha256": "2df58d7d98b06cb14e9d75fcef34d013fc1a7dd5b2dc47344167299891fdf09b"
+    },
+    {
+      "name": "workload.json",
+      "bytes": 5479,
+      "sha256": "4507d2e7463648eef91bd67f834d8df957b0ba80c67f51d20edd2784f2fa896d"
+    }
+  ],
+  "limitation": "One browser assertion failed before any GC retirement. Later third-turn GC activity does not retroactively explain the already emitted physics bug. The fourth request was intentionally interrupted; no complete eight-turn or 29-check result exists."
+}

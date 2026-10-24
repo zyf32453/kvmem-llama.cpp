@@ -1,0 +1,24 @@
+{
+  "base_commit": "660e46ae4a1a2079e771b8c43be5ceb03c4d75b5",
+  "upstream_pin": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "files": {
+    "kvmem/CMakeLists.txt": "237f86795526a63c23d69a174788fd9f711947ebcf8a870c26a074e9cdfb08c8",
+    "kvmem/include/kvmem/historical_kv_policy.hpp": "79339d215f6cbd4f9118c369f82bb41c5d8a4deb8425910163633f2eff8b3b9b",
+    "kvmem/include/kvmem/historical_kv_redundancy.hpp": "427156413108673e60d4a6542a3706858261d721a04bd1c389967c8c049621ad",
+    "kvmem/include/kvmem/thinking_span_tracker.hpp": "12f355d088dc7a1af96cb416e7d9d7005773b1924b4c2a249b95bd2e2aea7380",
+    "kvmem/src/host/historical_kv_redundancy.cpp": "272e20ff098616f5b4fd6f753adf3d2709240e870653d55de3f46aa302abb370",
+    "kvmem/tests/historical_kv_progress_probe.cpp": "faa47a7b0adb2fdef5b083958097b1ce017b9e96525884e08c38823afc4698f4",
+    "kvmem/tests/historical_kv_query_coverage_test.cpp": "89d2fed7110ebb561232866e544ac0a6ba4416bb96cc10e2c7a1a7cb389ed7dc",
+    "kvmem/tests/historical_kv_redundancy_test.cpp": "2b4d02d6878140ddc5110991c2889c744482788cac52e402dc3e516a5b45bd08",
+    "kvmem/tests/thinking_span_tracker_test.cpp": "ef4ba6f656368ae24f5218d2d4a4c0ddb38c3784d50d210f57bcb5afd63344eb",
+    "scripts/run_browser_fps_feedback.py": "5f8a99dad8392a60bd5a78eeb62211a10f3691a482c80daec079bff717dfb7d5",
+    "scripts/test_server_historical_workload.py": "70a1b9717fc1936b729e2795572627787c55fbf8ca354211e6e69c6c1641014c",
+    "src/adapter/llama-kvmem-capture.cpp": "04cd07a29403e746fcd10d67585ae0ec40dd924dc5c39d4e0f921341828c4499",
+    "src/adapter/llama-kvmem-hooks.h": "5d6f66f537465d86e4bd49143e51e4dbff9db82db33f03de9912ffafdce66ba4",
+    "src/adapter/llama-memory-kvmem.cpp": "c85a2e9e4a89bf64fe9beacce8ff300a813270ac9a4f7f716bd15732126b0467",
+    "src/adapter/llama-memory-kvmem.h": "f429894974b22976afb85c8b2ce5d031ccccc2f12599d4f9d782f5e653d6f0e2",
+    "tests/test_historical_query_log.py": "269de951768afd7fbc06f0b0a5c6a98f4ce16d646c29333fbda942ec4e79e267",
+    "tools/llama-kvmem-server.cpp": "507f1842a166f679636f315e79999dd9005f9bd6de079be180d2b31bb5c6d343",
+    "tests/historical-access-test.cpp": "86d096404da38b420241417df53c369876ec864576e581eda4fbb0d40039533e"
+  }
+}

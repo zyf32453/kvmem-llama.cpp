@@ -1,0 +1,53 @@
+Consolidate compiler generated dependencies of target vendor-hash
+[  1%] Built target vendor-hash
+[  4%] Built target ggml-base
+Consolidate compiler generated dependencies of target cpp-httplib
+[  4%] Built target cpp-httplib
+[  4%] Building CXX object kvmem/CMakeFiles/kvmem.dir/src/host/historical_kv_redundancy.cpp.o
+Consolidate compiler generated dependencies of target llama-common-base
+[  4%] Built target llama-common-base
+[ 52%] Built target ggml-cuda
+[ 56%] Built target ggml-cpu
+[ 56%] Built target ggml
+[ 56%] Linking CXX shared library libkvmem.so
+[ 60%] Built target kvmem
+[ 60%] Building CXX object llama.cpp/src/CMakeFiles/llama.dir/Unity/unity_9_cxx.cxx.o
+[ 60%] Linking CXX shared library ../../bin/libllama.so
+[ 71%] Built target llama
+Consolidate compiler generated dependencies of target mtmd
+Consolidate compiler generated dependencies of target llama-common
+[ 71%] Linking CXX shared library ../../../bin/libmtmd.so
+[ 71%] Linking CXX shared library ../../bin/libllama-common.so
+[ 84%] Built target mtmd
+[ 98%] Built target llama-common
+Consolidate compiler generated dependencies of target llama-kvmem-server
+[ 98%] Building CXX object CMakeFiles/llama-kvmem-server.dir/tools/llama-kvmem-server.cpp.o
+[ 98%] Linking CXX executable bin/llama-kvmem-server
+[100%] Built target llama-kvmem-server
+Consolidate compiler generated dependencies of target kvmem
+[  4%] Built target ggml-base
+[ 10%] Built target kvmem
+[ 16%] Built target ggml-cpu
+[ 84%] Built target ggml-cuda
+[ 84%] Built target ggml
+Consolidate compiler generated dependencies of target llama
+[100%] Built target llama
+Consolidate compiler generated dependencies of target kvmem-historical-access-test
+[100%] Building CXX object CMakeFiles/kvmem-historical-access-test.dir/tests/historical-access-test.cpp.o
+[100%] Linking CXX executable bin/kvmem-historical-access-test
+[100%] Built target kvmem-historical-access-test
+[100%] Built target kvmem
+Consolidate compiler generated dependencies of target historical_kv_redundancy_test
+[100%] Building CXX object kvmem/CMakeFiles/historical_kv_redundancy_test.dir/tests/historical_kv_redundancy_test.cpp.o
+[100%] Linking CXX executable ../bin/historical_kv_redundancy_test
+[100%] Built target historical_kv_redundancy_test
+[100%] Built target kvmem
+Consolidate compiler generated dependencies of target historical_kv_query_coverage_test
+[100%] Building CXX object kvmem/CMakeFiles/historical_kv_query_coverage_test.dir/tests/historical_kv_query_coverage_test.cpp.o
+[100%] Linking CXX executable ../bin/historical_kv_query_coverage_test
+[100%] Built target historical_kv_query_coverage_test
+[ 75%] Built target kvmem
+Consolidate compiler generated dependencies of target thinking_span_tracker_test
+[ 75%] Building CXX object kvmem/CMakeFiles/thinking_span_tracker_test.dir/tests/thinking_span_tracker_test.cpp.o
+[100%] Linking CXX executable ../bin/thinking_span_tracker_test
+[100%] Built target thinking_span_tracker_test

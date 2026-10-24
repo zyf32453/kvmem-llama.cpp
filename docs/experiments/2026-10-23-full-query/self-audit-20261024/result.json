@@ -1,0 +1,26 @@
+{
+  "date_local": "2026-10-24",
+  "scope": "local code audit and synthetic counterexample, not model-quality or performance acceptance",
+  "regression_tests_passed": 18,
+  "probe_exit_code": 1,
+  "probe": {
+    "similarity_ab": 0.939693,
+    "similarity_bc": 0.939693,
+    "similarity_ac": 0.766044,
+    "threshold": 0.9,
+    "deleted": [
+      0,
+      1,
+      1
+    ],
+    "only_redundancy": true,
+    "lossy_intents": 0,
+    "uncovered_deleted_blocks": 1
+  },
+  "source_sha256": "272e20ff098616f5b4fd6f753adf3d2709240e870653d55de3f46aa302abb370",
+  "build_command": "g++ -std=c++17 -O2 -I kvmem/include tmp/full-query-20261023/audit-transitive-substitute.cpp build-gc-host/kvmem/libkvmem.a -o tmp/full-query-20261023/audit-transitive-substitute.exe",
+  "finding": "Connected-component clustering can delete a block without a retained direct substitute above the configured threshold. Existing exact-duplicate tests do not cover this non-transitive similarity case.",
+  "product_changed": false,
+  "gc_quality_accepted": false,
+  "formal_performance_accepted": false
+}

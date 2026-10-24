@@ -1,0 +1,12 @@
+Internal ctest changing into directory: /tmp/kvmem-full-query-20261023/build-cuda
+Test project /tmp/kvmem-full-query-20261023/build-cuda
+    Start 35: historical_kv_redundancy_test
+1/3 Test #35: historical_kv_redundancy_test .......   Passed    0.00 sec
+    Start 36: historical_kv_query_coverage_test
+2/3 Test #36: historical_kv_query_coverage_test ...   Passed    0.00 sec
+    Start 37: thinking_span_tracker_test
+3/3 Test #37: thinking_span_tracker_test ..........   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 3
+
+Total Test time (real) =   0.01 sec

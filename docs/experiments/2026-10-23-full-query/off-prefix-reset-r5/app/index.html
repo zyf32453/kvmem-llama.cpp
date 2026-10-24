@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Offline FPS Prototype</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      color: #eee;
+      font-family: monospace;
+    }
+
+    #game {
+      display: block;
+      margin: 12px auto;
+      background: #000;
+    }
+
+    .controls {
+      text-align: center;
+      padding: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    WASD move · ←/→ turn · Click shoot · R reload · Enter restart after win/loss
+  </div>
+
+  <canvas id="game" width="800" height="450"></canvas>
+
+  <script src="state.js"></script>
+  <script src="physics.js"></script>
+  <script src="weapons.js"></script>
+  <script src="bots.js"></script>
+  <script src="render.js"></script>
+
+  <script>
+    (function () {
+      var canvas = document.getElementById('game');
+      window.game = G.createGame();
+
+      var keys = {};
+
+      window.addEventListener('keydown', function (e) {
+        if (e.key && e.key.indexOf('Arrow') === 0) {
+          e.preventDefault();
+        }
+
+        var k = e.key ? e.key.toLowerCase() : '';
+        if (!k) {
+          return;
+        }
+
+        keys[k] = true;
+
+        if (k === 'r' && !e.repeat) {
+          G.reload(window.game);
+        }
+
+        if (
+          k === 'enter' &&
+          !e.repeat &&
+          (window.game.status === 'won' || window.game.status === 'lost')
+        ) {
+          window.game = G.createGame();
+        }
+      });
+
+      window.addEventListener('keyup', function (e) {
+        var k = e.key ? e.key.toLowerCase() : '';
+        if (k) {
+          keys[k] = false;
+        }
+      });
+
+      canvas.addEventListener('click', function () {
+        G.shoot(window.game);
+      });
+
+      var last = performance.now();
+
+      function frame(now) {
+        var dt = (now - last) / 1000;
+        last = now;
+
+        if (dt < 0) {
+          dt = 0;
+        }
+        if (dt > 0.1) {
+          dt = 0.1;
+        }
+
+        var forward = (keys['w'] ? 1 : 0) - (keys['s'] ? 1 : 0);
+        var strafe = (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
+        var turn = (keys['arrowright'] ? 1 : 0) - (keys['arrowleft'] ? 1 : 0);
+
+        G.move(window.game, forward, strafe, turn, dt);
+        G.tick(window.game, dt);
+        G.updateBots(window.game, dt);
+        G.render(window.game, canvas);
+
+        requestAnimationFrame(frame);
+      }
+
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>

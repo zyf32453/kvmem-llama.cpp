@@ -1,0 +1,9 @@
+Test project C:/Users/25468/.codex/worktrees/d87d/kvmem-llama.cpp/build-gc-host
+    Start 20: historical_kv_query_coverage_test
+1/2 Test #20: historical_kv_query_coverage_test ...   Passed    0.04 sec
+    Start 21: thinking_span_tracker_test
+2/2 Test #21: thinking_span_tracker_test ..........   Passed    0.04 sec
+
+100% tests passed out of 2
+
+Total Test time (real) =   0.10 sec
