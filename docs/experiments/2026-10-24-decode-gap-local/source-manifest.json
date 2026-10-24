@@ -1,0 +1,24 @@
+{
+  "base_commit": "36041c2",
+  "status": "uncommitted_local_checkpoint",
+  "files": {
+    "kvmem/include/kvmem/historical_kv_gc.hpp": "3e524f71b9d80935602f070d883c7d4b1e1f7038fd8d8a6aa4e552a008033668",
+    "kvmem/include/kvmem/historical_kv_redundancy.hpp": "cef0a99a25eb73ba86e92dbbdd764d2900740ddd9f530aedf4e2f49d4058e724",
+    "kvmem/src/host/historical_kv_gc.cpp": "f0a21f6ea7d5e18aecbd056e2d0cda2bde97afdde2f17c6519cb30b46f405b1a",
+    "kvmem/src/host/historical_kv_redundancy.cpp": "96ed90bb2ad3089ccf8cbef25e3e98c463064171ce308e97cd5cd50d9452088d",
+    "kvmem/tests/historical_kv_gc_test.cpp": "4be8622ccc490bbfa269de72f0cc6ae8dd907df8f98945e2e8b60d572e774618",
+    "kvmem/tests/historical_kv_redundancy_test.cpp": "b704887a04b5ff2ade3be586b687e79720bd0fb56f89f852d17fc1fe9a933fb2",
+    "patches/0018-historical-gc-decode-boundary.patch": "b06cb5f1679c7322d3f8c2df23114b29f40700ca43c8ef9d62ff4dc8c83d5037",
+    "patches/README.md": "929535f36911fdcc3099e13139b6243122650ccc4d5b34fd87002769ca78ad35",
+    "scripts/apply-patches.sh": "743f5ffb4c5f0cc80afc7b8fe5e92073619ef530bdbe21ff759b17c2e13210ad",
+    "scripts/windows/build.ps1": "7b5dd8e67ef232cfe8bdebb57a499760e05e7f25ceeaeb3a84af9d010934a6b9",
+    "src/adapter/llama-kvmem-capture.cpp": "b532896d934287d0377ad6a118d2cee46009c19ed81bedd2c5d6bea36a6e2c9f",
+    "src/adapter/llama-kvmem-hooks.h": "936cd4e07a5b2870bb0ed3348b7c8a494a5071e127082bb4e90400d0045ad35f",
+    "src/adapter/llama-memory-kvmem.cpp": "321607adfdc29cc6013774731df1b490e639fc6cf68a26b371de1eb3ce8deb0a",
+    "src/adapter/llama-memory-kvmem.h": "a1c7ff6cb43249e2a1b7f317c31b43724c05f2a1a099567f02e2054183da5aac",
+    "tools/llama-kvmem-server.cpp": "8369fe79ff2f53069806b1efea90a8902c845fd89d390a300a81b843e26a1f04",
+    "scripts/check_gc_decode_gap.py": "67ea09fc7dfa22ae3ba08243f8aa2b2bcb5388c0b40af42845103f32b7be70b2",
+    "tests/test_gc_decode_gap.py": "3dedcf961dcf1ea2463dbaec52330bc0eca8ac44292df71fe0ded0974a97a8ee",
+    "docs/experiments/2026-10-24-decode-gap-local/README.md": "c779f44dd91466fd001c42cbdbe0371afdda9cef3b0a92adfdd765f6f996ebc9"
+  }
+}

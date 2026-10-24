@@ -40,6 +40,11 @@ to the request, admit pure text with four identical M-RoPE position axes, and
 mark its single-sequence batches as equal-length for recurrent preparation.
 Multimodal inputs and recurrent rollback snapshots remain outside this path.
 
+`0018-historical-gc-decode-boundary.patch` calls the lightweight logical-GC
+commit hooks immediately before and after the public `llama_decode` method.
+The graph-harvest hook can run inside a decode, so it cannot establish the
+between-decode ordering. Physical Host reclamation remains asynchronous.
+
 `reasoning-budget-upgrade.patch` upgrades the v0.15.0 ReplaySSM tree.
 `replayssm-upgrade.patch` upgrades the preceding multimodal/query-replay tree.
 `multimodal-upgrade.patch` upgrades the KVMem working tree recorded before

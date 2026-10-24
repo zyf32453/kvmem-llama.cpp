@@ -363,6 +363,9 @@ struct ServerState {
     int reasoning_budget_default = -1;
     std::string reasoning_budget_message;
     std::vector<llama_token> cached_tokens;
+    // Exact rendered bytes corresponding to cached_tokens. Generated token IDs
+    // need not equal a fresh tokenization of these same bytes.
+    std::string cached_rendered_prefix;
     std::shared_ptr<kvmem_vision> vision;
     std::shared_ptr<kvmem_prompt> active_prompt;
     std::shared_ptr<kvmem_prompt> cached_prompt;
@@ -835,6 +838,7 @@ static void memory_clear_all(ServerState & st) {
         }
     }
     st.cached_tokens.clear();
+    st.cached_rendered_prefix.clear();
     st.cached_prompt.reset();
     st.mm_checkpoints.clear();
     st.mm_live_row = 0;
@@ -1105,6 +1109,7 @@ static void historical_finish_request(ServerState & st) noexcept {
     // Failed/abandoned responses must never become a reusable prompt prefix.
     st.historical_cache_valid = false;
     st.cached_tokens.clear();
+    st.cached_rendered_prefix.clear();
     st.cached_prompt.reset();
     if (!llama_kvmem_historical_capture_cancel(st.ctx)) {
         st.historical_failed = true;
@@ -1131,6 +1136,11 @@ static bool commit_cached(ServerState & st, const std::vector<llama_token> & pro
     }
     st.cached_tokens = prompt;
     st.cached_tokens.insert(st.cached_tokens.end(), gen.begin(), gen.end());
+    // This surface comes from the exact cached token sequence. A separately
+    // rendered prompt plus detokenized generation can differ at their join.
+    if (st.historical.capacity)
+        st.cached_rendered_prefix = common_detokenize(st.vocab, st.cached_tokens, true);
+    else st.cached_rendered_prefix.clear();
     st.last_n_gen = (int) gen.size();
     if (!st.historical.capacity && (st.vision || st.query_policy_user)) multimodal_commit(st, gen);
     else st.cached_prompt = st.active_prompt->with_generated(gen);
@@ -3544,6 +3554,65 @@ int main(int argc, char ** argv) {
         } catch (const std::exception & e) {
             res.status = 503;
             res.set_content(json{{"error", e.what()}}.dump(), "application/json"); return;
+        }
+        // Preserve the actual generated token IDs when the next native chat
+        // rendering extends their exact bytes. Re-tokenizing the whole prompt
+        // can choose a different BPE segmentation for identical generated
+        // text, which would otherwise force a historical reset and recompute.
+        bool historical_stitched = false;
+        bool suffix_roundtrip = false;
+        bool joined_roundtrip = false;
+        bool native_span = false;
+        const bool canonical_reuse = st.historical_cache_valid &&
+            toks.size() > st.cached_tokens.size() &&
+            std::equal(st.cached_tokens.begin(), st.cached_tokens.end(), toks.begin());
+        if (st.historical.capacity && st.historical_cache_valid && !st.mm_reset_requested &&
+            !canonical_reuse &&
+            cr.query_begin < 0 && cr.query_end < 0 && st.query_policy_user &&
+            !st.cached_tokens.empty() && !st.cached_rendered_prefix.empty() &&
+            prompt.size() > st.cached_rendered_prefix.size() &&
+            prompt.compare(0, st.cached_rendered_prefix.size(), st.cached_rendered_prefix) == 0) {
+            const std::string suffix_text = prompt.substr(st.cached_rendered_prefix.size());
+            auto suffix = tokenize_text(st.vocab, suffix_text, false);
+            suffix_roundtrip = !suffix.empty() &&
+                common_detokenize(st.vocab, suffix, true) == suffix_text;
+            if (suffix_roundtrip) {
+                std::vector<llama_token> stable = st.cached_tokens;
+                stable.insert(stable.end(), suffix.begin(), suffix.end());
+                auto candidate = std::make_shared<kvmem_prompt>(stable);
+                int candidate_begin = -1, candidate_end = -1;
+                joined_roundtrip = common_detokenize(st.vocab, stable, true) == prompt;
+                native_span = joined_roundtrip &&
+                    derive_native_query_span(st, prompt, inputs, *candidate,
+                                             candidate_begin, candidate_end);
+                if (native_span) {
+                    kvmem_diag("KVMEM_TRACE historical_prefix_stitch canonical=%zu cached=%zu suffix=%zu stable=%zu\n",
+                        toks.size(), st.cached_tokens.size(), suffix.size(), stable.size());
+                    parsed_prompt = std::move(candidate);
+                    toks = std::move(stable);
+                    historical_stitched = true;
+                }
+            }
+        }
+        if (st.historical.capacity && st.historical_cache_valid && !st.mm_reset_requested &&
+            !canonical_reuse && !historical_stitched && !st.cached_tokens.empty() &&
+            (toks.size() <= st.cached_tokens.size() ||
+             !std::equal(st.cached_tokens.begin(), st.cached_tokens.end(), toks.begin()))) {
+            size_t common_bytes = 0;
+            while (common_bytes < prompt.size() &&
+                   common_bytes < st.cached_rendered_prefix.size() &&
+                   prompt[common_bytes] == st.cached_rendered_prefix[common_bytes])
+                ++common_bytes;
+            kvmem_diag("KVMEM_TRACE historical_prefix_stitch unavailable canonical=%zu cached=%zu surface_bytes=%zu prompt_bytes=%zu common_bytes=%zu suffix_roundtrip=%d joined_roundtrip=%d native_span=%d\n",
+                toks.size(), st.cached_tokens.size(),
+                st.cached_rendered_prefix.size(), prompt.size(), common_bytes,
+                int(suffix_roundtrip), int(joined_roundtrip), int(native_span));
+        }
+        if (historical_stitched &&
+            uint64_t(toks.size()) + uint64_t(std::max(0, cr.max_tokens)) > uint64_t(llama_n_ctx(st.ctx))) {
+            res.status = 400;
+            res.set_content("{\"error\":\"prompt + max_tokens exceeds n_ctx\"}", "application/json");
+            return;
         }
         st.active_prompt = parsed_prompt;
         st.turn_generation_rows = (uint32_t) std::min<uint64_t>(UINT32_MAX,

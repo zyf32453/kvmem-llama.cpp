@@ -504,7 +504,8 @@ HistoricalKvRedundancyPolicy::HistoricalKvRedundancyPolicy(size_t capacity,
         throw std::invalid_argument("invalid historical redundancy configuration");
     rows_.reserve(capacity_); references_.reserve(capacity_); ranked_.reserve(capacity_);
     candidate_indices_.reserve(capacity_); candidate_scratch_.reserve(capacity_);
-    protected_indices_.reserve(capacity_); parent_.reserve(capacity_);
+    protected_indices_.reserve(capacity_);
+    neighbors_.reserve(capacity_);
     seen_.assign(capacity_, {});
     descriptors_.resize(product(capacity_, dimensions_));
 }
@@ -512,6 +513,31 @@ HistoricalKvRedundancyPolicy::HistoricalKvRedundancyPolicy(size_t capacity,
 bool HistoricalKvRedundancyPolicy::permits(const HistoricalKvBlockMeta & meta) const noexcept {
     return meta.life == HistoricalKvLife::Live && meta.sealed && !meta.mandatory &&
         source_->question_epoch() == question_epoch_;
+}
+
+bool HistoricalKvRedundancyPolicy::carries_retired_substitute(
+        const HistoricalKvBlockMeta & meta) const noexcept {
+    if (meta.handle.slot >= seen_.size()) return false;
+    const auto & seen = seen_[meta.handle.slot];
+    return seen.carries_retired && seen.generation == meta.handle.generation &&
+        seen.content_version == meta.content_version;
+}
+
+void HistoricalKvRedundancyPolicy::on_result(const HistoricalKvCommitResult & result) noexcept {
+    const auto & intent = result.intent;
+    if (result.code != HistoricalKvCommitCode::Committed ||
+        intent.reason != HistoricalKvDeleteReason::Redundancy ||
+        intent.round_id != round_ || intent.victim.incarnation != incarnation_ ||
+        intent.victim.slot >= seen_.size() || !intent.expected_content_version) return;
+    const auto & victim = seen_[intent.victim.slot];
+    if (victim.generation != intent.victim.generation ||
+        victim.content_version != *intent.expected_content_version ||
+        victim.mate_slot >= seen_.size() ||
+        victim.mate_cosine < config_.representative_similarity) return;
+    auto & witness = seen_[victim.mate_slot];
+    if (witness.generation == victim.mate_generation &&
+        witness.content_version == victim.mate_version)
+        witness.carries_retired = true;
 }
 
 bool HistoricalKvRedundancyPolicy::thinking_block(const HistoricalKvBlockMeta & meta) const noexcept {
@@ -531,20 +557,6 @@ bool HistoricalKvRedundancyPolicy::better_representative(size_t a, size_t b) con
     if (xa.meta->mandatory != xb.meta->mandatory) return xa.meta->mandatory;
     if (xa.importance != xb.importance) return xa.importance > xb.importance;
     return age(*xa.meta) > age(*xb.meta);
-}
-
-size_t HistoricalKvRedundancyPolicy::cluster(size_t i) {
-    while (parent_[i] != i) {
-        parent_[i] = parent_[parent_[i]];
-        i = parent_[i];
-    }
-    return i;
-}
-
-void HistoricalKvRedundancyPolicy::unite(size_t a, size_t b) {
-    a = cluster(a);
-    b = cluster(b);
-    if (a != b) parent_[a] = b;
 }
 
 void HistoricalKvRedundancyPolicy::select_thinking_pool() {
@@ -759,7 +771,7 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
         done_ = collected_ = source_ready_ = pool_built_ = false;
         refresh_started_ = false;
         rows_.clear(); references_.clear(); ranked_.clear();
-        candidate_indices_.clear(); parent_.clear(); protected_indices_.clear();
+        candidate_indices_.clear(); protected_indices_.clear();
     }
     if (done_) return {HistoricalKvStepStatus::Complete, 0, 0};
     if (source_->question_epoch() != question_epoch_) {
@@ -862,8 +874,7 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
         while (rows_.size() > peak && !max_round_features_.compare_exchange_weak(peak, rows_.size())) {}
         if (rows_.empty()) { done_ = true; return {HistoricalKvStepStatus::NoCandidate, examined, 0}; }
         select_references();
-        parent_.resize(rows_.size());
-        std::iota(parent_.begin(), parent_.end(), 0);
+        neighbors_.assign(rows_.size(), {});
         return {HistoricalKvStepStatus::Yielded, examined, 0};
     }
     // Default mode compares against newest plus age-banded older references,
@@ -889,7 +900,10 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
                     better_representative(other, row.mate)) {
                 row.mate = other;
             }
-            if (cosine >= config_.representative_similarity) unite(pair_row_, other);
+            if (cosine >= config_.representative_similarity) {
+                neighbors_[pair_row_].push_back({other, cosine});
+                neighbors_[other].push_back({pair_row_, cosine});
+            }
         }
         if (pair_reference_ == references_.size()) { ++pair_row_; pair_reference_ = 0; }
     }
@@ -928,24 +942,61 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
             return {HistoricalKvStepStatus::Yielded, refreshed, 0};
         pairs = refreshed;
     }
-    for (auto & row : rows_) row.redundancy = row.compared ? row.max_sim : -1.0;
-    std::vector<size_t> winner(rows_.size(), SIZE_MAX), sizes(rows_.size(), 0);
-    for (size_t i = 0; i < rows_.size(); ++i) {
-        const size_t root = cluster(i);
-        ++sizes[root];
-        if (winner[root] == SIZE_MAX || better_representative(i, winner[root])) winner[root] = i;
+    for (auto & row : rows_) {
+        row.redundancy = row.compared ? row.max_sim : -1.0;
+        row.retained = false;
     }
+    // Similarity is not transitive: A~B and B~C do not establish A~C.
+    // Keep a stronger row before classifying a weaker one as redundant, and
+    // require a direct, retained witness for every redundancy intent. Reuse
+    // only edges proven by the budgeted comparison pass, including reverse
+    // edges when a non-reference row compared against a retained reference.
+    std::vector<size_t> by_preference(rows_.size());
+    std::iota(by_preference.begin(), by_preference.end(), 0);
+    std::sort(by_preference.begin(), by_preference.end(), [&](size_t a, size_t b) {
+        if (better_representative(a, b)) return true;
+        if (better_representative(b, a)) return false;
+        return a < b;
+    });
+    std::vector<uint8_t> supports(rows_.size(), 0);
+    std::vector<size_t> prior_witness_fallback;
     ranked_.clear();
     candidate_scratch_.clear();
-    for (size_t i = 0; i < rows_.size(); ++i) {
-        const size_t root = cluster(i);
-        if (sizes[root] >= 2 && i == winner[root]) {
-            rows_[i].retained = true;
-            ++representatives_;
+    for (size_t i : by_preference) {
+        auto & row = rows_[i];
+        if (!permits(*row.meta) || carries_retired_substitute(*row.meta)) {
+            row.retained = true;
+            continue;
         }
-        if (!permits(*rows_[i].meta) || rows_[i].retained) continue;
-        if (sizes[root] >= 2) ranked_.push_back(i);
-        else candidate_scratch_.push_back(i);
+        size_t witness = SIZE_MAX;
+        double similarity = config_.representative_similarity;
+        for (const auto & edge : neighbors_[i]) {
+            const size_t other = edge.index;
+            if (other == i || !rows_[other].retained) continue;
+            if (witness == SIZE_MAX || edge.similarity > similarity ||
+                (edge.similarity == similarity && better_representative(other, witness))) {
+                witness = other;
+                similarity = edge.similarity;
+            }
+        }
+        if (witness == SIZE_MAX) {
+            row.retained = true;
+            continue;
+        }
+        row.redundancy = row.max_sim = similarity;
+        row.mate = witness;
+        supports[witness] = 1;
+        ranked_.push_back(i);
+    }
+    for (size_t i = 0; i < rows_.size(); ++i) {
+        if (!rows_[i].retained) continue;
+        if (supports[i]) ++representatives_;
+        // A witness for a redundancy intent must not also enter this round's
+        // lossy fallback when capacity pressure exceeds the redundant supply.
+        else if (permits(*rows_[i].meta)) {
+            if (carries_retired_substitute(*rows_[i].meta)) prior_witness_fallback.push_back(i);
+            else candidate_scratch_.push_back(i);
+        }
     }
     remember_scored();
     ++scored_;
@@ -958,6 +1009,15 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
             HistoricalKvDeleteReason::Lru, snapshot, out);
         emitted += extra;
         lossy_ += extra;
+        // A witness from an earlier committed deletion is a last resort:
+        // retire an independent block first, otherwise its old victim loses
+        // its only known direct substitute. This final tier is still lossy.
+        if (emitted < need) {
+            const size_t dependent = emit_ranked(prior_witness_fallback, need - emitted,
+                HistoricalKvDeleteReason::Lru, snapshot, out);
+            emitted += dependent;
+            lossy_ += dependent;
+        }
     }
     done_ = true;
     return {emitted ? HistoricalKvStepStatus::Complete : HistoricalKvStepStatus::NoCandidate, pairs, emitted};

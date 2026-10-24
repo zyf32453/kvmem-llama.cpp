@@ -79,6 +79,7 @@ if (!$HostOnly) {
     $historicalHybridContext = Join-Path $SourceDir 'patches/0015-historical-hybrid-context-return.patch'
     $historicalTextMrope = Join-Path $SourceDir 'patches/0016-historical-text-mrope-input.patch'
     $historicalEqualUbatch = Join-Path $SourceDir 'patches/0017-historical-hybrid-equal-ubatch.patch'
+    $historicalGcDecodeBoundary = Join-Path $SourceDir 'patches/0018-historical-gc-decode-boundary.patch'
     $historicalSlots = Join-Path $SourceDir 'patches/0009-historical-slot-info-return.patch'
     $historicalMicrobatch = Join-Path $SourceDir 'patches/0010-historical-microbatch-pool.patch'
     $historicalInput = Join-Path $SourceDir 'patches/0011-historical-input-workspace.patch'
@@ -134,7 +135,7 @@ if (!$HostOnly) {
         Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalRedundancy)
         Invoke-Checked git @('-C', $llama, 'apply', $historicalRedundancy)
     }
-    foreach ($historicalPatch in @($historicalHybridContext, $historicalTextMrope, $historicalEqualUbatch)) {
+    foreach ($historicalPatch in @($historicalHybridContext, $historicalTextMrope, $historicalEqualUbatch, $historicalGcDecodeBoundary)) {
         if (!(Test-PatchApplied $historicalPatch)) {
             Invoke-Checked git @('-C', $llama, 'apply', '--check', $historicalPatch)
             Invoke-Checked git @('-C', $llama, 'apply', $historicalPatch)

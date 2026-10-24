@@ -31,6 +31,9 @@ public:
         uint32_t batch_blocks = 64;
         uint32_t reclaim_blocks = 64;
         uint32_t poll_ms = 25;
+        // Prepare policy decisions on the worker; retire exact generations in
+        // the next pre/post-decode gap. Resource release stays on the worker.
+        bool retire_at_decode_boundary = false;
     };
     struct Stats {
         uint64_t ticks = 0;
@@ -46,6 +49,14 @@ public:
         uint64_t worker_failures = 0;
         uint64_t host_released_early = 0; // Host bundle gone, identity/GPU still held.
         uint64_t partial_resource_releases = 0; // Progress before the complete Host bundle is gone.
+        uint64_t boundary_batches = 0;
+        uint64_t boundary_committed = 0;
+    };
+    struct BoundaryResult {
+        uint64_t started_ns = 0;
+        uint64_t finished_ns = 0;
+        uint32_t prepared = 0;
+        uint32_t committed = 0;
     };
 
     HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
@@ -60,6 +71,10 @@ public:
     bool worker_finished() const noexcept { return worker_finished_.load(std::memory_order_acquire); }
     void stop() noexcept;
     void manual_tick();
+    // Called after the public decode's host work returns, or immediately
+    // before a new active selection. The GPU may still be in flight; existing
+    // execution leases remain valid. Never calls a release callback.
+    BoundaryResult commit_at_decode_boundary() noexcept;
     // Set by the serialized request owner only while no request is executing.
     // Zero clears the demand. This never reserves or waits for pending bytes.
     void request_capacity(uint32_t ready);
@@ -76,6 +91,13 @@ private:
     std::unique_ptr<HistoricalKvPolicy> policy_;
     Config config_;
     mutable std::mutex tick_mu_;
+    mutable std::mutex pending_mu_;
+    enum class PendingState { Idle, Prepared, Committed };
+    PendingState pending_state_ = PendingState::Idle;
+    std::atomic<bool> pending_ready_{false};
+    std::vector<HistoricalKvDeleteIntent> prepared_;
+    std::vector<HistoricalKvDeleteIntent> pending_intents_;
+    std::vector<HistoricalKvCommitCode> pending_codes_;
     HistoricalKvSnapshot round_;
     bool round_active_ = false;
     HistoricalKvRepository::RangeObservation observation_;
@@ -101,6 +123,7 @@ private:
     std::atomic<uint64_t> worker_failures_{0};
     std::atomic<uint64_t> host_released_early_{0};
     std::atomic<uint64_t> partial_resource_releases_{0};
+    std::atomic<uint64_t> boundary_batches_{0}, boundary_committed_{0};
     std::atomic<uint32_t> requested_ready_{0};
     bool policy_failed_ = false;
 };

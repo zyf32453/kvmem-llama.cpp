@@ -118,6 +118,8 @@ public:
     void harvest_pending(struct ggml_backend_sched * sched);
     bool begin_active_ubatch(uint32_t n_tokens, const llama_pos * logical_positions);
     void mark_active_submission();
+    void commit_historical_gc_before_decode() noexcept;
+    void commit_historical_gc_boundary() noexcept;
     void complete_active_ubatch() noexcept;
     uint64_t historical_active_skips() const noexcept { return historical_active_skips_; }
     void harvest_flush();
@@ -674,6 +676,7 @@ private:
     // harvest synchronization. Empty in production requests.
     std::function<void()> historical_submission_test_hook_;
     uint64_t historical_active_skips_ = 0;
+    uint64_t historical_last_gc_commit_ns_ = 0;
     // Foreground-owned, fixed-size accounting; the CPU GC never touches GPU
     // slots. Retired cells disappear immediately, source slots return later.
     std::vector<uint32_t> historical_gpu_readers_;

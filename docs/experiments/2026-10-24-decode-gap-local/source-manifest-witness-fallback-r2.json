@@ -1,0 +1,11 @@
+{
+  "base_snapshot": "docs/experiments/2026-10-24-decode-gap-local/source-manifest.json",
+  "status": "remote_built_and_validated",
+  "remote_runtime_library_sha256": "37ef7e0ad3fe53f7aa56078570e3d4e66915a56c867017b27bbc7d144a7f9081",
+  "validation_report": "docs/experiments/2026-10-24-decode-gap-local/REMOTE-VALIDATION.md",
+  "files": {
+    "kvmem/src/host/historical_kv_redundancy.cpp": "86200e3091892e65950e63dc3a18e28f0b0fbf41de6747a37bda61adc3e2c5b8",
+    "kvmem/tests/historical_kv_redundancy_test.cpp": "d5d2db56601d4eed6f0e4a3ab22b7872ed867b365fc227c2640ef3122026253b",
+    "scripts/check_strict_prefix_continuity.py": "2e0873efdb7d79d38b0e6417eae085e3304cb84ced7e1cc309af888e6828e8bc"
+  }
+}

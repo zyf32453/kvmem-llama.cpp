@@ -1,10 +1,12 @@
 #include "kvmem/historical_kv_gc.hpp"
+#include "kvmem/historical_kv_active_set.hpp"
 #include "kvmem/historical_kv_raw_store.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <new>
@@ -91,6 +93,23 @@ private:
     HistoricalKvHandle victim_;
 };
 
+class WaitingPolicy final : public HistoricalKvPolicy {
+public:
+    WaitingPolicy(std::atomic<bool> & entered, std::atomic<bool> & proceed)
+        : entered_(entered), proceed_(proceed) {}
+    HistoricalKvStepResult step(const HistoricalKvSnapshot &,
+                                const HistoricalKvPressure &,
+                                HistoricalKvWorkBudget,
+                                HistoricalKvDecisionBuffer &) override {
+        entered_.store(true, std::memory_order_release);
+        while (!proceed_.load(std::memory_order_acquire)) std::this_thread::yield();
+        return {HistoricalKvStepStatus::NoCandidate, 0, 0};
+    }
+private:
+    std::atomic<bool> & entered_;
+    std::atomic<bool> & proceed_;
+};
+
 HistoricalKvGc::Config config(HistoricalKvGc::Mode mode) {
     HistoricalKvGc::Config cfg;
     cfg.mode = mode;
@@ -138,6 +157,89 @@ void test_retire_active_then_background_release() {
     check(releases == 1 && !callback_on_main,
           "resource release did not run exactly once on the background worker");
     check(repo->ready_count() == 2, "reclaimed slot was not reusable");
+}
+
+void test_prepared_retirement_commits_only_at_decode_boundary() {
+    auto repo = std::make_shared<HistoricalKvRepository>(2);
+    std::atomic<int> releases{0};
+    std::atomic<bool> released_on_foreground{false};
+    const auto foreground = std::this_thread::get_id();
+    auto writer = repo->begin_write(17, 0, 32, 1, 1024,
+        [&](const HistoricalKvHandle &) {
+            released_on_foreground.store(std::this_thread::get_id() == foreground);
+            ++releases;
+            return true;
+        });
+    check(writer && repo->publish_write(*writer), "boundary fixture publication failed");
+    const auto handle = writer->handle();
+    writer->reset();
+    const std::vector<HistoricalKvActiveRequest> request{{handle, false}};
+    auto old_window = HistoricalKvActiveSet::acquire(repo, request);
+    check(old_window && old_window.active->contains(handle), "old active window missing");
+
+    auto cfg = config(HistoricalKvGc::Mode::Delete);
+    cfg.retire_at_decode_boundary = true;
+    HistoricalKvGc gc(repo, std::make_unique<DeleteOnce>(handle), cfg);
+    gc.manual_tick(); // The worker computes and publishes an intent only.
+    check(gc.stats().proposed == 1 && gc.stats().committed == 0 &&
+          repo->acquire_new(handle).has_value(),
+          "worker retired a prepared victim during decode");
+    auto before = HistoricalKvActiveSet::acquire(repo, request);
+    check(before && before.active->contains(handle), "prepared intent changed selection");
+    before.active->release();
+
+    HistoricalKvGc::BoundaryResult boundary;
+    { DenyCppAllocation deny; boundary = gc.commit_at_decode_boundary(); }
+    check(boundary.prepared == 1 && boundary.committed == 1 &&
+          boundary.finished_ns >= boundary.started_ns &&
+          gc.commit_at_decode_boundary().prepared == 0,
+          "decode boundary did not commit exactly one prepared batch");
+    check(!repo->acquire_new(handle) && old_window.active->contains(handle) &&
+          old_window.active->mark_execution_submitted(handle, 2),
+          "retirement revoked an old active lease or admitted a new one");
+    auto next_window = HistoricalKvActiveSet::acquire(repo, request);
+    check(next_window && next_window.active->empty(),
+          "next active window selected a Retired block");
+    check(!repo->try_reserve_slots(2) && releases == 0,
+          "Retired slot became overwritable before old references drained");
+
+    gc.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    check(releases == 0 && repo->ready_count() == 1,
+          "worker released Host payload under the old active lease");
+    old_window.active->release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (releases == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    gc.stop();
+    check(releases == 1 && !released_on_foreground && repo->ready_count() == 2 &&
+          gc.stats().committed == 1 && gc.stats().boundary_committed == 1 &&
+          gc.stats().boundary_batches == 1,
+          "asynchronous physical reclaim or boundary accounting failed");
+}
+
+void test_decode_boundary_does_not_wait_for_policy_scoring() {
+    auto repo = std::make_shared<HistoricalKvRepository>(2);
+    std::atomic<bool> entered{false}, proceed{false};
+    auto cfg = config(HistoricalKvGc::Mode::Delete);
+    cfg.retire_at_decode_boundary = true;
+    HistoricalKvGc gc(repo, std::make_unique<WaitingPolicy>(entered, proceed), cfg);
+    std::thread scorer([&] { gc.manual_tick(); });
+    const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < entered_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (!entered.load(std::memory_order_acquire)) {
+        proceed.store(true, std::memory_order_release);
+        scorer.join();
+        check(false, "background policy never entered scoring");
+    }
+    auto boundary = std::async(std::launch::async, [&] { return gc.commit_at_decode_boundary(); });
+    const auto status = boundary.wait_for(std::chrono::seconds(1));
+    proceed.store(true, std::memory_order_release);
+    boundary.get();
+    scorer.join();
+    check(status == std::future_status::ready,
+          "decode boundary waited for background policy scoring");
 }
 
 void test_shadow_and_conditional_intent() {
@@ -579,6 +681,8 @@ void test_separate_resource_progress_keeps_pending_slot_credit() {
 int main() {
     try {
         test_retire_active_then_background_release();
+        test_prepared_retirement_commits_only_at_decode_boundary();
+        test_decode_boundary_does_not_wait_for_policy_scoring();
         test_partial_host_release_does_not_return_slot_credit();
         test_separate_resource_progress_keeps_pending_slot_credit();
         test_shadow_and_conditional_intent();

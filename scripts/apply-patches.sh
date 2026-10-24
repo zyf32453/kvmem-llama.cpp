@@ -193,3 +193,12 @@ else
     git apply "$EQUAL_UBATCH"
     echo "applied historical hybrid equal ubatch"
 fi
+
+GC_DECODE_BOUNDARY="$ROOT/patches/0018-historical-gc-decode-boundary.patch"
+if git apply --reverse --check "$GC_DECODE_BOUNDARY" 2>/dev/null; then
+    echo "historical GC decode boundary patch already applied"
+else
+    git apply --check "$GC_DECODE_BOUNDARY"
+    git apply "$GC_DECODE_BOUNDARY"
+    echo "applied historical GC decode boundary"
+fi

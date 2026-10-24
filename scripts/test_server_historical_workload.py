@@ -101,6 +101,8 @@ def main():
     p.add_argument('--trace', action='store_true')
     p.add_argument('--enable-thinking', action='store_true',
                    help='enable the model native thinking path; omit for the previous non-thinking control')
+    p.add_argument('--reasoning-effort', choices=['low', 'medium', 'xhigh'],
+                   help='native thinking effort; omitted uses the model template default')
     p.add_argument('--sampling-profile', choices=['greedy', 'server-defaults'], default='greedy',
                    help='greedy preserves previous runs; server-defaults inherits sampling while retaining the fixed seed')
     p.add_argument('--gpu-layers', type=int, default=99)
@@ -154,6 +156,8 @@ def main():
         p.error('max-repairs must be 0..4 and feedback-timeout 1..1800')
     if args.browser_feedback and (args.replay or args.max_turns):
         p.error('browser-feedback requires a full own-response workload')
+    if args.reasoning_effort and not args.enable_thinking:
+        p.error('--reasoning-effort requires --enable-thinking')
     workload = {'system': 'You are a Python coding assistant. Follow the requested output format and keep code concise.',
                 'turns': TURNS}
     if args.workload:
@@ -185,7 +189,7 @@ def main():
     experiment_config = {field: getattr(args, field) for field in
         ('preset', 'budget', 'gen_reserve', 'max_tokens', 'block_tokens', 'sink_tokens',
          'recent_tokens', 'kv_dtype', 'context_size', 'capacity', 'low', 'high', 'mode', 'policy',
-         'enable_thinking', 'sampling_profile', 'seed')}
+         'enable_thinking', 'reasoning_effort', 'sampling_profile', 'seed')}
     experiment_config.update(model_path=str(args.model),
         requested_model='Qwen3.8-27B' if args.preset else None,
         chat_template='stable_qwen_text_fixture' if args.stable_qwen_template else 'native',
@@ -207,7 +211,9 @@ def main():
         '--kvmem-historical-gc-mode', args.mode, '--kvmem-historical-gc-policy', args.policy,
         '-lv', '4']
     command += ['--enable-thinking' if args.enable_thinking else '--no-think']
-    if not args.enable_thinking:
+    if args.reasoning_effort:
+        command += ['--reasoning-effort', args.reasoning_effort]
+    elif not args.enable_thinking:
         command += ['--reasoning-effort', 'none']
     # Redundancy acceptance needs request span lengths even without thinking.
     if args.trace or args.enable_thinking or (args.policy == 'redundancy' and args.mode != 'off'):

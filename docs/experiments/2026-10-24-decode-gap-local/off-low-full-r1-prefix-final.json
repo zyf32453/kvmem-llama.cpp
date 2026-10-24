@@ -1,0 +1,59 @@
+{
+  "passed": true,
+  "errors": [],
+  "expected_turns": 8,
+  "result_rows": 8,
+  "completed_turns": 8,
+  "admissions": 8,
+  "refusals": 0,
+  "turns": [
+    {
+      "turn": 1,
+      "expected_cached_tokens": 0,
+      "observed_cache_hit_tokens": 0,
+      "total_tokens": 1139
+    },
+    {
+      "turn": 2,
+      "expected_cached_tokens": 1139,
+      "observed_cache_hit_tokens": 1139,
+      "total_tokens": 2843
+    },
+    {
+      "turn": 3,
+      "expected_cached_tokens": 2843,
+      "observed_cache_hit_tokens": 2843,
+      "total_tokens": 5006
+    },
+    {
+      "turn": 4,
+      "expected_cached_tokens": 5006,
+      "observed_cache_hit_tokens": 5006,
+      "total_tokens": 6443
+    },
+    {
+      "turn": 5,
+      "expected_cached_tokens": 6443,
+      "observed_cache_hit_tokens": 6443,
+      "total_tokens": 9302
+    },
+    {
+      "turn": 6,
+      "expected_cached_tokens": 9302,
+      "observed_cache_hit_tokens": 9302,
+      "total_tokens": 10525
+    },
+    {
+      "turn": 7,
+      "expected_cached_tokens": 10525,
+      "observed_cache_hit_tokens": 10525,
+      "total_tokens": 12426
+    },
+    {
+      "turn": 8,
+      "expected_cached_tokens": 12426,
+      "observed_cache_hit_tokens": 12426,
+      "total_tokens": 13095
+    }
+  ]
+}

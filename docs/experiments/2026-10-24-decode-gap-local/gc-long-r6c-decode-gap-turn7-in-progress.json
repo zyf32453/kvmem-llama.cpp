@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "errors": [],
+  "decode_boundaries": 53113,
+  "prepared_batches": 228,
+  "committed_intents": 1425,
+  "active_windows": 7,
+  "windows_after_commit": 4,
+  "commit_duration_p95_us": 4.26,
+  "commit_duration_max_us": 24.688,
+  "commit_durations_over_10ms": 0
+}

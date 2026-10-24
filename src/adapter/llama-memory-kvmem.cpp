@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -1422,6 +1423,18 @@ bool llama_memory_kvmem::continue_historical_capture(uint32_t capacity, uint64_t
             (unsigned long long) input_tokens, (unsigned long long) max_output_tokens, capture_token_capacity_);
         return false;
     }
+    // A worker decision prepared after the final decode still belongs to the
+    // idle gap. Publish its logical retirement before admission and the next
+    // active-window re-selection; physical release remains asynchronous.
+    if (historical_gc_ && historical_gc_mode_ == 2) {
+        const auto boundary = historical_gc_->commit_at_decode_boundary();
+        if (boundary.committed) historical_last_gc_commit_ns_ = boundary.finished_ns;
+        if (trace_ && boundary.prepared)
+            kvmem_diag("KVMEM_TRACE gc_gap phase=request_begin start_ns=%llu end_ns=%llu prepared=%u committed=%u\n",
+                (unsigned long long) boundary.started_ns,
+                (unsigned long long) boundary.finished_ns,
+                boundary.prepared, boundary.committed);
+    }
     try {
         struct FinishedRequest final : kvmem::HistoricalKvCleanup::Task {
             std::unique_ptr<kvmem::HistoricalKvCaptureSession> capture;
@@ -1617,6 +1630,7 @@ bool llama_memory_kvmem::start_historical_gc(int mode, uint32_t ready_low,
         cfg.batch_blocks = std::min<uint32_t>(repository->capacity(), 16);
         cfg.reclaim_blocks = std::min<uint32_t>(repository->capacity(), 64);
         cfg.poll_ms = 5;
+        cfg.retire_at_decode_boundary = mode == 2;
         std::unique_ptr<kvmem::HistoricalKvPolicy> policy;
         if (historical_redundancy_) {
             cfg.scan_blocks = std::min<uint32_t>(repository->capacity(), 16);
@@ -1807,7 +1821,7 @@ bool llama_memory_kvmem::finish_historical_capture() {
         }
         if (historical_gc_) {
             const auto stats = historical_gc_->stats();
-            LLAMA_LOG_INFO("KVMEM_HISTORICAL_GC finish mode=%s proposed=%llu committed=%llu shadow=%llu reclaimed=%llu deferred=%llu retry=%llu policy_failures=%llu worker_failures=%llu ready=%u payload_bytes=%llu host_released_early=%llu partial_resource_releases=%llu\n",
+            LLAMA_LOG_INFO("KVMEM_HISTORICAL_GC finish mode=%s proposed=%llu committed=%llu shadow=%llu reclaimed=%llu deferred=%llu retry=%llu policy_failures=%llu worker_failures=%llu ready=%u payload_bytes=%llu host_released_early=%llu partial_resource_releases=%llu boundary_batches=%llu boundary_committed=%llu\n",
                 historical_gc_mode_ == 1 ? "shadow" : "delete",
                 (unsigned long long) stats.proposed, (unsigned long long) stats.committed,
                 (unsigned long long) stats.shadow, (unsigned long long) stats.reclaimed,
@@ -1817,7 +1831,9 @@ bool llama_memory_kvmem::finish_historical_capture() {
                 historical_capture_->repository()->ready_count(),
                 (unsigned long long) historical_capture_->payload_bytes(),
                 (unsigned long long) stats.host_released_early,
-                (unsigned long long) stats.partial_resource_releases);
+                (unsigned long long) stats.partial_resource_releases,
+                (unsigned long long) stats.boundary_batches,
+                (unsigned long long) stats.boundary_committed);
             if (stats.policy_failures || stats.worker_failures) return false;
             if (historical_redundancy_) {
                 const auto m = historical_gc_->policy_metrics();
@@ -3475,9 +3491,13 @@ bool llama_memory_kvmem::begin_active_ubatch(
                 id, static_cast<unsigned long long>(block.logical_id));
     }
     historical_ubatch_active_ = true;
-    if (opening && trace_) kvmem_diag("KVMEM_TRACE historical_active_window_begin repository=%llu window=%llu rows=%u\n",
+    if (opening && trace_) kvmem_diag("KVMEM_TRACE historical_active_window_begin repository=%llu window=%llu rows=%u select_ns=%llu last_gc_commit_ns=%llu skips=%llu\n",
         (unsigned long long) repository->repository_id(),
-        (unsigned long long) historical_capture_->gpu_window_id(), store_n_tokens());
+        (unsigned long long) historical_capture_->gpu_window_id(), store_n_tokens(),
+        (unsigned long long) std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(),
+        (unsigned long long) historical_last_gc_commit_ns_,
+        (unsigned long long) historical_active_skips_);
     return true;
 }
 
@@ -3490,6 +3510,34 @@ void llama_memory_kvmem::mark_active_submission() {
                 throw std::runtime_error("historical active submission could not record LRU use");
     }
     if (historical_submission_test_hook_) historical_submission_test_hook_();
+}
+
+void llama_memory_kvmem::commit_historical_gc_boundary() noexcept {
+    if (!historical_gc_ || historical_gc_mode_ != 2) return;
+    const auto decode_return_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    const auto boundary = historical_gc_->commit_at_decode_boundary();
+    if (boundary.committed) historical_last_gc_commit_ns_ = boundary.finished_ns;
+    if (trace_)
+        kvmem_diag("KVMEM_TRACE gc_gap phase=decode_end decode_return_ns=%llu commit_start_ns=%llu commit_end_ns=%llu prepared=%u committed=%u\n",
+            (unsigned long long) decode_return_ns,
+            (unsigned long long) boundary.started_ns,
+            (unsigned long long) boundary.finished_ns,
+            boundary.prepared, boundary.committed);
+}
+
+void llama_memory_kvmem::commit_historical_gc_before_decode() noexcept {
+    if (!historical_gc_ || historical_gc_mode_ != 2) return;
+    const auto boundary = historical_gc_->commit_at_decode_boundary();
+    if (boundary.committed) historical_last_gc_commit_ns_ = boundary.finished_ns;
+    const auto decode_enter_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (trace_)
+        kvmem_diag("KVMEM_TRACE gc_gap phase=decode_begin decode_enter_ns=%llu commit_start_ns=%llu commit_end_ns=%llu prepared=%u committed=%u\n",
+            (unsigned long long) decode_enter_ns,
+            (unsigned long long) boundary.started_ns,
+            (unsigned long long) boundary.finished_ns,
+            boundary.prepared, boundary.committed);
 }
 
 void llama_memory_kvmem::complete_active_ubatch() noexcept {

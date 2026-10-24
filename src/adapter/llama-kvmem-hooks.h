@@ -118,6 +118,12 @@ LLAMA_API bool llama_kvmem_begin_ubatch(uint32_t n_tokens,
                                         const llama_pos * logical_positions,
                                         int is_mtp);
 LLAMA_API void llama_kvmem_harvest_ubatch(struct ggml_backend_sched * sched, int is_mtp);
+// Called immediately before ctx->decode, while the previous decode is over.
+// This catches decisions prepared after the previous decode-return hook.
+LLAMA_API void llama_kvmem_decode_entering(void);
+// Called by the public llama_decode wrapper after ctx->decode has returned.
+// Commit bounded logical retirements before the caller can start a new decode.
+LLAMA_API void llama_kvmem_decode_completed(void);
 // True when this ubatch overlaps [query_begin, query_end) and Q nodes should
 // be present. n_pos is the per-token position stride (1 for 1-D RoPE).
 LLAMA_API bool llama_kvmem_ubatch_needs_q_capture(uint32_t n_tokens, uint32_t n_pos,

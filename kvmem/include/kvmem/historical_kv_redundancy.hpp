@@ -202,6 +202,7 @@ public:
     bool permits(const HistoricalKvBlockMeta &) const noexcept override;
     HistoricalKvStepResult step(const HistoricalKvSnapshot &, const HistoricalKvPressure &,
         HistoricalKvWorkBudget, HistoricalKvDecisionBuffer &) override;
+    void on_result(const HistoricalKvCommitResult &) noexcept override;
     Metrics metrics() const noexcept override;
 private:
     struct Row {
@@ -216,9 +217,14 @@ private:
         uint32_t mate_slot = UINT32_MAX;
         uint64_t mate_generation = 0, mate_version = 0;
         double mate_cosine = -1;
+        // A committed redundancy retirement named this live generation as
+        // its direct substitute. Later B->C similarity alone cannot retire B
+        // as redundancy for the already unavailable A.
+        bool carries_retired = false;
     };
     bool thinking_block(const HistoricalKvBlockMeta & meta) const noexcept;
     bool eligible_candidate(const HistoricalKvBlockMeta & meta) const noexcept;
+    bool carries_retired_substitute(const HistoricalKvBlockMeta & meta) const noexcept;
     void select_thinking_pool();
     void limit_older_candidates(size_t limit);
     void select_references();
@@ -231,8 +237,6 @@ private:
     size_t snapshot_index(const HistoricalKvSnapshot & snapshot, uint32_t slot,
         uint64_t generation, uint64_t version) const noexcept;
     bool better_representative(size_t a, size_t b) const noexcept;
-    size_t cluster(size_t i);
-    void unite(size_t a, size_t b);
     size_t emit_ranked(std::vector<size_t> & group, size_t take, HistoricalKvDeleteReason reason,
         const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out);
     size_t capacity_, dimensions_;
@@ -246,8 +250,13 @@ private:
     bool thinking_mode_ = false;
     std::vector<Row> rows_;
     std::vector<float> descriptors_;
+    struct DirectEdge { size_t index; double similarity; };
+    // Sparse direct-similarity edges from the comparisons already budgeted
+    // for this round; unlike connected components, each edge is a proof of
+    // an actual retained substitute when a victim is proposed.
+    std::vector<std::vector<DirectEdge>> neighbors_;
     std::vector<size_t> references_, ranked_, candidate_indices_, candidate_scratch_;
-    std::vector<size_t> protected_indices_, parent_;
+    std::vector<size_t> protected_indices_;
     std::vector<Seen> seen_;
     std::atomic<uint64_t> feature_blocks_{0}, missing_{0}, comparisons_{0}, max_round_features_{0};
     std::atomic<uint64_t> scored_{0}, representatives_{0}, no_query_{0}, lossy_{0};

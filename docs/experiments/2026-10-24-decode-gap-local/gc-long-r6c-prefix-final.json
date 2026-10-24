@@ -1,0 +1,57 @@
+{
+  "passed": false,
+  "errors": [
+    "recorded 7 of 8 required turns",
+    "observed 7 of 8 admissions",
+    "turn 7: incomplete or non-stop response"
+  ],
+  "expected_turns": 8,
+  "result_rows": 7,
+  "completed_turns": 6,
+  "admissions": 7,
+  "refusals": 0,
+  "turns": [
+    {
+      "turn": 1,
+      "expected_cached_tokens": 0,
+      "observed_cache_hit_tokens": 0,
+      "total_tokens": 3323
+    },
+    {
+      "turn": 2,
+      "expected_cached_tokens": 3323,
+      "observed_cache_hit_tokens": 3323,
+      "total_tokens": 13881
+    },
+    {
+      "turn": 3,
+      "expected_cached_tokens": 13881,
+      "observed_cache_hit_tokens": 13881,
+      "total_tokens": 24198
+    },
+    {
+      "turn": 4,
+      "expected_cached_tokens": 24198,
+      "observed_cache_hit_tokens": 24198,
+      "total_tokens": 33416
+    },
+    {
+      "turn": 5,
+      "expected_cached_tokens": 33416,
+      "observed_cache_hit_tokens": 33416,
+      "total_tokens": 43920
+    },
+    {
+      "turn": 6,
+      "expected_cached_tokens": 43920,
+      "observed_cache_hit_tokens": 43920,
+      "total_tokens": 49473
+    },
+    {
+      "turn": 7,
+      "expected_cached_tokens": 49473,
+      "observed_cache_hit_tokens": 49473,
+      "total_tokens": 65960
+    }
+  ]
+}

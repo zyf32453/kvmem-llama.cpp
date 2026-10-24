@@ -146,6 +146,18 @@ void llama_kvmem_harvest_ubatch(struct ggml_backend_sched * sched, int is_mtp) {
     kvmem_capture_harvest_ubatch(sched, is_mtp);
 }
 
+void llama_kvmem_decode_entering(void) {
+    if (auto * memory = kvmem_current_execution().memory) {
+        memory->commit_historical_gc_before_decode();
+    }
+}
+
+void llama_kvmem_decode_completed(void) {
+    if (auto * memory = kvmem_current_execution().memory) {
+        memory->commit_historical_gc_boundary();
+    }
+}
+
 bool llama_kvmem_ubatch_needs_q_capture(uint32_t n_tokens, uint32_t n_pos, const llama_pos * pos) {
     return kvmem_ubatch_needs_q_capture(n_tokens, n_pos, pos);
 }

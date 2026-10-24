@@ -23,6 +23,9 @@ HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repositor
         throw std::invalid_argument("invalid historical KV GC configuration");
     }
     retry_.reserve(repository_->capacity());
+    prepared_.reserve(config_.batch_blocks);
+    pending_intents_.reserve(config_.batch_blocks);
+    pending_codes_.reserve(config_.batch_blocks);
     round_.blocks.reserve(repository_->capacity());
     observation_.blocks.reserve(repository_->capacity());
     seen_generation_.resize(repository_->capacity());
@@ -107,9 +110,49 @@ void HistoricalKvGc::acknowledge(const HistoricalKvDeleteIntent & intent,
     }
 }
 
+HistoricalKvGc::BoundaryResult HistoricalKvGc::commit_at_decode_boundary() noexcept {
+    BoundaryResult result;
+    if (!config_.retire_at_decode_boundary || config_.mode != Mode::Delete ||
+        !pending_ready_.load(std::memory_order_acquire)) return result;
+    // The worker never holds this mutex while scoring, observing, or
+    // reclaiming. It publishes only a preallocated, bounded intent batch.
+    std::lock_guard<std::mutex> guard(pending_mu_);
+    if (pending_state_ != PendingState::Prepared) return result;
+    const auto ns = [] {
+        return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
+    result.started_ns = ns();
+    result.prepared = static_cast<uint32_t>(pending_intents_.size());
+    for (size_t i = 0; i < pending_intents_.size(); ++i) {
+        const auto code = commit(pending_intents_[i]);
+        pending_codes_[i] = code;
+        if (code == HistoricalKvCommitCode::Committed) ++result.committed;
+    }
+    result.finished_ns = ns();
+    ++boundary_batches_;
+    boundary_committed_.fetch_add(result.committed, std::memory_order_relaxed);
+    pending_state_ = PendingState::Committed;
+    pending_ready_.store(false, std::memory_order_release);
+    return result;
+}
+
 void HistoricalKvGc::manual_tick() {
     std::lock_guard<std::mutex> guard(tick_mu_);
     ++ticks_;
+    if (config_.retire_at_decode_boundary) {
+        std::lock_guard<std::mutex> pending_guard(pending_mu_);
+        if (pending_state_ == PendingState::Committed) {
+            for (size_t i = 0; i < pending_intents_.size(); ++i) {
+                acknowledge(pending_intents_[i], pending_codes_[i]);
+                if (pending_codes_[i] == HistoricalKvCommitCode::Retry)
+                    retry_.push_back(pending_intents_[i]);
+            }
+            pending_intents_.clear();
+            pending_codes_.clear();
+            pending_state_ = PendingState::Idle;
+        }
+    }
     // Progress previous retirements even when policy has no candidate, the
     // output buffer is full, or new policy decisions are switched off.
     const uint32_t capacity = repository_->capacity();
@@ -131,10 +174,22 @@ void HistoricalKvGc::manual_tick() {
     reclaim_cursor_ = reclaim_scan == capacity - reclaim_cursor_ ? 0 :
                       reclaim_cursor_ + reclaim_scan;
     if (config_.mode == Mode::Off) return;
+    if (config_.retire_at_decode_boundary) {
+        std::lock_guard<std::mutex> pending_guard(pending_mu_);
+        if (pending_state_ != PendingState::Idle) return;
+    }
 
     // Retry retained commands before taking a fresh snapshot. A previous
     // failure must not cause the next round to over-delete new candidates.
     if (!retry_.empty()) {
+        if (config_.retire_at_decode_boundary) {
+            std::lock_guard<std::mutex> pending_guard(pending_mu_);
+            pending_intents_.swap(retry_);
+            pending_codes_.resize(pending_intents_.size());
+            pending_state_ = PendingState::Prepared;
+            pending_ready_.store(true, std::memory_order_release);
+            return;
+        }
         size_t write = 0;
         for (size_t i = 0; i < retry_.size(); ++i) {
             const auto code = commit(retry_[i]);
@@ -254,17 +309,28 @@ void HistoricalKvGc::manual_tick() {
             ++shadow_;
             continue;
         }
-        const auto code = commit(intent);
-        acknowledge(intent, code);
-        if (code == HistoricalKvCommitCode::Retry) {
-            const bool duplicate = std::any_of(retry_.begin(), retry_.end(),
-                [&](const auto & pending) {
-                    return pending.victim.incarnation == intent.victim.incarnation &&
-                           pending.victim.slot == intent.victim.slot &&
-                           pending.victim.generation == intent.victim.generation;
-                });
-            if (!duplicate) retry_.push_back(intent);
+        if (config_.retire_at_decode_boundary) {
+            prepared_.push_back(intent);
+        } else {
+            const auto code = commit(intent);
+            acknowledge(intent, code);
+            if (code == HistoricalKvCommitCode::Retry) {
+                const bool duplicate = std::any_of(retry_.begin(), retry_.end(),
+                    [&](const auto & pending) {
+                        return pending.victim.incarnation == intent.victim.incarnation &&
+                               pending.victim.slot == intent.victim.slot &&
+                               pending.victim.generation == intent.victim.generation;
+                    });
+                if (!duplicate) retry_.push_back(intent);
+            }
         }
+    }
+    if (!prepared_.empty()) {
+        std::lock_guard<std::mutex> pending_guard(pending_mu_);
+        pending_intents_.swap(prepared_);
+        pending_codes_.resize(pending_intents_.size());
+        pending_state_ = PendingState::Prepared;
+        pending_ready_.store(true, std::memory_order_release);
     }
     decisions_.clear_after_ack();
     if (step.status != HistoricalKvStepStatus::Yielded) {
@@ -278,7 +344,8 @@ HistoricalKvGc::Stats HistoricalKvGc::stats() const {
     return {ticks_.load(), proposed_.load(), committed_.load(), shadow_.load(),
             reclaimed_.load(), deferred_.load(), stale_.load(),
             reevaluate_.load(), retry_count_.load(), policy_failures_.load(),
-            worker_failures_.load(), host_released_early_.load(), partial_resource_releases_.load()};
+            worker_failures_.load(), host_released_early_.load(), partial_resource_releases_.load(),
+            boundary_batches_.load(), boundary_committed_.load()};
 }
 
 } // namespace kvmem

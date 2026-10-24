@@ -275,6 +275,60 @@ static void source_and_gc_test() {
     repo->close(); for (auto m : repo->snapshot()) { repo->retire(m.handle); repo->try_reclaim(m.handle); }
     check(store->allocated_payload_bytes() == 0, "fixture did not drain");
 }
+
+static void manager_ack_preserves_cross_round_witness() {
+    auto repo = std::make_shared<HistoricalKvRepository>(3);
+    std::array<HistoricalKvHandle, 3> handles;
+    for (unsigned i = 0; i < 3; ++i) {
+        auto writer = repo->begin_write(i, i * 32, 32, 1, 1024,
+            [](const HistoricalKvHandle &) { return true; });
+        check(writer && repo->publish_write(*writer), "manager chain publication failed");
+        handles[i] = writer->handle();
+    }
+    auto source = std::make_shared<MappedFeatures>();
+    constexpr double pi = 3.14159265358979323846;
+    for (unsigned i = 0; i < 3; ++i) {
+        const double radians = double(i) * 20.0 * pi / 180.0;
+        source->keys.push_back({float(std::cos(radians)), float(std::sin(radians)), 0});
+        source->logits.push_back(i == 1 ? 10.0 : (i == 0 ? -10.0 : 0.0));
+    }
+    auto thinking = std::make_shared<HistoricalKvThinkingRanges>();
+    thinking->arm();
+    thinking->note(0, 96);
+    HistoricalKvRedundancyPolicy::Config policy_cfg;
+    policy_cfg.thinking = thinking;
+    policy_cfg.pool_blocks = 3;
+    policy_cfg.segment_blocks = 1;
+    HistoricalKvGc::Config gc_cfg;
+    gc_cfg.mode = HistoricalKvGc::Mode::Delete;
+    gc_cfg.ready_low = 1;
+    gc_cfg.ready_high = 2;
+    gc_cfg.scan_blocks = gc_cfg.reclaim_blocks = 3;
+    gc_cfg.batch_blocks = 1;
+    gc_cfg.retire_at_decode_boundary = true;
+    HistoricalKvGc gc(repo,
+        std::make_unique<HistoricalKvRedundancyPolicy>(3, source, policy_cfg), gc_cfg);
+    HistoricalKvGc::BoundaryResult first;
+    for (unsigned tick = 0; tick < 20 && !first.committed; ++tick) {
+        gc.manual_tick();
+        first = gc.commit_at_decode_boundary();
+    }
+    check(first.committed == 1 &&
+          repo->completion_state(handles[0]) == HistoricalKvRepository::CompletionState::Retired,
+          "manager did not commit A at a decode boundary");
+    source->logits[2] = 20.0;
+    HistoricalKvGc::BoundaryResult second;
+    for (unsigned tick = 0; tick < 20 && !second.committed; ++tick) {
+        gc.manual_tick();
+        second = gc.commit_at_decode_boundary();
+    }
+    check(second.committed == 1 && gc.policy_metrics().lossy_intents == 1 &&
+          repo->completion_state(handles[1]) == HistoricalKvRepository::CompletionState::Live &&
+          repo->completion_state(handles[2]) == HistoricalKvRepository::CompletionState::Retired,
+          "manager fallback removed B despite its cross-round substitute obligation");
+    gc.manual_tick();
+    check(gc.stats().committed == 2, "manager failed to acknowledge both boundary retirements");
+}
 static void thinking_pool_tests() {
     auto ranges = std::make_shared<HistoricalKvThinkingRanges>();
     ranges->arm();
@@ -456,6 +510,76 @@ static void substitute_policy_tests() {
           "unique or mandatory block retired while copies remained");
     check(all_reason(out, HistoricalKvDeleteReason::Redundancy) && keep_sink.metrics().lossy_intents == 0,
           "cluster retirement used the lossy path");
+
+    // Similarity is not transitive. The mandatory A covers B and B covers C,
+    // but A does not cover C. C must remain when B is retired.
+    auto chain = std::make_shared<MappedFeatures>();
+    constexpr double pi = 3.14159265358979323846;
+    for (unsigned i = 0; i < 3; ++i) {
+        const double radians = double(i) * 20.0 * pi / 180.0;
+        chain->keys.push_back({float(std::cos(radians)), float(std::sin(radians)), 0});
+        chain->logits.push_back(i == 0 ? 10.0 : 0.0);
+    }
+    s = fixture();
+    s.blocks.resize(3);
+    s.blocks[0].mandatory = true;
+    auto thinking = std::make_shared<HistoricalKvThinkingRanges>();
+    thinking->arm();
+    thinking->note(0, 96);
+    HistoricalKvRedundancyPolicy::Config chain_cfg;
+    chain_cfg.thinking = thinking;
+    chain_cfg.pool_blocks = 3;
+    chain_cfg.segment_blocks = 1;
+    HistoricalKvRedundancyPolicy direct(3, chain, chain_cfg);
+    HistoricalKvDecisionBuffer direct_out(3);
+    run(direct, s, direct_out, {0, 1, 2, 0, 2});
+    check(direct_out.values().size() == 1 && selected(direct_out, 1) && !selected(direct_out, 2),
+          "non-transitive chain retired a block without a retained direct substitute");
+    check(all_reason(direct_out, HistoricalKvDeleteReason::Redundancy) && direct.metrics().lossy_intents == 0,
+          "direct substitute case used a lossy retirement");
+
+    // A later Query can prefer C to B. Once A is retired using B, B->C
+    // alone does not prove C can replace the unavailable A.
+    auto across = std::make_shared<MappedFeatures>();
+    for (unsigned i = 0; i < 3; ++i) {
+        const double radians = double(i) * 20.0 * pi / 180.0;
+        across->keys.push_back({float(std::cos(radians)), float(std::sin(radians)), 0});
+        across->logits.push_back(i == 1 ? 10.0 : (i == 0 ? -10.0 : 0.0));
+    }
+    auto later = fixture();
+    later.blocks.resize(3);
+    HistoricalKvRedundancyPolicy successive(3, across, chain_cfg);
+    HistoricalKvDecisionBuffer successive_out(3);
+    run(successive, later, successive_out, {0, 1, 2, 1});
+    check(successive_out.values().size() == 1 && selected(successive_out, 0) &&
+          successive_out.values()[0].reason == HistoricalKvDeleteReason::Redundancy,
+          "cross-round fixture did not retire A using B");
+    successive.on_result({successive_out.values()[0], HistoricalKvCommitCode::Committed});
+    later.blocks[0].life = HistoricalKvLife::Retired;
+    across->logits[2] = 20.0;
+    ++later.round_id;
+    successive_out.clear_after_ack();
+    run(successive, later, successive_out, {0, 1, 2, 1});
+    for (const auto & intent : successive_out.values())
+        check(intent.victim.slot != 1 || intent.reason != HistoricalKvDeleteReason::Redundancy,
+              "cross-round substitute B was falsely called redundant using C");
+    check(successive_out.values().size() == 1 && selected(successive_out, 2) &&
+          !selected(successive_out, 1) &&
+          successive_out.values()[0].reason == HistoricalKvDeleteReason::Lru,
+          "lossy fallback discarded a prior witness while an independent block remained");
+    later.blocks[2].mandatory = true;
+    ++later.round_id;
+    successive_out.clear_after_ack();
+    run(successive, later, successive_out, {0, 1, 2, 1});
+    check(successive_out.values().size() == 1 && selected(successive_out, 1) &&
+          successive_out.values()[0].reason == HistoricalKvDeleteReason::Lru,
+          "forced last-resort witness loss was not explicitly marked lossy");
+    later.blocks[2].mandatory = false;
+    ++later.round_id;
+    successive_out.clear_after_ack();
+    run(successive, later, successive_out, {0, 1, 2, 1, 1});
+    check(successive_out.values().empty(),
+          "admission demand silently deleted a prior direct substitute");
 
     // Medium similarity to many references is not a substitute.
     auto mixed = std::make_shared<Features>();
@@ -706,6 +830,7 @@ int main() {
         policy_tests();
         candidate_budget_tests();
         source_and_gc_test();
+        manager_ack_preserves_cross_round_witness();
         thinking_pool_tests();
         substitute_policy_tests();
         remembered_neighbor_tests();
