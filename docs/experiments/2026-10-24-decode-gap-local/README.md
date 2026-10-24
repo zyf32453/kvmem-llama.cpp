@@ -1,11 +1,12 @@
 # Decode-gap GC and token-prefix continuity: local checkpoint (2026-10-24)
 
-This is an **uncommitted local follow-up** to `36041c2`. The initial local
+This follows `36041c2`. The initial local
 checkpoint below predates remote validation; current remote IQ3 findings are
 recorded in [REMOTE-VALIDATION.md](REMOTE-VALIDATION.md). The updated r2
 library subsequently passed an eight-turn GC game with 29/29 browser checks,
-strict prefix reuse and decode-gap ordering. Paired efficiency testing is
-still in progress, so this is not a production acceptance report. The older
+strict prefix reuse and decode-gap ordering. Five paired efficiency rounds
+also passed the stated experimental p95 and throughput thresholds. This is
+not a production acceptance guarantee. The older
 r5 long GC game was a separate failed 7/8-turn run; its 27/29 checks are not
 task completion.
 
@@ -30,7 +31,8 @@ task completion.
   `scripts/check_gc_decode_gap.py LOG --require-commit --require-selection`
   against a complete new server log. The host decode return does not imply
   asynchronous GPU work has finished; execution leases protect that work.
-  This check has not yet run on the model.
+  At this initial checkpoint the check had not yet run on the model; the
+  subsequent IQ3 run and its passing result are in `REMOTE-VALIDATION.md`.
 - The redundancy policy now requires a directly compared, retained witness for
   each redundancy-ranked victim. Its A~B, B~C, A!~C regression passes locally.
   An acknowledged committed victim also pins that witness generation against

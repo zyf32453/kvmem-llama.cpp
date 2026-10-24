@@ -1,9 +1,10 @@
-# Remote CUDA and IQ3 validation checkpoint (2026-10-24)
+# Remote CUDA and IQ3 validation (2026-10-24)
 
-This is an uncommitted follow-up to `36041c2`, not a production acceptance
-report. The source snapshot and its hashes remain frozen in `source-manifest.json`
-and `README.md`. The previous r5 long GC game failed after 7/8 turns; its
-27/29 checks are not task completion.
+This report accompanies the validated follow-up to `36041c2`; it is a
+bounded experiment, not a production guarantee. The initial source snapshot
+is in `source-manifest.json`; the later r2 policy overlay and its verified
+hashes are in `source-manifest-witness-fallback-r2.json`. The previous r5
+long GC game failed after 7/8 turns; its 27/29 checks are not task completion.
 
 With explicit user authorization, the 18 changed source/test/document files
 were transferred to `/tmp/kvmem-full-query-20261023`, and all SHA-256 hashes
@@ -196,8 +197,9 @@ the new runtime library SHA-256 became
 The four targeted remote CTests for GC, redundancy, Query coverage and
 thinking ranges passed 4/4. A first broad regex also selected an unbuilt
 demo executable and marked it `Not Run`; the exact four-test selection is
-the relevant passing result. The r2 runtime has not yet passed a model GC
-quality run.
+the relevant passing result. At that point the r2 runtime had not yet passed
+a model GC quality run; its subsequent successful eight-turn run is reported
+below.
 
 The IQ3 GGUF's native Jinja template explicitly defaults thinking effort to
 `xhigh` and inserts an instruction to validate assumptions and alternatives.
