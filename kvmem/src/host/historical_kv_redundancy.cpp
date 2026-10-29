@@ -40,6 +40,19 @@ void HistoricalKvThinkingRanges::clear_spans() noexcept {
     spans_.clear();
     completed_replies_.clear();
 }
+void HistoricalKvThinkingRanges::truncate(uint64_t end) noexcept {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto trim = [end](std::vector<Span> & spans) {
+        for (auto & span : spans) span.end = std::min(span.end, end);
+        spans.erase(std::remove_if(spans.begin(), spans.end(),
+            [](const Span & span) { return span.begin >= span.end; }), spans.end());
+    };
+    trim(spans_);
+    trim(completed_replies_);
+    // A restored prefix with no proven thinking must not remain restricted to
+    // an empty thinking tier: pressure would have no legal victim.
+    if (spans_.empty()) armed_ = false;
+}
 void HistoricalKvThinkingRanges::enable_completed_replies(bool enabled) noexcept {
     std::lock_guard<std::mutex> lock(mu_);
     tiered_ = enabled;

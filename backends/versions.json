@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "a0d2eae15af5f8ed6a7992c6d2d510c3205a7843",
+    "patched_tree": "2945508354edfacc08945e45a8ce0cbc76902510",
     "patches": [
       {
         "id": "kvmem",
@@ -230,6 +230,16 @@
         ],
         "after_tree": "a0d2eae15af5f8ed6a7992c6d2d510c3205a7843",
         "source": "Opt-in native LRU historical Host-page GC with decode-boundary retirement, sparse archive selection and bounded admission"
+      },
+      {
+        "id": "historical-gc-redundancy",
+        "path": "backends/patches/ninfer-historical-gc-redundancy.patch",
+        "sha256": "57cf8cfe67c2d4b1fc2ec8ed64986e29195901865a71c4b346bd7e23637dc6b7",
+        "requires": [
+          "historical-gc-lru"
+        ],
+        "after_tree": "2945508354edfacc08945e45a8ce0cbc76902510",
+        "source": "Native NInfer Host-page redundancy GC with sealed Mean-K features and accepted full-query Mean-Q scoring"
       }
     ]
   },

@@ -51,8 +51,13 @@ public:
             filtered_.round_id = snapshot.round_id;
             filtered_.incarnation = snapshot.incarnation;
             filtered_.blocks.clear();
-            for (const auto & block : snapshot.blocks)
-                if (!state_->protected_page(block.logical_id)) filtered_.blocks.push_back(block);
+            for (const auto & block : snapshot.blocks) {
+                auto annotated = block;
+                // Protected pages may witness redundancy, but must never be
+                // proposed as victims, including after protection changes.
+                annotated.mandatory |= state_->protected_page(block.logical_id);
+                filtered_.blocks.push_back(annotated);
+            }
         }
         return inner_->step(filtered_, pressure, budget, out);
     }

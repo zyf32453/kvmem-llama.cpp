@@ -1,6 +1,7 @@
 add_library(kvmem
     src/host/historical_kv_gc.cpp
     src/host/historical_kv_page_gc.cpp
+    src/host/historical_kv_page_features.cpp
     src/host/historical_kv_policy_lru.cpp
     src/host/historical_kv_redundancy.cpp
     src/host/historical_kv_repository.cpp

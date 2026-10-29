@@ -22,6 +22,7 @@ public:
     bool armed() const noexcept;
     void note(uint64_t begin, uint64_t end);
     void clear_spans() noexcept;
+    void truncate(uint64_t end) noexcept;
     bool contains(uint64_t position) const noexcept;
     bool covers(uint64_t begin, uint32_t tokens) const noexcept;
     // Optional second tier: only server-generated, successfully completed

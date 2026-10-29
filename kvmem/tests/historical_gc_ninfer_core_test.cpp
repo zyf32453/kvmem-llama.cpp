@@ -1,5 +1,6 @@
 #include "kvmem/historical_kv_gc.hpp"
 #include "kvmem/historical_kv_page_gc.hpp"
+#include "kvmem/historical_kv_page_features.hpp"
 #include "kvmem/historical_kv_redundancy.hpp"
 
 #include <array>
@@ -31,6 +32,46 @@ public:
 };
 
 } // namespace
+
+static void native_page_feature_snapshot() {
+    kvmem::HistoricalKvPageFeatures features(3, 3);
+    features.publish_page(1, {1.0f, 2.0f, 3.0f});
+    require(features.has_page(1));
+    features.publish_question_scores({0.1, -0.2, 0.3});
+    require(features.begin_round(1));
+    kvmem::HistoricalKvBlockMeta meta;
+    meta.logical_id = 1;
+    std::array<float, 3> descriptor{};
+    double importance = 0;
+    require(features.read(meta, descriptor.data(), importance));
+    require(descriptor == (std::array<float, 3>{1.0f, 2.0f, 3.0f}));
+    require(importance == -0.2);
+    const auto partial_epoch = features.question_epoch();
+    features.publish_question_scores({0.1, 0.25, 0.3}, false);
+    require(features.question_epoch() == partial_epoch);
+    features.publish_output_attention(1, 0.5);
+    require(features.read(meta, descriptor.data(), importance));
+    require(importance == -0.2); // unchanged within the frozen round
+    require(features.begin_round(1));
+    require(features.read(meta, descriptor.data(), importance) && importance == 0.5);
+    const auto epoch = features.question_epoch();
+    features.clear_question();
+    require(features.question_epoch() > epoch);
+    require(features.begin_round(1));
+    require(features.read(meta, descriptor.data(), importance) && importance == 0.0);
+    features.clear_from(1);
+    require(!features.has_page(1) && !features.read(meta, descriptor.data(), importance));
+}
+
+static void truncated_thinking_reopens_candidates() {
+    kvmem::HistoricalKvThinkingRanges thinking;
+    thinking.note(64, 192);
+    thinking.arm();
+    thinking.truncate(128);
+    require(thinking.armed() && thinking.covers(64, 64));
+    thinking.truncate(64);
+    require(!thinking.armed() && !thinking.contains(64));
+}
 
 static void native_page_handoff() {
     kvmem::HistoricalKvPageGc::Config config;
@@ -124,6 +165,8 @@ static void native_page_redundancy_handoff() {
 }
 
 int main() {
+    native_page_feature_snapshot();
+    truncated_thinking_reopens_candidates();
     native_page_handoff();
     native_page_redundancy_handoff();
     constexpr uint32_t page_tokens = 64;
