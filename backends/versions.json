@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "5f523d4cd3f7e20cb59f75b2c1d18f47cb9a32c9",
+    "patched_tree": "a0d2eae15af5f8ed6a7992c6d2d510c3205a7843",
     "patches": [
       {
         "id": "kvmem",
@@ -224,11 +224,11 @@
       {
         "id": "historical-gc-lru",
         "path": "backends/patches/ninfer-historical-gc-lru.patch",
-        "sha256": "8b33f7a8a4c7eec6746d24765c7f6c92b6d75cfe27fe07a5abde740b80107b36",
+        "sha256": "3ce68fa369f8706418e02de1702e4bd118192746dc2d44b162e7876c406415e4",
         "requires": [
           "output-budget"
         ],
-        "after_tree": "5f523d4cd3f7e20cb59f75b2c1d18f47cb9a32c9",
+        "after_tree": "a0d2eae15af5f8ed6a7992c6d2d510c3205a7843",
         "source": "Opt-in native LRU historical Host-page GC with decode-boundary retirement, sparse archive selection and bounded admission"
       }
     ]

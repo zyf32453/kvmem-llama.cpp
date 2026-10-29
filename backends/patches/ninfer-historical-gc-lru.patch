@@ -155,7 +155,7 @@ index 13bee38..00cdca3 100644
          std::min<std::uint64_t>(count, requests.at(sequence.lane).memory_payload_reservation / stride);
      std::shared_ptr<KvmemAppendPreparation::Work> work;
      for (auto id = begin / page_tokens; id < prepare_count; ++id) {
-@@ -616,6 +622,89 @@ bool ProgramImpl::prepare_memory_append(SequenceState& sequence, std::uint32_t b
+@@ -616,6 +622,116 @@ bool ProgramImpl::prepare_memory_append(SequenceState& sequence, std::uint32_t b
      return prepare_memory_append(sequence, begin, end, false);
  }
  
@@ -169,8 +169,11 @@ index 13bee38..00cdca3 100644
 +        const auto slots = static_cast<std::uint32_t>(std::min<std::uint64_t>(
 +            logical_pages, memory_retained_budget / stride));
 +        if (slots < 4) throw std::logic_error("NInfer historical GC needs at least four Host pages");
-+        const auto high = std::min<uint32_t>(slots, std::max<uint32_t>(2, slots / 16));
-+        const auto low = std::max<uint32_t>(1, high / 2);
++        // The Host allocator reserves the next prefill chunk before GC can commit.
++        // Start the worker with five chunks of headroom and refill to six.
++        const auto burst_pages = kv_pages_for_tokens(std::max(prefill_chunk, kvmem_options.reserve_tokens));
++        const auto high = std::min<uint32_t>(slots - 2, std::max<uint32_t>(slots / 16, 6 * burst_pages + 2));
++        const auto low = std::min<uint32_t>(high - 1, std::max<uint32_t>(slots / 32, 5 * burst_pages + 2));
 +        kvmem::HistoricalKvPageGc::Config config;
 +        config.slots = slots;
 +        config.logical_pages = logical_pages;
@@ -204,18 +207,42 @@ index 13bee38..00cdca3 100644
 +        if (const auto* checkpoint = memory_checkpoint(window, kind))
 +            for (const auto id : checkpoint->resident_pages) protect(id);
 +    }
-+    if (window.pending_window || window.pending_append) {
++    if (window.pending_window)
 +        std::fill(window.gc_protected.begin(), window.gc_protected.end(), 1);
-+    }
++    if (window.pending_append && window.pending_append->work)
++        for (const auto id : window.pending_append->work->ids) protect(id);
 +    for (std::uint32_t id = 0; id < count; ++id) {
 +        if (!memory_page_selectable(window, id)) continue;
-+        if (id < window.host_versions.size() && window.host_versions[id] == page_tokens &&
-+            window.archive[id] && !window.archive[id].mutable_resident() && !gc.contains(id)) {
++        if (id < valid_pages && id < window.host_versions.size() &&
++            window.host_versions[id] == page_tokens && window.archive[id] &&
++            (!kvmem_options.disk_bytes || !window.archive[id].mutable_resident()) && !gc.contains(id)) {
 +            if (!gc.register_page(id, window.archive[id].size(), uint64_t(id) + 1))
 +                throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,
 +                    "NInfer historical GC cannot register a sealed Host page");
 +        }
 +        if (gc.contains(id)) gc.protect_page(id, window.gc_protected[id] != 0);
++    }
++    if (kvmem_options.verify_transfers) {
++        uint32_t native = 0, sealed = 0, registered = 0, eligible = 0;
++        for (uint32_t id = 0; id < count; ++id) {
++            const bool record = bool(window.archive[id]);
++            native += record;
++            sealed += record && id < window.host_versions.size() &&
++                window.host_versions[id] == page_tokens &&
++                (!kvmem_options.disk_bytes || !window.archive[id].mutable_resident());
++            if (gc.contains(id) && gc.is_live(id)) {
++                ++registered;
++                eligible += window.gc_protected[id] == 0;
++            }
++        }
++        const auto metrics = gc.stats();
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_STATE frontier=%u archive=%u native=%u sealed=%u registered=%u eligible=%u pending_window=%d pending_append=%d ticks=%llu proposed=%llu committed=%llu reclaimed=%llu\n",
++            sequence.text_kv_valid, count, native, sealed, registered, eligible,
++            int(bool(window.pending_window)), int(bool(window.pending_append)),
++            static_cast<unsigned long long>(metrics.ticks),
++            static_cast<unsigned long long>(metrics.proposed),
++            static_cast<unsigned long long>(metrics.committed),
++            static_cast<unsigned long long>(metrics.reclaimed));
 +    }
 +    const auto& retired = gc.commit_boundary();
 +    std::uint64_t released_bytes = 0;

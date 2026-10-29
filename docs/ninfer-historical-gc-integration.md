@@ -1,127 +1,32 @@
-# Historical KV GC on the NInfer backend: integration record
+# Historical KV GC on NInfer: integration and acceptance record
 
-This branch is an isolated port against the multi-backend `upstream/master` tree.
-The NInfer source now contains an opt-in **LRU** Host-page retirement path,
-reproduced by `backends/patches/ninfer-historical-gc-lru.patch` after the prior
-16 NInfer patches. The portable LRU and redundancy policies both build, but
-the NInfer native path selects LRU only. **No NInfer model run has yet validated
-the new GC path.** Do not report the model checks below as a GC acceptance result.
+This branch ports the portable historical KV manager to the pinned NInfer backend. The native adapter is **opt in** with `--kvmem-gc-lru` and currently implements **LRU Host-page retirement only**. The portable redundancy policy is present in this repository, but NInfer does not yet publish the Mean-K, Query and thinking-range features needed to use that policy honestly. NInfer results must be reported separately from llama.cpp results.
 
-## Integration work in progress on 2026-10-28
+## What changed
 
-- The common working-set contract now keeps a retired page as a tombstone in
-  the contiguous logical catalog. A retired page cannot be selected or copied
-  back to Host when its old GPU view is replaced. A host contract test covers
-  retirement while the page remains resident on the device.
-- The NInfer Query and Pressure candidate lists exclude retired logical pages.
-  A saved checkpoint checks that its own resident pages are available; it no
-  longer requires every earlier logical page to retain Host payload. Host
-  accounting after restore/retention sums actual records rather than assuming
-  a dense archive.
-- The affected host tests (`historical_gc_ninfer_core_test`,
-  `kvmem_store_test`, `memory_contract_test`) pass 3/3 with MinGW. The NInfer
-  CUDA program itself has not been linked or run with these changes. The
-  serving option parser and its new test compile in host-only syntax checks.
-- A host-tested page handoff now connects the portable LRU manager to an
-  exact 64-token logical-page directory. It lets the worker propose a victim,
-  publishes the committed handle at a decode boundary without allocating, and
-  keeps the physical slot unavailable until the native Host owner confirms
-  release. An additional test checks this handoff and protection of the other
-  pages. The NInfer Program now calls this handoff through the opt-in
-  `--kvmem-gc-lru` path: it registers complete sealed pages, protects current
-  and checkpoint-selected rows, commits retirement before the next working-set
-  choice, detaches native Host records, and acknowledges release. This native
-  call path is source-complete for LRU. In an isolated copy on the remote host,
-  `kvmem_window.cpp`, `planning/request_plan.cpp`, `model_instance.cpp`, and
-  the portable page bridge pass low-priority C++ syntax checks with CUDA 13.2
-  headers and the sm_86 build macro in an isolated remote source directory.
-  A complete NInfer
-  build is still unavailable there: host CMake is 3.22 versus the project's
-  3.28 minimum, and the host lacks pkg-config/required FFmpeg development
-  packages. No model/GPU run has been performed for this GC path.
-- A long GC-enabled request now reserves at most the physical Host-page budget
-  at admission; automatic output remains bounded by logical context. The
-  per-step append still prepares every new logical page, so the Host store must
-  actually recover capacity as old pages retire. The first adapter accepts
-  `max_concurrency=1` only because a separate GC directory per sequence cannot
-  yet coordinate a shared Host budget across multiple requests.
-- Native Host release uses a weak allocation ticket. The decode boundary only
-  detaches the old record; the GC worker destroys it. The repository cannot
-  reuse a retired page's slot until all in-flight Host readers have released
-  that allocation. A host test exercises a reader that outlives the archive
-  owner.
-- The patched NInfer source is recorded as the seventeenth ordered patch;
-  `python scripts/prepare-backends.py --backend ninfer --check` reproduces the
-  exact prepared tree. All 25 portable host tests pass on Windows.
-- Native CUDA validation, multi-request capacity coordination, redundancy
-  feature publication and redundancy policy selection are still pending. The
-  ongoing 89-task llama.cpp experiment owns the available remote GPU; do not
-  use its results as NInfer GC evidence.
+- NInfer's 64-token logical Host pages are registered with the portable GC manager only after their native KV version is complete. In RAM-only mode, `HostKvRecord::mutable_resident()` remains true even for complete pages, so the accepted frontier and `host_versions` are the seal signal.
+- Sink, recent, active-window, image, query-selected and checkpoint-resident pages are protected. An in-flight append protects only the pages it touches. A committed victim becomes a tombstone and cannot be selected or recalled; its native Host record is detached at the foreground boundary. The worker releases the record after outstanding readers finish.
+- Sparse-archive Query, Pressure and checkpoint paths skip retired pages. Per-request Host admission is bounded by physical Host capacity. The first adapter permits one active request, since independent sequence directories cannot yet coordinate one shared Host budget.
+- GC pressure starts early enough for the worker and native Host allocator to finish a prefill burst: low ready is at least five prefill bursts plus two pages, and high ready is at least six bursts plus two, bounded by the actual Host slot count. The earlier two-to-five-slot threshold reached the next allocation before the release callback finished.
+- The patch is the seventeenth ordered NInfer patch over pinned commit `63428ac249da`. `backends/versions.json` records the patch hash and exact prepared tree.
 
-## Verified on 2026-10-27
+## Verification on 2026-10-29
 
-- Prepared the pinned NInfer submodule (`63428ac249da`) with the repository's
-  16 integration patches.
-- Built the portable `kvmem` library and passed
-  `historical_gc_ninfer_core_test`, `kvmem_store_test`, and
-  `memory_contract_test` (3/3). The new GC test checks a protected sink page,
-  a recent page, a redundant thinking page, a decode-boundary retirement, and
-  deferred physical-slot reuse while a GPU lease remains.
-- `python scripts/prepare-backends.py --backend ninfer --check` reports the
-  pinned submodule plus all 16 patches ready. Host tests use the MinGW runtime
-  on `PATH` when invoking CTest; without its DLLs, Windows exits with
-  `0xc0000135` before any assertion runs.
-- Downloaded the published IQ3_S NInfer v3 Qwen3.8-27B artifact to
-  `/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3/` on
-  `yifan@100.118.87.22`. Both the model and conversion metadata matched the
-  publisher's SHA256SUMS.
-- The unmodified `ghcr.io/iamwavecut/ninfer-all:cuda12.9` image loaded that
-  artifact on the RTX 3080 Ti Laptop 16 GB and answered a short chat request
-  with `READY`. That smoke request used native NInfer with 8192 context tokens,
-  RK4V4 KV, no KVMem and no GC; its reported generation rate was 32.47 tok/s
-  over only 16 output tokens. It is not a throughput comparison.
-- The same upstream image rejects `--kvmem` as an unknown option. Runtime GC
-  acceptance requires building the **patched** NInfer submodule, rather than
-  using this published upstream image.
+- `python scripts/prepare-backends.py --backend ninfer --check`: passed, pinned submodule plus 17 patches ready.
+- Portable Windows Host suite: 25/25 tests passed, including the page-GC bridge, Host storage, selection and memory-contract tests.
+- A complete patched `ninfer-serve` CUDA sm_86 binary built in an isolated Ubuntu 24.04 container on `yifan@100.118.87.22`. The container supplied the required CMake and FFmpeg development packages; the CUDA toolkit came from the host. The copied source lacks `.git`, so the binary reports build ID unknown; provenance is the local patch manifest, not that runtime string.
+- The patched service loaded Qwen3.8-27B GSQ-RCO IQ3_S NInfer v3 on the 16 GB RTX 3080 Ti Laptop GPU and answered a short KVMem/GC-enabled request with HTTP 200.
+- A 7,651-token prompt, 48-token output limit and 96 MiB Host capacity exercised actual pressure. Configuration: `--kvmem-budget 2048 --kvmem-gen-reserve 512 --kvmem-host-mib 96 --kvmem-gc-lru --prefill-chunk 512 --max-context 8192 --kv-dtype rk4v4 --max-concurrency 1`, with MeanQ cosine working-set selection and device profiling disabled for this smoke test. The request returned HTTP 200. Native logs show LRU retirements beginning at frontier 4,096 and a total of 80 pages proposed, committed and reclaimed. The measured prompt rate was 668 tokens/s and the short 48-token generation averaged 23.3 tokens/s; these are diagnostic observations, not a controlled throughput comparison.
+- A second request with a different prefix returned HTTP 200 and final text `HEALTHY`, confirming the service continued after pressure and Host-page release.
+- After a fresh model start, a 7,657-token variant with a 160-token output limit also triggered LRU retirement and returned HTTP 200 with `finish_reason=stop` and the correct final answer `599`. This checks final output rather than merely surviving a request that ends at its output limit.
+- Earlier runs failed with `native KV RAM capacity exhausted`. The first failure exposed two integration bugs: RAM-only pages were never registered because `mutable_resident()` was used as a seal test, and every pending append protected the entire archive. A later failure exposed a late pressure trigger: 11 pages were marked for retirement at frontier 5,120, but the next Host allocation arrived before their physical release. The fixes above were applied before the successful run.
 
-## Native invariants that the adapter must preserve
+## Current limits and next acceptance
 
-1. NInfer uses fixed 64-token physical pages; its KVMem parser requires at
-   least one 64-token recent page. The first NInfer acceptance therefore uses
-   native 64/64 and reports separately from llama.cpp 32/0.
-2. `KvmemWindowState::archive` is indexed by every logical page. Both
-   `restore_memory_prefix()` and `memory_restorable_history()` currently
-   require *every* page of a checkpointed prefix to have a Host record.
-   Releasing a page without changing these checks breaks query replay and
-   later prefix reuse. A safe sparse archive needs tombstones, selectors that
-   skip tombstones, and checkpoint protection for every resident page a saved
-   checkpoint can restore.
-3. Query replay currently scores all logical page IDs, and Pressure uses the
-   resident page list. Neither excludes GC-retired pages. Both paths must use
-   the same committed retirement state before the next active-window choice.
-4. `planning/request_plan.cpp` used to reserve Host payload for the entire
-   expected prompt plus output before execution. The opt-in LRU path now caps
-   this reservation at the physical Host budget. The runtime can still fail
-   under sudden pressure if the background worker has not freed enough eligible
-   pages by the next append. Such a case must be measured in native model tests;
-   a bounded reservation alone does not guarantee every long request succeeds.
-5. `window.payload_bytes`, active request reservations, retained histories,
-   asynchronous copies and `HostKvRecord` leases all contribute to the
-   allocation lifetime. Marking a page unavailable can happen at a decode
-   boundary; releasing or overwriting its native record must wait until every
-   in-flight transfer, GPU use and checkpoint dependency is safe.
+1. Native NInfer uses 64 tokens per block and at least one recent block. This acceptance is separate from llama.cpp's earlier 32/0 experiment.
+2. Native **redundancy GC is not implemented**. It needs sealed feature publication and a distinct policy flag; choosing LRU victims under a redundancy label would be misleading.
+3. Only the single-request CUDA path, long prefill pressure, decode continuation and a subsequent different-prefix request have been exercised. Prefix reuse, query replay after retirement, MTP accept/rollback, SSD mode, parallel requests, long-running stability and official Terminal-Bench quality remain to be tested before production use.
+4. The 96 MiB Host pool is deliberately small to force GC on an 8K prompt. It is not the proposed 256K historical budget for the full benchmark. The observed speed does not establish that NInfer is faster than llama.cpp on matched hardware and workload.
+5. Debug state logs require `--kvmem-verify-transfers`; the default service does not emit a line per token.
 
-## Remaining integration and acceptance
-
-- Publish sealed Mean-K and query/observation features to the redundancy
-  strategy, then add a separate NInfer policy flag. Keep the working-set
-  selection strategy independent of the Host GC deletion policy.
-- Test the implemented decode-boundary retirement, sparse Query/Pressure
-  filtering, Host release ticket and bounded admission on native CUDA. Cover
-  prefill, decode, query replay, prefix reuse, MTP rollback, capacity pressure
-  and in-flight transfer races with 64-token pages.
-- Build the patched NInfer worker on the remote CUDA toolchain and run the
-  IQ3_S model with the agreed native 64/64 layout. Only then compare no-GC,
-  LRU and redundancy with identical NInfer settings and official task rewards.
-
-The portable strategy tests alone do not establish native NInfer compatibility.
+The remote test source and binary are isolated under `/tmp/kvmem-ninfer-gc-20261028`; no model weights were copied into that directory.
