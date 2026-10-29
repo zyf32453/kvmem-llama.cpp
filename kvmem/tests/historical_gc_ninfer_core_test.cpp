@@ -80,8 +80,52 @@ static void native_page_handoff() {
     require(delayed.is_live(1));
 }
 
+static void native_page_redundancy_handoff() {
+    kvmem::HistoricalKvPageGc::Config config;
+    config.slots = 5;
+    config.logical_pages = 5;
+    config.page_tokens = 64;
+    config.sink_tokens = 64;
+    config.recent_tokens = 64;
+    config.low_ready = 1;
+    config.high_ready = 2;
+    config.batch_blocks = 5;
+    auto thinking = std::make_shared<kvmem::HistoricalKvThinkingRanges>();
+    thinking->note(64, 256);
+    thinking->arm();
+    kvmem::HistoricalKvRedundancyPolicy::Config policy_config;
+    policy_config.thinking = thinking;
+    policy_config.pool_blocks = 5;
+    policy_config.segment_blocks = 3;
+    auto source = std::make_shared<PageFeatures>();
+    kvmem::HistoricalKvPageGc bridge(config,
+        std::make_unique<kvmem::HistoricalKvRedundancyPolicy>(5, source, policy_config));
+    for (uint32_t page = 0; page < 5; ++page)
+        require(bridge.register_page(page, 1024, page + 1));
+    for (uint32_t page = 1; page < 4; ++page) bridge.protect_page(page, false);
+    for (int i = 0; i < 20 && bridge.stats().proposed < 2; ++i) bridge.manual_tick();
+    require(bridge.stats().proposed == 2);
+    const auto metrics = bridge.policy_metrics();
+    require(metrics.comparisons >= 3);
+    require(metrics.lossy_intents == 0);
+    const auto& retired = bridge.commit_boundary();
+    require(retired.size() == 2);
+    require(bridge.is_live(0) && bridge.is_live(4));
+    kvmem::HostKvStorage native_host(2048);
+    for (const auto& page : retired) {
+        require(page.page > 0 && page.page < 4);
+        auto record = native_host.allocate(128);
+        record.seal();
+        bridge.acknowledge_host_release(page, std::move(record));
+    }
+    for (int i = 0; i < 20 && bridge.stats().reclaimed < 2; ++i) bridge.manual_tick();
+    require(bridge.stats().reclaimed == 2);
+    require(native_host.charged_bytes() == 0);
+}
+
 int main() {
     native_page_handoff();
+    native_page_redundancy_handoff();
     constexpr uint32_t page_tokens = 64;
     auto repository = std::make_shared<kvmem::HistoricalKvRepository>(3, 0, page_tokens, page_tokens);
     std::atomic<unsigned> releases{0};

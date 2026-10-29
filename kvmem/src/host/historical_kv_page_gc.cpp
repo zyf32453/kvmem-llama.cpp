@@ -68,13 +68,16 @@ private:
 };
 
 HistoricalKvPageGc::HistoricalKvPageGc(Config config)
+    : HistoricalKvPageGc(config, std::make_unique<HistoricalKvLruPolicy>(config.slots)) {}
+
+HistoricalKvPageGc::HistoricalKvPageGc(Config config, std::unique_ptr<HistoricalKvPolicy> inner)
     : config_(config),
       releases_(std::make_shared<ReleaseState>(config.logical_pages, config.slots)),
       repository_(std::make_shared<HistoricalKvRepository>(
           config.slots, 0, config.sink_tokens, config.recent_tokens)),
       handles_(config.logical_pages),
       slot_to_page_(config.slots, UINT32_MAX) {
-    if (!config.slots || !config.logical_pages || !config.batch_blocks ||
+    if (!inner || !config.slots || !config.logical_pages || !config.batch_blocks ||
         !config.page_tokens || !config.low_ready || config.low_ready >= config.high_ready ||
         config.high_ready > config.slots || !config.poll_ms)
         throw std::invalid_argument("NInfer historical GC page capacity/watermarks");
@@ -90,8 +93,7 @@ HistoricalKvPageGc::HistoricalKvPageGc(Config config)
     gc.retire_at_decode_boundary = true;
     gc.on_boundary_retired = &HistoricalKvPageGc::on_retired;
     gc.boundary_context = this;
-    auto lru = std::make_unique<HistoricalKvLruPolicy>(config.slots);
-    auto policy = std::make_unique<ProtectedPolicy>(std::move(lru), releases_, config.slots);
+    auto policy = std::make_unique<ProtectedPolicy>(std::move(inner), releases_, config.slots);
     manager_ = std::make_unique<HistoricalKvGc>(repository_, std::move(policy), gc);
 }
 
@@ -180,5 +182,8 @@ bool HistoricalKvPageGc::is_live(uint32_t page) const noexcept {
 }
 
 HistoricalKvGc::Stats HistoricalKvPageGc::stats() const { return manager_->stats(); }
+HistoricalKvPolicy::Metrics HistoricalKvPageGc::policy_metrics() const noexcept {
+    return manager_->policy_metrics();
+}
 
 } // namespace kvmem

@@ -34,6 +34,9 @@ public:
     };
 
     explicit HistoricalKvPageGc(Config config);
+    // A native backend may inject a strategy; the bridge still owns protection,
+    // boundary retirement and physical Host-record release.
+    HistoricalKvPageGc(Config config, std::unique_ptr<HistoricalKvPolicy> policy);
     ~HistoricalKvPageGc();
     HistoricalKvPageGc(const HistoricalKvPageGc &) = delete;
     HistoricalKvPageGc & operator=(const HistoricalKvPageGc &) = delete;
@@ -59,6 +62,7 @@ public:
     bool contains(uint32_t page) const noexcept;
     bool is_live(uint32_t page) const noexcept;
     HistoricalKvGc::Stats stats() const;
+    HistoricalKvPolicy::Metrics policy_metrics() const noexcept;
 
 private:
     struct ReleaseState;
