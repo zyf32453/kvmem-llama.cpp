@@ -86,6 +86,9 @@ struct BlockDescriptor {
 struct BlockCopies {
     BlockDescriptor block;
     uint64_t host_version = 0; // zero: no host copy; smaller: stale copy
+    // Logical history remains contiguous after Host GC, but this generation
+    // has been retired and cannot be selected or spilled again.
+    bool retired = false;
 };
 struct MemoryStamp {
     bool valid = false;

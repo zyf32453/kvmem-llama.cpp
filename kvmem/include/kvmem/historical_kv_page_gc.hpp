@@ -1,0 +1,76 @@
+#pragma once
+
+#include "kvmem/historical_kv_gc.hpp"
+#include "kvmem/host_kv_storage.hpp"
+
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+namespace kvmem {
+
+// One NInfer logical-history owner. The background manager never touches the
+// native archive. The serialized request owner registers sealed pages, updates
+// protection, commits at a decode boundary, drops exact Host records, and then
+// acknowledges physical release. This object has a stable address across a
+// movable native sequence/window and must outlive its GC manager.
+class HistoricalKvPageGc final {
+public:
+    struct Config {
+        uint32_t slots = 0;
+        uint32_t logical_pages = 0;
+        uint32_t page_tokens = 64;
+        uint64_t sink_tokens = 0;
+        uint64_t recent_tokens = 0;
+        uint32_t low_ready = 0;
+        uint32_t high_ready = 0;
+        uint32_t batch_blocks = 64;
+        uint32_t poll_ms = 25;
+    };
+    struct RetiredPage {
+        uint32_t page = 0;
+        HistoricalKvHandle handle{};
+    };
+
+    explicit HistoricalKvPageGc(Config config);
+    ~HistoricalKvPageGc();
+    HistoricalKvPageGc(const HistoricalKvPageGc &) = delete;
+    HistoricalKvPageGc & operator=(const HistoricalKvPageGc &) = delete;
+
+    // Register only a fully captured, sealed native page. A failed admission
+    // leaves the page unregistered; the caller must not continue silently.
+    bool register_page(uint32_t page, uint64_t payload_bytes, uint64_t birth_seq);
+    // The request owner updates this before each boundary. Protection includes
+    // sink/recent, media, current view, checkpoint restore rows and in-flight IO.
+    void protect_page(uint32_t page, bool protect) noexcept;
+    void note_use(uint32_t page, uint64_t sequence) noexcept;
+    void request_capacity(uint32_t ready);
+    void start();
+    void manual_tick();
+    // Returned pages are stable until the next commit_boundary() call. The
+    // caller must mark each page unavailable before another working-set choice.
+    const std::vector<RetiredPage> & commit_boundary() noexcept;
+    // Move the exact native owner out of the selectable archive at the boundary.
+    // The worker destroys it later, then waits for any in-flight Host readers
+    // before this repository slot can be reused. No payload free occurs here.
+    void acknowledge_host_release(const RetiredPage & page,
+                                  HostKvRecord record) noexcept;
+    bool contains(uint32_t page) const noexcept;
+    bool is_live(uint32_t page) const noexcept;
+    HistoricalKvGc::Stats stats() const;
+
+private:
+    struct ReleaseState;
+    class ProtectedPolicy;
+    static void on_retired(void * context, HistoricalKvHandle handle) noexcept;
+    const Config config_;
+    std::shared_ptr<ReleaseState> releases_;
+    std::shared_ptr<HistoricalKvRepository> repository_;
+    std::unique_ptr<HistoricalKvGc> manager_;
+    std::vector<HistoricalKvHandle> handles_;
+    std::vector<uint32_t> slot_to_page_;
+    std::vector<RetiredPage> committed_;
+};
+
+} // namespace kvmem

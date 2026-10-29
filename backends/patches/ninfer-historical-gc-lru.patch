@@ -1,0 +1,419 @@
+diff --git a/include/ninfer/engine_options.h b/include/ninfer/engine_options.h
+index 25e8882..21b571b 100644
+--- a/include/ninfer/engine_options.h
++++ b/include/ninfer/engine_options.h
+@@ -434,6 +434,9 @@ struct KvmemOptions {
+     std::uint32_t sink_tokens = 0;
+     std::uint32_t recent_tokens = 64;
+     std::uint64_t host_bytes = 0;      // H; hard bound on archived native payload
++    // Opt-in native Host-page retirement. First NInfer adapter supports LRU;
++    // the existing working-set retrieval strategy remains independent.
++    bool historical_gc_lru = false;
+     [[nodiscard]] std::uint32_t sink_blocks() const noexcept {
+         return sink_tokens < 64 ? 1U : sink_tokens / 64U;
+     }
+diff --git a/src/models/qwen3_5/program/planning/request_plan.cpp b/src/models/qwen3_5/program/planning/request_plan.cpp
+index b27cb12..6379f41 100644
+--- a/src/models/qwen3_5/program/planning/request_plan.cpp
++++ b/src/models/qwen3_5/program/planning/request_plan.cpp
+@@ -270,12 +270,13 @@ KVEntitlementShape ProgramImpl::kv_entitlement_shape() const noexcept {
+ }
+ 
+ std::uint32_t ProgramImpl::concurrent_output_budget(std::uint32_t prompt_tokens) const noexcept {
+-    // KVMem recycles its B+R device window, but admission reserves the complete retained
+-    // history. Automatic output must fit that RAM/SSD payload budget as well as context;
+-    // otherwise even a short request fails when H/D cannot hold the maximum context.
++    // Without historical GC, admission reserves the complete retained history.
++    // With GC, old Host pages may be retired as output grows, so the logical
++    // context rather than the physical Host tier bounds automatic output.
+     if (kvmem_window_tokens) {
+         if (prompt_tokens == 0 || prompt_tokens > capacity) return 0U;
+         const auto remaining = capacity - prompt_tokens + 1U;
++        if (kvmem_options.historical_gc_lru) return remaining;
+         const auto page_bytes = text_host_kv_page_stride + backend_host_kv_page_stride;
+         if (!page_bytes) return remaining;
+         const auto pages = std::min<std::uint64_t>(kv_pages_for_tokens(capacity),
+@@ -479,9 +480,9 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
+     }
+     if (kvmem_window_tokens) {
+         (void)memory_image_pages(prompt);
+-        // Active requests reserve their complete history across common H/D storage.
+-        // Reject a known budget shortfall while the request is still Waiting;
+-        // running out during prefill is not an unexpected worker/device failure.
++        // Active requests reserve their physical Host entitlement. GC-enabled
++        // requests may have a longer logical history than the Host tier; the
++        // sealed old pages are retired at later execution boundaries.
+         const auto frontier = base->summary.prompt_tokens +
+             (base->summary.effective_output_tokens ? base->summary.effective_output_tokens - 1U : 0U);
+         const bool retain_history = options.allow_prefix_reuse && prompt.identity.reusable;
+@@ -490,11 +491,12 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
+             const auto pages = kv_pages_for_tokens(frontier);
+             const auto page_bytes = host_layout.page_stride + (backend_kv_pages
+                 ? plan_host_kv_page_layout(backend_kv_pages->physical_pool().geometry()).page_stride : 0);
+-            if (pages > memory_retained_budget / page_bytes) {
++            const auto host_pages = memory_retained_budget / page_bytes;
++            if (pages > host_pages && !kvmem_options.historical_gc_lru) {
+                 throw RequestError(RequestErrorKind::ContextLengthExceeded,
+                     "KVMem retained payload budget cannot reserve the requested token history");
+             }
+-            base->memory_payload_reservation = pages * page_bytes;
++            base->memory_payload_reservation = std::min<std::uint64_t>(pages, host_pages) * page_bytes;
+         }
+         base->text_kv_page_entitlement = kv_pages_for_tokens(kvmem_window_tokens);
+         if (backend_kv_pages) base->backend_kv_page_entitlement = kv_pages_for_tokens(kvmem_window_tokens);
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index 50cd741..4252f92 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -15,6 +15,7 @@
+ #include "kvmem/kvmem_store.hpp"
+ #include "kvmem/mean_key_retrieval.hpp"
+ #include "kvmem/graph_recall.hpp"
++#include "kvmem/historical_kv_page_gc.hpp"
+ #include "kvmem/page_softmax_cuda.hpp"
+ #include "kvmem/spill_io.hpp"
+ #include "core/disk_kv_bridge.h"
+@@ -640,6 +641,14 @@ struct KvmemWindowState {
+     std::vector<std::uint32_t> media_pages;
+     std::vector<KvmemHostRecord> archive;
+     std::vector<std::uint64_t> host_versions;
++    // Retirement is published at a decode boundary before the Host record is
++    // physically released. A retired logical page must never enter a later
++    // Query or Pressure working set, even while its bytes still have readers.
++    std::vector<std::uint8_t> retired_pages;
++    // The bridge is stable while this movable window passes between a live
++    // sequence and retained history. It owns the policy worker, not native KV.
++    std::unique_ptr<kvmem::HistoricalKvPageGc> historical_gc;
++    std::vector<std::uint8_t> gc_protected;
+     kvmem::MemoryStamp stamp;
+     std::uint64_t payload_bytes = 0;
+     std::uint64_t spilled_bytes = 0, restored_bytes = 0;
+@@ -680,6 +689,9 @@ struct KvmemWindowState {
+     // Last member: abort/drain the transaction before its source archive dies.
+     std::unique_ptr<kvmem::MemorySession> pending_window;
+ };
++inline bool memory_page_selectable(const KvmemWindowState& window, std::uint32_t id) noexcept {
++    return id >= window.retired_pages.size() || window.retired_pages[id] == 0;
++}
+ inline std::vector<KvmemCheckpointKind> checkpoint_kinds(const KvmemWindowState& window) {
+     std::vector<KvmemCheckpointKind> result(kKvmemCheckpointKinds.begin(), kKvmemCheckpointKinds.end());
+     for (size_t i=0; i<window.coverage.slots(); ++i) if (window.coverage.at(i) && window.coverage.at(i)->record.data)
+@@ -2121,6 +2133,7 @@ private:
+                         bool force_selection = false, bool allow_pending = false,
+                         kvmem::SelectionReason reason = kvmem::SelectionReason::PrefillPressure);
+     void archive_memory_window(SequenceState& sequence);
++    void progress_historical_gc(SequenceState& sequence);
+     qwen3_5::TokenSpan memory_query_span(const PreparedPromptData& prompt) const {
+         return bounded_memory_query(prompt,kvmem_options.query_max_tokens);
+     }
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 13bee38..00cdca3 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -47,6 +47,7 @@ public:
+         // Keep them until publication or explicit history truncation.
+         if (sequence.window.archive.size() < count) sequence.window.archive.resize(count);
+         if (sequence.window.host_versions.size() < count) sequence.window.host_versions.resize(count);
++        if (sequence.window.retired_pages.size() < count) sequence.window.retired_pages.resize(count);
+     }
+ 
+     kvmem::MemoryDescriptor descriptor() const override {
+@@ -114,7 +115,8 @@ public:
+         for (std::uint32_t id = 0; id < count; ++id) {
+             const auto columns = valid_columns(id, sequence.text_kv_valid);
+             s.blocks.push_back({{s.stamp.session, id, id * page_tokens, columns, columns, 0},
+-                sequence.window.host_versions.at(id)});
++                sequence.window.host_versions.at(id),
++                !memory_page_selectable(sequence.window, id)});
+         }
+         for (auto id : sequence.window.pages) {
+             if (id < count) { s.resident.push_back(id); }
+@@ -152,6 +154,7 @@ public:
+         for (std::uint32_t slot = 0; slot < seq.window.pages.size(); ++slot) {
+             const auto id = seq.window.pages[slot];
+             if (id >= count) { continue; }
++            if (!memory_page_selectable(seq.window, id)) continue;
+             if (!seq.window.archive[id]) {
+                 if (bytes > p.memory_retained_budget ||
+                     backend.page_bytes > p.memory_retained_budget - bytes) {
+@@ -450,6 +453,9 @@ public:
+         seq.window.pages = std::move(selected);
+         seq.window.stamp = view.stamp;
+         ++seq.window.swaps;
++        if (seq.window.historical_gc)
++            for (const auto id : seq.window.pages)
++                seq.window.historical_gc->note_use(id, seq.text_kv_valid);
+         published = true;
+         if (p.kvmem_options.verify_transfers) {
+             std::fprintf(stderr, "KVMEM_NATIVE_VIEW logical=%u compact=%llu physical_pages=%u host_bytes=%llu swap=%u payload_exact=1 state_exact=1\n",
+@@ -586,7 +592,7 @@ bool ProgramImpl::prepare_memory_append(SequenceState& sequence, std::uint32_t b
+     // Speculative device mappings can extend beyond the request's output limit.
+     // RAM lookahead may prepare only the history admitted for this request;
+     // those extra device positions never need durable Host records.
+-    const auto prepare_count = kvmem_options.disk_bytes ? count :
++    const auto prepare_count = (kvmem_options.disk_bytes || kvmem_options.historical_gc_lru) ? count :
+         std::min<std::uint64_t>(count, requests.at(sequence.lane).memory_payload_reservation / stride);
+     std::shared_ptr<KvmemAppendPreparation::Work> work;
+     for (auto id = begin / page_tokens; id < prepare_count; ++id) {
+@@ -616,6 +622,89 @@ bool ProgramImpl::prepare_memory_append(SequenceState& sequence, std::uint32_t b
+     return prepare_memory_append(sequence, begin, end, false);
+ }
+ 
++void ProgramImpl::progress_historical_gc(SequenceState& sequence) {
++    if (!kvmem_options.historical_gc_lru) return;
++    auto& window = sequence.window;
++    const auto stride = text_host_kv_page_stride + backend_host_kv_page_stride;
++    if (!stride) throw std::logic_error("NInfer historical GC has no native Host page layout");
++    if (!window.historical_gc) {
++        const auto logical_pages = kv_pages_for_tokens(capacity);
++        const auto slots = static_cast<std::uint32_t>(std::min<std::uint64_t>(
++            logical_pages, memory_retained_budget / stride));
++        if (slots < 4) throw std::logic_error("NInfer historical GC needs at least four Host pages");
++        const auto high = std::min<uint32_t>(slots, std::max<uint32_t>(2, slots / 16));
++        const auto low = std::max<uint32_t>(1, high / 2);
++        kvmem::HistoricalKvPageGc::Config config;
++        config.slots = slots;
++        config.logical_pages = logical_pages;
++        config.page_tokens = page_tokens;
++        config.sink_tokens = uint64_t(kvmem_options.sink_blocks()) * page_tokens;
++        config.recent_tokens = uint64_t(kvmem_options.recent_blocks()) * page_tokens;
++        config.low_ready = low;
++        config.high_ready = high;
++        window.historical_gc = std::make_unique<kvmem::HistoricalKvPageGc>(config);
++        window.historical_gc->start();
++    }
++    auto& gc = *window.historical_gc;
++    const auto count = static_cast<std::uint32_t>(window.archive.size());
++    if (window.retired_pages.size() < count) window.retired_pages.resize(count);
++    if (window.gc_protected.size() < count) window.gc_protected.resize(count);
++    std::fill(window.gc_protected.begin(), window.gc_protected.end(), 0);
++    const auto protect = [&](std::uint32_t id) {
++        if (id < count) window.gc_protected[id] = 1;
++    };
++    for (std::uint32_t id = 0; id < std::min(count, kvmem_options.sink_blocks()); ++id) protect(id);
++    // The archive can contain preallocated lookahead pages. Recent protection
++    // follows the accepted KV frontier, not the last allocated archive slot.
++    const auto valid_pages = std::min(count, kv_pages_for_tokens(sequence.text_kv_valid));
++    const auto recent = std::min(valid_pages, kvmem_options.recent_blocks());
++    for (std::uint32_t id = valid_pages - recent; id < valid_pages; ++id) protect(id);
++    for (const auto id : window.media_pages) protect(id);
++    for (const auto id : window.pages) protect(id);
++    for (const auto id : window.query_selected) protect(id);
++    for (const auto id : window.query_required) protect(id);
++    for (const auto kind : checkpoint_kinds(window)) {
++        if (const auto* checkpoint = memory_checkpoint(window, kind))
++            for (const auto id : checkpoint->resident_pages) protect(id);
++    }
++    if (window.pending_window || window.pending_append) {
++        std::fill(window.gc_protected.begin(), window.gc_protected.end(), 1);
++    }
++    for (std::uint32_t id = 0; id < count; ++id) {
++        if (!memory_page_selectable(window, id)) continue;
++        if (id < window.host_versions.size() && window.host_versions[id] == page_tokens &&
++            window.archive[id] && !window.archive[id].mutable_resident() && !gc.contains(id)) {
++            if (!gc.register_page(id, window.archive[id].size(), uint64_t(id) + 1))
++                throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,
++                    "NInfer historical GC cannot register a sealed Host page");
++        }
++        if (gc.contains(id)) gc.protect_page(id, window.gc_protected[id] != 0);
++    }
++    const auto& retired = gc.commit_boundary();
++    std::uint64_t released_bytes = 0;
++    for (const auto& page : retired) {
++        const auto id = page.page;
++        if (id >= count || window.gc_protected[id])
++            throw std::logic_error("NInfer historical GC retired a protected page");
++        const auto bytes = window.archive[id].size();
++        if (id >= window.host_versions.size() || bytes > window.payload_bytes)
++            throw std::logic_error("NInfer historical GC Host accounting underflow");
++        window.retired_pages[id] = 1;
++        auto detached_record = std::move(window.archive[id]);
++        window.host_versions[id] = 0;
++        window.payload_bytes -= bytes;
++        released_bytes += bytes;
++        gc.acknowledge_host_release(page, std::move(detached_record));
++    }
++    if (!retired.empty()) {
++        ++window.stamp.history_revision;
++        if (kvmem_options.verify_transfers)
++            std::fprintf(stderr, "KVMEM_NATIVE_GC policy=lru frontier=%u retired=%zu host_bytes=%llu\n",
++                sequence.text_kv_valid, retired.size(),
++                static_cast<unsigned long long>(released_bytes));
++    }
++}
++
+ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, std::uint32_t end,
+                                   bool force_selection, bool allow_pending, kvmem::SelectionReason reason) {
+     if (!kvmem_window_tokens) { return true; }
+@@ -623,6 +712,7 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         end - begin > kvmem_options.reserve_tokens) {
+         throw std::logic_error("KVMem append exceeds logical frontier or reserve");
+     }
++    progress_historical_gc(sequence);
+     auto& pending = sequence.window.pending_window;
+     if (pending) {
+         if (sequence.window.pending_window_begin != begin ||
+@@ -696,7 +786,9 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         } else {
+             std::vector<std::uint32_t> candidates;
+             std::vector<std::uint64_t> starts;
+-            for(auto id:state.pages) if(id<count) { candidates.push_back(id); starts.push_back(std::uint64_t(id)*64); }
++            for(auto id:state.pages) if(id<count && memory_page_selectable(state,id)) {
++                candidates.push_back(id); starts.push_back(std::uint64_t(id)*64);
++            }
+             const std::vector<std::uint32_t> required(mandatory.begin(),mandatory.end());
+             for(auto id:required) if(std::find(candidates.begin(),candidates.end(),id)==candidates.end() && count)
+                 throw std::logic_error("KVMem pressure cannot recall a cold mandatory page");
+@@ -785,6 +877,7 @@ void ProgramImpl::archive_memory_window(SequenceState& sequence) {
+     kvmem::WorkingSetPlan plan;
+     plan.expected = snapshot.stamp;
+     for (auto id : snapshot.resident) {
++        if (!memory_page_selectable(sequence.window, static_cast<std::uint32_t>(id))) continue;
+         const auto& block = snapshot.blocks.at(static_cast<std::size_t>(id));
+         plan.next.blocks.push_back({block.block, plan.next.visible_tokens});
+         plan.next.visible_tokens += block.block.valid_tokens;
+@@ -1245,7 +1338,9 @@ bool ProgramImpl::rewind_memory_query(SequenceState& sequence) {
+     score_memory_query(sequence,window.query_required,&checkpoint);
+     std::vector<uint32_t> candidates;
+     std::vector<double> scores;
+-    for(uint32_t id=0;id<pages;++id) {candidates.push_back(id);scores.push_back(window.selector->selection_score(id));}
++    for(uint32_t id=0;id<pages;++id) if(memory_page_selectable(window,id)) {
++        candidates.push_back(id);scores.push_back(window.selector->selection_score(id));
++    }
+     window.query_selected=window.selector->pick_scored_blocks(candidates,scores,window.query_required,
+         kvmem_options.selected_tokens/page_tokens,true);
+ #ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
+@@ -1301,9 +1396,13 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+     // All prefix records were made durable at capture. Query appends cannot alter
+     // native values/scales in earlier rows; the partial page is explicitly clipped.
+     const auto pages = kv_pages_for_tokens(frontier);
+-    if (window.archive.size() < pages) throw std::logic_error("KVMem checkpoint lost Host prefix");
+-    for (std::uint32_t id = 0; id < pages; ++id) {
+-        if (!window.archive[id] || window.host_versions[id] < valid_columns(id, frontier)) {
++    if (window.archive.size() < pages || window.host_versions.size() < pages)
++        throw std::logic_error("KVMem checkpoint lost Host prefix");
++    // A sparse history need only retain the pages the checkpoint actually
++    // restores. Later Query selection is restricted to still-live pages.
++    for (const auto id : checkpoint.resident_pages) {
++        if (id >= pages || !memory_page_selectable(window,id) ||
++            !window.archive[id] || window.host_versions[id] < valid_columns(id, frontier)) {
+             throw std::logic_error("KVMem checkpoint has an incomplete native prefix");
+         }
+     }
+@@ -1332,9 +1431,14 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+     // generation parser state. A resumed native continuation restores its own.
+     if(preserve_view) window.attention_scope=checkpoint.attention_scope;
+     window.statistics_frontier = frontier;
++    // Rewinding destroys suffix records. Retire the old page directory with
++    // its worker before those logical IDs can be reused by a new suffix.
++    window.historical_gc.reset();
+     window.archive.resize(pages);
+     window.host_versions.resize(pages);
+-    window.payload_bytes = pages * backend.page_bytes;
++    window.retired_pages.resize(pages);
++    window.payload_bytes = 0;
++    for (const auto& record : window.archive) window.payload_bytes += record.size();
+     if (frontier % page_tokens) window.host_versions.back() = frontier % page_tokens;
+     // A consumed history has one archive. Rewinding explicitly revokes later states
+     // before their payload/statistics can be overwritten; no full-history COW is needed.
+@@ -1435,8 +1539,11 @@ std::optional<KvmemHistoryMatch> ProgramImpl::memory_restorable_history(const Pr
+                 frontier == checkpoint.identity.stamp.frontier && history->statistics && history->selector &&
+                 history->statistics_frontier >= frontier && history->archive.size() >= pages &&
+                 history->host_versions.size() >= pages;
+-            for (std::uint32_t page = 0; complete && page < pages; ++page)
+-                complete = history->archive[page] && history->host_versions[page] >= valid_columns(page, frontier);
++            for (const auto page : checkpoint.resident_pages) {
++                if (!complete) break;
++                complete = page < pages && memory_page_selectable(*history,page) &&
++                    history->archive[page] && history->host_versions[page] >= valid_columns(page, frontier);
++            }
+             if (!complete) { ++incomplete; return false; }
+             if (frontier >= prompt.token_ids.size() ||
+                 !std::equal(checkpoint.prefix.begin(), checkpoint.prefix.end(), prompt.token_ids.begin())) {
+@@ -1815,12 +1922,14 @@ void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestCo
+     const auto pages = kv_pages_for_tokens(frontier);
+     if (!pages || pages > window.archive.size() || pages > window.host_versions.size() ||
+         !window.archive.front()) return;
+-    const auto page_bytes = window.archive.front().size();
+     // All slots share one archive through the latest complete checkpoint.
+     // Uncommitted/cancelled rows past that frontier are never retained.
++    window.historical_gc.reset();
+     window.archive.resize(pages);
+     window.host_versions.resize(pages);
+-    window.payload_bytes = pages * page_bytes;
++    window.retired_pages.resize(pages);
++    window.payload_bytes = 0;
++    for (const auto& record : window.archive) window.payload_bytes += record.size();
+     std::optional<std::size_t> destination;
+     std::optional<std::size_t> oldest;
+     std::size_t count = 0;
+diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
+index 1e527a1..8f02b59 100644
+--- a/src/runtime/engine/model_instance.cpp
++++ b/src/runtime/engine/model_instance.cpp
+@@ -322,9 +322,13 @@ EngineOptions normalize_engine_options(EngineOptions options) {
+         throw std::invalid_argument("KVMem retrieval options require selected_tokens");
+     if (!options.kvmem.selected_tokens &&
+         (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
++         options.kvmem.historical_gc_lru ||
+          !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes)) {
+         throw std::invalid_argument("KVMem auxiliary budgets require selected_tokens");
+     }
++    if (options.kvmem.historical_gc_lru && options.max_concurrency != 1) {
++        throw std::invalid_argument("NInfer historical GC currently requires max_concurrency=1");
++    }
+     if (options.kvmem.selected_tokens != 0) {
+         if (options.expert_residency != ExpertResidency::Device) {
+             throw std::invalid_argument("KVMem does not support host/disk routed expert residency");
+diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
+index 59cf2e4..3fc929d 100644
+--- a/src/serve/serve_options.cpp
++++ b/src/serve/serve_options.cpp
+@@ -107,6 +107,7 @@ std::string serve_usage_text(const char* argv0) {
+            "  --kvmem-query-max-tokens N  cap per-token Query capture to its tail (default 512)\n"
+             "  --kvmem-gen-reserve N         positive append workspace R (default 1024), rounded down to 64\n"
+            "  --kvmem-host-mib N            positive Host native KV payload budget H, MiB (default 16384)\n"
++           "  --kvmem-gc-lru               retire cold sealed Host pages between decode rounds (default off)\n"
+            "  --kvmem-sink-tokens N         always-kept prefix; default 0 = one 64-token\n"
+            "                                page; positive values round down, minimum one page\n"
+            "  --kvmem-recent-tokens N       always-kept newest suffix; default 64 (one page);\n"
+@@ -726,6 +727,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+             options.kvmem.verify_transfers = true;
+             continue;
+         }
++        if (arg == "--kvmem-gc-lru") {
++            options.kvmem.historical_gc_lru = true;
++            continue;
++        }
+         if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
+             // --vram-headroom-mib is the Wallawalla47 fork's name for the same headroom.
+             const std::uint64_t mib = parse_u64(require_value(arg.c_str()), arg.c_str() + 2);
+@@ -2022,6 +2027,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+         // is disabled here; KVMem owns the current session's trusted checkpoint.
+         options.context_cache.enabled = false;
+     } else if (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
++         options.kvmem.historical_gc_lru ||
+          !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes) {
+         throw std::invalid_argument("KVMem auxiliary options require --kvmem-budget");
+     }
+diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
+index e05cd57..f7b0288 100644
+--- a/tests/test_serve_options.cpp
++++ b/tests/test_serve_options.cpp
+@@ -161,6 +161,16 @@ int run_serve_option_tests() {
+         "--kvmem-budget", "384", "--kvmem-gen-reserve", "128", "--kvmem-host-mib", "16384"};
+     const auto kvmem = parse(memory_args);
+     const auto kvmem_engine = make_engine_options(kvmem);
++    {
++        auto args = memory_args;
++        args.push_back("--kvmem-gc-lru");
++        failures += check(make_engine_options(parse(args)).kvmem.historical_gc_lru,
++                          "NInfer lost the explicit historical LRU GC selection");
++        bool rejected = false;
++        try { (void)parse({"ninfer-serve", "model.ninfer", "--kvmem-gc-lru"}); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        failures += check(rejected, "historical GC was accepted without KVMem");
++    }
+     {
+         const auto boundary = make_engine_options(parse({"ninfer-serve", "model.ninfer", "--max-context", "256",
+             "--kvmem-budget", "129", "--kvmem-gen-reserve", "129", "--prefill-chunk", "128"}));

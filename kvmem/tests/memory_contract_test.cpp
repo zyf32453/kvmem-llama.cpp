@@ -301,11 +301,46 @@ static void policy_and_checkpoint() {
         CHECK(!ck.compatible_with(changed));
     }
 }
+static void retired_host_page() {
+    auto be = std::make_shared<TestBackend>(0);
+    // Page 1 is still mapped in the old device view when its Host generation
+    // retires. The next selection must remove it without copying it to Host.
+    be->state.blocks[1].retired = true;
+    be->state.blocks[1].host_version = 0;
+    MemorySession session(be);
+    rejects(MemoryErrorCode::InvalidPlan, [&] {
+        session.prepare(be->stamp(), {0, 1, 5}, {0}, be->budget());
+    });
+    const auto& plan = session.prepare(be->stamp(), {0, 4, 5}, {0}, be->budget());
+    CHECK(plan.evict.size() == 3);
+    CHECK(std::none_of(plan.spill.begin(), plan.spill.end(),
+        [](const BlockDescriptor& block) { return block.id == 1; }));
+    CHECK(plan.host_payload_bytes_required == 4 * be->desc.layout.record_bytes);
+    ready(session, *be);
+    session.publish();
+    CHECK(be->state.resident == std::vector<uint64_t>({0, 4, 5}));
+    rejects(MemoryErrorCode::InvalidPlan, [&] {
+        session.prepare(be->stamp(), {0, 1, 5}, {0}, be->budget());
+    });
+    // Marking is earlier than physical Host release. Until the old record is
+    // actually gone, it still consumes the Host budget without being selectable.
+    auto leased = std::make_shared<TestBackend>(0);
+    leased->host.put(payload(leased->desc, leased->state.blocks[1].block));
+    leased->state.blocks[1].host_version = 1;
+    leased->state.blocks[1].retired = true;
+    MemorySession pending_release(leased);
+    const auto& charged = pending_release.prepare(leased->stamp(), {0, 4, 5}, {0}, leased->budget());
+    CHECK(charged.host_payload_bytes_required == 5 * leased->desc.layout.record_bytes);
+    CHECK(std::none_of(charged.spill.begin(), charged.spill.end(),
+        [](const BlockDescriptor& block) { return block.id == 1; }));
+    CHECK(pending_release.abort() == AbortResult::PreviousViewPreserved);
+}
 int main() {
     for (int profile = 0; profile < 3; ++profile) success(profile);
     planning_failures();
     no_op_and_park();
     failure_lifecycle();
     policy_and_checkpoint();
+    retired_host_page();
     std::puts("memory contract: three native layouts, publication, rollback and policy checks passed");
 }

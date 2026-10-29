@@ -11,6 +11,19 @@ class HostKvSource;
 class SpillFile;
 struct SpillIoStats;
 
+// An owner can retire its record while an in-flight reader still holds the
+// allocation. The ticket observes the actual release without keeping it alive.
+class HostKvReleaseTicket {
+public:
+    HostKvReleaseTicket() = default;
+    bool released() const noexcept { return allocation_.expired(); }
+private:
+    friend class HostKvRecord;
+    explicit HostKvReleaseTicket(std::weak_ptr<detail::HostKvAllocation> allocation)
+        : allocation_(allocation) {}
+    std::weak_ptr<detail::HostKvAllocation> allocation_;
+};
+
 // A read lease keeps the valid bytes and their RAM/disk capacity charge alive
 // after owner deletion. Adapters complete their transfer before releasing it.
 class HostKvLease {
@@ -69,6 +82,7 @@ public:
     explicit operator bool() const noexcept { return !empty(); }
     HostKvLease lease() const;
     HostKvSource source() const;
+    HostKvReleaseTicket release_ticket() const noexcept { return HostKvReleaseTicket(allocation_); }
     // Owner-only query: a mutable buffer cannot be relocated. The owner must
     // serialize this check with sealing and writable borrows.
     bool mutable_resident() const noexcept;

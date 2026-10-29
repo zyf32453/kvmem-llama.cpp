@@ -138,6 +138,8 @@ WorkingSetPlan plan_working_set(const MemoryDescriptor & d, const MemorySnapshot
             !catalog.emplace(b.id, &item).second)
             fail(MemoryErrorCode::InvalidPlan, "invalid block catalog or foreign session");
         frontier = add(b.original_start, b.valid_tokens);
+        // A retired record can still hold bytes while old readers drain.
+        // Charge it until the adapter confirms physical Host release.
         host_records += item.host_version != 0;
     }
     if (frontier != s.stamp.frontier)
@@ -148,7 +150,7 @@ WorkingSetPlan plan_working_set(const MemoryDescriptor & d, const MemorySnapshot
             fail(MemoryErrorCode::InvalidPlan, "invalid resident block set");
     }
     for (auto id : selected) {
-        if (!catalog.count(id) || !chosen.insert(id).second)
+        if (!catalog.count(id) || catalog.at(id)->retired || !chosen.insert(id).second)
             fail(MemoryErrorCode::InvalidPlan, "unknown or duplicate selected block");
     }
     for (auto id : mandatory) {
@@ -168,7 +170,7 @@ WorkingSetPlan plan_working_set(const MemoryDescriptor & d, const MemorySnapshot
     // Iterate logical catalog, independent of selector rank/order and physical slots.
     for (const auto & item : s.blocks) {
         const auto & b = item.block;
-        if (!resident.count(b.id) && item.host_version != b.content_version)
+        if (!item.retired && !resident.count(b.id) && item.host_version != b.content_version)
             fail(MemoryErrorCode::Stale, "cold history has no completed current host copy");
         if (chosen.count(b.id)) {
             plan.next.blocks.push_back({b, plan.next.visible_tokens});
@@ -179,7 +181,7 @@ WorkingSetPlan plan_working_set(const MemoryDescriptor & d, const MemorySnapshot
             }
         } else if (evicted.count(b.id)) {
             plan.evict.push_back(b);
-            if (item.host_version != b.content_version) {
+            if (!item.retired && item.host_version != b.content_version) {
                 plan.spill.push_back(b);
                 host_records += item.host_version == 0;
             }
