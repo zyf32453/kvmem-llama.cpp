@@ -88,6 +88,10 @@ public:
         size_t segment_blocks = 4;
         size_t pool_blocks = 0;
         std::shared_ptr<HistoricalKvThinkingRanges> thinking;
+        // When the preferred thinking/reply tier has no evictable block,
+        // capacity pressure may retire cold unclassified blocks by LRU.
+        // Disabled by default to preserve existing backend policy semantics.
+        bool lru_fallback_unclassified = false;
     };
     HistoricalKvRedundancyPolicy(size_t capacity,
         std::shared_ptr<HistoricalKvRedundancySource> source, Config config);
@@ -140,6 +144,7 @@ private:
     bool pool_built_ = false;
     bool refresh_started_ = false;
     bool thinking_mode_ = false;
+    bool lru_fallback_mode_ = false;
     unsigned content_tier_ = 0;
     bool audit_ = false;
     std::vector<Row> rows_;

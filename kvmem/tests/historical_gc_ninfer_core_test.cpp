@@ -138,6 +138,7 @@ static void native_page_redundancy_handoff() {
     policy_config.thinking = thinking;
     policy_config.pool_blocks = 5;
     policy_config.segment_blocks = 3;
+    policy_config.lru_fallback_unclassified = true;
     auto source = std::make_shared<PageFeatures>();
     kvmem::HistoricalKvPageGc bridge(config,
         std::make_unique<kvmem::HistoricalKvRedundancyPolicy>(5, source, policy_config));
@@ -164,11 +165,54 @@ static void native_page_redundancy_handoff() {
     require(native_host.charged_bytes() == 0);
 }
 
+static void native_thinking_lru_fallback() {
+    auto thinking = std::make_shared<kvmem::HistoricalKvThinkingRanges>();
+    thinking->note(64, 128);
+    thinking->arm();
+    kvmem::HistoricalKvRedundancyPolicy::Config config;
+    config.thinking = thinking;
+    config.lru_fallback_unclassified = true;
+    auto source = std::make_shared<PageFeatures>();
+    kvmem::HistoricalKvRedundancyPolicy policy(4, source, config);
+    kvmem::HistoricalKvSnapshot snapshot;
+    snapshot.incarnation = 7;
+    snapshot.round_id = 1;
+    for (uint32_t id = 0; id < 4; ++id) {
+        kvmem::HistoricalKvBlockMeta meta;
+        meta.handle = {7, id, 1};
+        meta.logical_id = id;
+        meta.original_begin = uint64_t(id) * 64;
+        meta.valid_tokens = 64;
+        meta.content_version = 1;
+        meta.life = kvmem::HistoricalKvLife::Live;
+        meta.sealed = true;
+        meta.mandatory = id < 2; // Sink and sole thinking block cannot be victims.
+        meta.last_use_seq = id == 3 ? 1 : 10;
+        snapshot.blocks.push_back(meta);
+    }
+    kvmem::HistoricalKvPressure pressure;
+    pressure.ready = 0;
+    pressure.low = 1;
+    pressure.high = 2;
+    kvmem::HistoricalKvDecisionBuffer out(1);
+    const auto result = policy.step(snapshot, pressure, {4, 1}, out);
+    require(result.status == kvmem::HistoricalKvStepStatus::Complete && result.emitted == 1);
+    require(out.values().front().reason == kvmem::HistoricalKvDeleteReason::Lru);
+    require(out.values().front().victim.slot == 3);
+    require(policy.permits(snapshot.blocks[3]) && !policy.permits(snapshot.blocks[1]));
+    snapshot.round_id = 2;
+    snapshot.blocks[3].handle.incarnation = 6; // stale previous owner
+    kvmem::HistoricalKvDecisionBuffer second(1);
+    require(policy.step(snapshot, pressure, {4, 1}, second).emitted == 1);
+    require(second.values().front().victim.slot == 2);
+}
+
 int main() {
     native_page_feature_snapshot();
     truncated_thinking_reopens_candidates();
     native_page_handoff();
     native_page_redundancy_handoff();
+    native_thinking_lru_fallback();
     constexpr uint32_t page_tokens = 64;
     auto repository = std::make_shared<kvmem::HistoricalKvRepository>(3, 0, page_tokens, page_tokens);
     std::atomic<unsigned> releases{0};

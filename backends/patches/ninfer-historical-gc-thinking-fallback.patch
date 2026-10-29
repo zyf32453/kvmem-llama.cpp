@@ -1,0 +1,12 @@
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 6651549f7224d8da58d6d86e0155d760b2793cdc..7bbd05a5ed45903c9f3579767ea8d7bc17ce4003 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -659,6 +659,7 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence) {
+             policy_config.max_candidate_blocks = std::min<std::size_t>(56, slots);
+             policy_config.pool_blocks = std::min<std::size_t>(56, slots);
+             policy_config.segment_blocks = std::min<std::size_t>(4, slots);
++            policy_config.lru_fallback_unclassified = true;
+             auto policy = std::make_unique<kvmem::HistoricalKvRedundancyPolicy>(
+                 slots, window.historical_features, policy_config);
+             window.historical_gc = std::make_unique<kvmem::HistoricalKvPageGc>(

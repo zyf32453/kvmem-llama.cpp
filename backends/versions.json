@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "2945508354edfacc08945e45a8ce0cbc76902510",
+    "patched_tree": "63a80704e4a5f7013679a3d34c4959da13b82d77",
     "patches": [
       {
         "id": "kvmem",
@@ -240,6 +240,16 @@
         ],
         "after_tree": "2945508354edfacc08945e45a8ce0cbc76902510",
         "source": "Native NInfer Host-page redundancy GC with sealed Mean-K features and accepted full-query Mean-Q scoring"
+      },
+      {
+        "id": "historical-gc-thinking-fallback",
+        "path": "backends/patches/ninfer-historical-gc-thinking-fallback.patch",
+        "sha256": "a5e316361eb640f37fbbc317eb15a31fde3a479ffcb6acaf36952fab969c7006",
+        "requires": [
+          "historical-gc-redundancy"
+        ],
+        "after_tree": "63a80704e4a5f7013679a3d34c4959da13b82d77",
+        "source": "Opt in NInfer to cold-block LRU fallback after the protected thinking tier has no evictable page"
       }
     ]
   },
