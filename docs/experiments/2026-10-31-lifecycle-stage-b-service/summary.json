@@ -1,0 +1,417 @@
+{
+  "date": "2026-10-31",
+  "stage": "B_service",
+  "status": "frozen_scope_service_gates_passed",
+  "production_qualified": false,
+  "parent_commit": "012b9f3e323bf105ed9c118b41718fc5bec3f3d1",
+  "manifest_sha256": "c23ae2f320bc589bbb81c09ec1e0cc4d128b3f743bb52aa700d392bcda02095e",
+  "source_pins": 94,
+  "native_inputs": {
+    "base_tree": "2673dbad6da6325c8c5c44c2ebf3541e1ffb9930",
+    "patched_tree": "1ad96bf9efbcd99f87bf63a36cb4ecf72f85c082",
+    "patch_sha256": "a907d5191977633191de24197d43f4d85ef00d467bd0bd416f6f98b5333dfda9",
+    "delta_sha256": "cfc19b27835439054176bedf5d297ff5df9dd1638a81d84af554381d3c7420eb",
+    "changed_files": {
+      "backends/ninfer/src/runtime/engine/engine_core.h": "0884612a858b65ad58ad7eacefd1cb824d4aa23d84dfcaeeb783237b7de20ca3",
+      "backends/ninfer/src/runtime/engine/context_cache/resource_manager.h": "0386c6d6473e0d20f23f9dbe5b082645a005186f2dcec4ea8400f40b7dc03a8c",
+      "backends/ninfer/src/runtime/engine/context_cache/hybrid_resource_manager.h": "9087bc21810310b89306d56b807673fb2a938d90e47ff483b728cf09809ed85d",
+      "backends/ninfer/docs/maintainer/engine-architecture.md": "36bfc5694494bdaea970625574627cc6dc105e837e2da7e22945a960fed052f2",
+      "backends/versions.json": "ba39676ccb25e50319dc2f3c66e7a1eced19471d47cd73843b6a7cf759f62cae",
+      "backends/patches/ninfer-historical-gc-request-errors.patch": "a907d5191977633191de24197d43f4d85ef00d467bd0bd416f6f98b5333dfda9"
+    },
+    "native_files": [
+      "src/runtime/engine/engine_core.h",
+      "src/runtime/engine/context_cache/resource_manager.h",
+      "src/runtime/engine/context_cache/hybrid_resource_manager.h",
+      "docs/maintainer/engine-architecture.md"
+    ]
+  },
+  "native_service_binary_sha256": "5ddea137408974d54e13fcbfea9e5b0e59ab33cfc565dee4760f50d8e0537cb0",
+  "gpu": "NVIDIA GeForce RTX 3080 Ti Laptop GPU, GPU-4181fa95-fe38-32fe-5e21-d3626630f030, 596.08, 16384 MiB, 360 MiB",
+  "model_sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+  "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+  "native_tests": [
+    {
+      "name": "ninfer_cli_options_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_serve_options_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_kv_capacity_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_context_cache_defaults_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_unique_strings_test",
+      "exit": 0
+    }
+  ],
+  "host_contracts": {
+    "results": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.0384808
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.0599066
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 0.0591132
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 15.5424
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 0.0573395
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.0359462
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.0407989
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.0744072
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.0702644
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.08141
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.0584666
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.179545
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.0818169
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.0558055
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.0739829
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.104809
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.0527784
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.054148
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.0533611
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.0445539
+      }
+    ],
+    "binary_sha256": {
+      "historical_gc_ninfer_core_test": "4b0277928fb9944abedb9d9a681fba2208840978af991162da61947b720a208c",
+      "memory_contract_test": "4b67756554321553fce32247379055a3542ff15b1f089fa6a1257540a515edca",
+      "native_kv_payload_test": "e70415f19e7e65525b052ed03a058df23dfabdb72fda9b532e7eb324aca59156",
+      "host_kv_storage_test": "93920ad0242a04b166a80847c022dca4f7d742fef2c25384b2df387a13631fe1",
+      "spill_io_test": "45437c28d333753d6005322409aaf7a7c19607b07111b3cacdfb810babdf0d91",
+      "tiered_kv_storage_test": "7b5fd3fb82f0323fc0033cca8054cd6076d3c39363fd0c24a9fe2fa5b8d9cf83",
+      "native_residency_test": "940613dc8a33a199b3b7cc6691d7dbfdc5d6add7d1690bed52952c6112935286",
+      "kv_content_test": "9d626b43eb33ad7b937c805c40c0fe787614852d762cc18645648bc6a6472a1e",
+      "prefix_checkpoint_test": "9b3c7a40282129c1c08e33f854ffbde2f2cd5f6619264e4b260f9f3ee1f95cab",
+      "checkpoint_policy_test": "12ffde4fb771c23467fe1fecebc249e6e38bb438be793f1877b8315ec1f6e5db",
+      "checkpoint_image_test": "cf823b901ee8b792559817a60cc2ae02ffc75078a400348f208cc190e90fc59c",
+      "historical_kv_boundary_mailbox_test": "36be0116c2b64b8b0528e5d016e0ecccf14c18c802e79d83df9403d51ccdaa71",
+      "historical_kv_commit_conditions_test": "e3c0a637e2bda30f9328361e19e0e707fd6a58a083ab4a4123f6f6c2fa78b34d",
+      "historical_kv_range_lock_test": "d659849583ac5cec0390da8c1e568e548f4e5e2093a0ffd28682ea67d85c88f7",
+      "historical_kv_witness_lifecycle_test": "eba9ad8ac9c65275d9e33e0f222fb5a795898734e4b9e55721d81ee3d1f7bab0",
+      "historical_kv_score_evidence_test": "ecaa66ee3059defee5cace3cb13ec8c276643f21e138e8a23fac5b07a937ba06",
+      "historical_kv_auxiliary_budget_test": "025f5f33953cded915111df80776323a38061bea965f2581a16cbfc012eb6868",
+      "historical_kv_owner_budget_test": "d378f39ac916c70d09ca33baa02ec4f4df1b4978c58773885066c87201fb8057",
+      "historical_kv_service_health_test": "b057d72a1a4a1b3b412c97c597d476e882cdda63fbafe5a33f545aa25288247b",
+      "mean_key_retrieval_test": "ff4fddd579e25bcf0e39e8057e4c6c766be1e9ac05a3fb4ded5d458de24f9b11"
+    },
+    "compiler": "C:/mingw/mingw64/bin/c++.exe",
+    "build_type": "Debug"
+  },
+  "wire_tests": {
+    "windows_python314": 6,
+    "linux_python311": 6
+  },
+  "current_shutdown": [
+    {
+      "case": "lru-none-shutdown-prefill",
+      "stop_seconds": 1.2052892940118909
+    },
+    {
+      "case": "lru-none-shutdown-decode",
+      "stop_seconds": 0.9817084709648043
+    },
+    {
+      "case": "redundancy-none-shutdown-prefill",
+      "stop_seconds": 1.032173709012568
+    },
+    {
+      "case": "redundancy-none-shutdown-decode",
+      "stop_seconds": 0.7400529570877552
+    },
+    {
+      "case": "lru-mtp4-shutdown-prefill",
+      "stop_seconds": 1.226788982981816
+    },
+    {
+      "case": "lru-mtp4-shutdown-decode",
+      "stop_seconds": 0.774433925980702
+    },
+    {
+      "case": "redundancy-mtp4-shutdown-prefill",
+      "stop_seconds": 1.1028446150012314
+    },
+    {
+      "case": "redundancy-mtp4-shutdown-decode",
+      "stop_seconds": 0.797477763146162
+    }
+  ],
+  "current_stream_quota": [
+    {
+      "case": "redundancy-none-stream-quota",
+      "frames_before_error": 2250,
+      "auxiliary_peak": 8388468,
+      "auxiliary_cap": 8388608,
+      "denied": 1,
+      "queued_answer": "599",
+      "new_answer": "599"
+    },
+    {
+      "case": "redundancy-mtp4-stream-quota",
+      "frames_before_error": 592,
+      "auxiliary_peak": 8382888,
+      "auxiliary_cap": 8388608,
+      "denied": 1,
+      "queued_answer": "599",
+      "new_answer": "599"
+    }
+  ],
+  "current_constrained_churn": [
+    {
+      "case": "redundancy-none-churn",
+      "requests": 6,
+      "records_per_request": 64,
+      "auxiliary_current": 4327024,
+      "auxiliary_peak": 10414364,
+      "auxiliary_cap": 10485760,
+      "history_evictions": 4,
+      "rss_first_kib": 3302276,
+      "rss_last_kib": 3951168,
+      "observed_rss_hwm_kib": 3951168,
+      "threads_first": 30,
+      "threads_last": 30,
+      "checkpoint_bytes": 1232399478
+    },
+    {
+      "case": "redundancy-mtp4-churn",
+      "requests": 6,
+      "records_per_request": 64,
+      "auxiliary_current": 4261504,
+      "auxiliary_peak": 10080368,
+      "auxiliary_cap": 10485760,
+      "history_evictions": 4,
+      "rss_first_kib": 4303160,
+      "rss_last_kib": 4972608,
+      "observed_rss_hwm_kib": 5005380,
+      "threads_first": 30,
+      "threads_last": 30,
+      "checkpoint_bytes": 1232420021
+    }
+  ],
+  "earlier_binary_evidence": {
+    "binary_sha256": "32c9c7ed894da728eb1244fc388e5617d7fdbaead74959c6995a7b8f47339b5e",
+    "churn": [
+      {
+        "case": "lru-none-churn",
+        "requests": 12,
+        "records_per_request": 256,
+        "auxiliary_current": 256,
+        "auxiliary_peak": 274916,
+        "auxiliary_cap": 67108864,
+        "history_evictions": 11,
+        "rss_first_kib": 3201828,
+        "rss_last_kib": 3219648,
+        "observed_rss_hwm_kib": 3407008,
+        "threads_first": 30,
+        "threads_last": 30,
+        "checkpoint_bytes": 462478915
+      },
+      {
+        "case": "redundancy-none-churn",
+        "requests": 12,
+        "records_per_request": 256,
+        "auxiliary_current": 7472768,
+        "auxiliary_peak": 13566252,
+        "auxiliary_cap": 67108864,
+        "history_evictions": 11,
+        "rss_first_kib": 3216264,
+        "rss_last_kib": 3233384,
+        "observed_rss_hwm_kib": 3421572,
+        "threads_first": 30,
+        "threads_last": 30,
+        "checkpoint_bytes": 462478915
+      },
+      {
+        "case": "lru-mtp4-churn",
+        "requests": 12,
+        "records_per_request": 256,
+        "auxiliary_current": 256,
+        "auxiliary_peak": 270416,
+        "auxiliary_cap": 67108864,
+        "history_evictions": 11,
+        "rss_first_kib": 4201720,
+        "rss_last_kib": 4241460,
+        "observed_rss_hwm_kib": 4431060,
+        "threads_first": 30,
+        "threads_last": 30,
+        "checkpoint_bytes": 462486640
+      },
+      {
+        "case": "redundancy-mtp4-churn",
+        "requests": 12,
+        "records_per_request": 256,
+        "auxiliary_current": 7407232,
+        "auxiliary_peak": 13232624,
+        "auxiliary_cap": 67108864,
+        "history_evictions": 11,
+        "rss_first_kib": 4221132,
+        "rss_last_kib": 4260064,
+        "observed_rss_hwm_kib": 4450680,
+        "threads_first": 30,
+        "threads_last": 30,
+        "checkpoint_bytes": 462486640
+      }
+    ],
+    "stream_quota": [
+      {
+        "case": "redundancy-none-stream-quota",
+        "frames_before_error": 2250,
+        "auxiliary_peak": 8388468,
+        "auxiliary_cap": 8388608,
+        "denied": 1,
+        "queued_answer": "599",
+        "new_answer": "599"
+      },
+      {
+        "case": "redundancy-mtp4-stream-quota",
+        "frames_before_error": 592,
+        "auxiliary_peak": 8382888,
+        "auxiliary_cap": 8388608,
+        "denied": 1,
+        "queued_answer": "599",
+        "new_answer": "599"
+      }
+    ]
+  },
+  "pre_fix": {
+    "binary_sha256": "a2a5f55b2a706c0d5c2142ee864deee748b48b2e4adcc42a54fd680f8631a5d0",
+    "shutdown": [
+      {
+        "case": "lru-none-shutdown-prefill",
+        "stop_seconds": 1.2020242870785296
+      },
+      {
+        "case": "lru-none-shutdown-decode",
+        "stop_seconds": 0.8413682300597429
+      },
+      {
+        "case": "redundancy-none-shutdown-prefill",
+        "stop_seconds": 1.0123795249965042
+      },
+      {
+        "case": "redundancy-none-shutdown-decode",
+        "stop_seconds": 0.71579555189237
+      },
+      {
+        "case": "lru-mtp4-shutdown-prefill",
+        "stop_seconds": 1.0727924720849842
+      },
+      {
+        "case": "lru-mtp4-shutdown-decode",
+        "stop_seconds": 0.8212592569179833
+      },
+      {
+        "case": "redundancy-mtp4-shutdown-prefill",
+        "stop_seconds": 1.0510094340424985
+      },
+      {
+        "case": "redundancy-mtp4-shutdown-decode",
+        "stop_seconds": 0.768771352013573
+      }
+    ],
+    "stream_quota": {
+      "passed": false,
+      "frames": 2251,
+      "error": {
+        "code": null,
+        "message": "historical KV auxiliary budget exceeded",
+        "param": null,
+        "type": "internal_error"
+      },
+      "engine_worker_failed": true,
+      "process_exit_after_driver_stop": 0
+    }
+  },
+  "tsan": {
+    "status": "unavailable_before_main_no_application_race_conclusion",
+    "build_exit": 0,
+    "run_exit": 66
+  },
+  "limitations": [
+    "Finite functional runs, not a long-duration production or performance qualification",
+    "M and H are separate requested-allocation/payload bounds, not process RSS or checkpoint bounds",
+    "Earlier 48-request churn belongs to its recorded intermediate binary",
+    "Single GPU, one running request, text and RAM only; no GC+SSD or concurrent lanes",
+    "Prior intermittent CUDA investigation remains open; host debugger settings unchanged",
+    "Stages C-F, end-to-end recovery and Agent quality remain incomplete"
+  ],
+  "evidence": [
+    {
+      "path": "artifacts/lifecycle-stage-b-service/prior-evidence.tar.gz",
+      "bytes": 939197,
+      "sha256": "9ea7e154056532e6445fc36d6ad7b56a77801b54b5e6405d9774e3ba3ac26de5"
+    },
+    {
+      "path": "artifacts/lifecycle-stage-b-service/candidate-f017-evidence.tar.gz",
+      "bytes": 570188,
+      "sha256": "6dcf73a038557e8241a91f72efa5062024243519266cbe8bfa5744dbca07fd26"
+    },
+    {
+      "path": "artifacts/lifecycle-stage-b-service/current-evidence.tar.gz",
+      "bytes": 570104,
+      "sha256": "e6412468e51668f0a407cb8a3c88bc52f1a2a76c8ea501a8eeed75ff3b490cbb"
+    }
+  ]
+}

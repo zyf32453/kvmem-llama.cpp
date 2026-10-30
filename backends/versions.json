@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "2673dbad6da6325c8c5c44c2ebf3541e1ffb9930",
+    "patched_tree": "1ad96bf9efbcd99f87bf63a36cb4ecf72f85c082",
     "patches": [
       {
         "id": "kvmem",
@@ -310,6 +310,16 @@
         ],
         "after_tree": "2673dbad6da6325c8c5c44c2ebf3541e1ffb9930",
         "source": "Shared bounded auxiliary ownership, producer scratch, explicit GC health, transactional native initialization, CLI/HTTP observability and first-support capability gates"
+      },
+      {
+        "id": "historical-gc-request-errors",
+        "path": "backends/patches/ninfer-historical-gc-request-errors.patch",
+        "sha256": "a907d5191977633191de24197d43f4d85ef00d467bd0bd416f6f98b5333dfda9",
+        "requires": [
+          "historical-gc-lifecycle"
+        ],
+        "after_tree": "1ad96bf9efbcd99f87bf63a36cb4ecf72f85c082",
+        "source": "Settle consumed execution membership on explicit KVMem request failure; preserve pending queue and avoid Engine-wide latch for auxiliary quota errors"
       }
     ]
   },

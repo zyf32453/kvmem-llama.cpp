@@ -1,0 +1,204 @@
+diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
+--- a/src/runtime/engine/engine_core.h
++++ b/src/runtime/engine/engine_core.h
+@@ -1948,10 +1948,14 @@
+                 static_cast<double>(committed.timing.elapsed_ns()) * 1e-9;
+             committed_storage.emplace(std::move(committed));
+             phase.resume_range();
++        } catch (const kvmem::MemoryError&) {
++            rollback_generated();
++            fail_consumed_memory_requests(lane_indices, std::current_exception());
++            return;
+         } catch (...) {
+             rollback_generated();
+             if (!instance_.program->has_context_transaction()) {
+-                resources_.release_failed_commit(std::span<const LaneId>(lanes.data(), row_count));
++                resources_.release_failed_execution(std::span<const LaneId>(lanes.data(), row_count));
+             }
+             throw;
+         }
+@@ -2268,18 +2272,54 @@
+             });
+     }
+ 
++    static std::exception_ptr memory_request_error(const std::exception_ptr& error) {
++        try { std::rethrow_exception(error); }
++        catch (const kvmem::MemoryError& failure) {
++            if (failure.code() == kvmem::MemoryErrorCode::BudgetExceeded ||
++                failure.code() == kvmem::MemoryErrorCode::ServiceUnavailable)
++                return std::make_exception_ptr(
++                    RequestError(RequestErrorKind::Unavailable, failure.what()));
++        } catch (...) {}
++        return error;
++    }
++
+     void fail_storage_request(std::uint32_t lane, const std::exception_ptr& error) {
+         const auto request = slots_[lane];
+         if (!request || !request->lane || !request->sequence)
+             throw std::logic_error("storage failure has no active request owner");
+-        request->storage_failure = error;
+-        try { std::rethrow_exception(error); }
+-        catch (const kvmem::MemoryError& failure) {
+-            if (failure.code() == kvmem::MemoryErrorCode::BudgetExceeded ||
+-                failure.code() == kvmem::MemoryErrorCode::ServiceUnavailable)
+-                request->storage_failure = std::make_exception_ptr(
+-                    RequestError(RequestErrorKind::Unavailable, failure.what()));
+-        } catch (...) {}
++        request->storage_failure = memory_request_error(error);
++    }
++
++    // Unlike advance_prefill's storage wait, a failed execution unit has
++    // consumed its Program membership. Do not abort those stale capabilities
++    // again or latch the whole Engine for a request's explicit quota failure.
++    void fail_consumed_memory_requests(std::span<const std::uint32_t> lanes,
++                                       const std::exception_ptr& error) {
++        if (instance_.program->has_context_transaction()) std::rethrow_exception(error);
++        // Normalization may allocate its error message. Keep the requests in
++        // slots_ until it succeeds so global OOM recovery still owns them.
++        const auto reported = memory_request_error(error);
++        std::array<LaneId, kMaximumConcurrency> released{};
++        std::array<std::shared_ptr<Request>, kMaximumConcurrency> requests{};
++        for (std::size_t row = 0; row < lanes.size(); ++row) {
++            const auto lane = lanes[row];
++            const auto request = slots_.at(lane);
++            if (!request || !request->lane || request->lane->value != lane || !request->sequence)
++                throw std::logic_error("failed execution lost its request owner");
++            released[row] = LaneId{lane};
++            requests[row] = request;
++        }
++        resources_.release_failed_execution(std::span<const LaneId>(released.data(), lanes.size()));
++        try {
++            for (const auto lane : lanes) remove_completed_slot(lane);
++            publish_runtime_stats();
++            for (std::size_t row = 0; row < lanes.size(); ++row) complete_error(requests[row], reported);
++        } catch (...) {
++            // A failed statistics publication must not orphan consumers after
++            // their slots were detached. Escalate only after answering them.
++            for (std::size_t row = 0; row < lanes.size(); ++row) force_complete_error(requests[row], reported);
++            throw;
++        }
+     }
+ 
+     void run_prefill_step(const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
+@@ -2332,8 +2372,8 @@
+             }
+         }
+         if (batch_size > 1 || branched) {
+-            run_prefill_batch(std::span<const std::uint32_t>(batch.data(), batch_size),
+-                              cancelled_at_unit_start, setup);
++            const auto members = std::span<const std::uint32_t>(batch.data(), batch_size);
++            run_prefill_batch(members, cancelled_at_unit_start, setup);
+             return;
+         }
+         scheduler_.record_prefill_unit(lane);
+@@ -2373,7 +2413,7 @@
+         }
+         scheduler_.record_prefill_units(ran);
+         setup.finish();
+-        {
++        try {
+             ProgramCallScope program_call(*this);
+             const runtime::ExecutionTiming timing = instance_.program->prefill_batch(
+                 std::span<const SequenceHandle>(sequences.data(), lanes.size()),
+@@ -2384,17 +2424,29 @@
+             ++cumulative_stats_.shared_prefill_passes;
+             cumulative_stats_.shared_prefill_requests += lanes.size();
+             consume_armed_worker_failure();
++        } catch (const kvmem::MemoryError&) {
++            fail_consumed_memory_requests(lanes, std::current_exception());
++            return;
+         }
+         for (const std::uint32_t lane : lanes) {
+             const auto request = slots_[lane];
+             if (request == nullptr || !request->is_prefilling() || !request->sequence) {
+                 throw std::logic_error("batched prefill lane lost its request");
+             }
+-            ProgramCallScope program_call(*this);
+-            auto progress =
+-                instance_.program->advance_prefill(*request->sequence, &program_call.failed_timing());
+-            program_call.finish(progress.timing);
+-            resolve_prefill_progress(request, std::move(progress), cancelled_at_unit_start);
++            try {
++                ProgramCallScope program_call(*this);
++                auto progress =
++                    instance_.program->advance_prefill(*request->sequence, &program_call.failed_timing());
++                program_call.finish(progress.timing);
++                resolve_prefill_progress(request, std::move(progress), cancelled_at_unit_start);
++            } catch (const RequestResourceError& error) {
++                fail_storage_request(lane, std::make_exception_ptr(
++                    RequestError(RequestErrorKind::Unavailable, error.what())));
++            } catch (const kvmem::MemoryError&) {
++                // advance_prefill retains the capability for ordered abort;
++                // only the prefill_batch call above consumed its membership.
++                fail_storage_request(lane, std::current_exception());
++            }
+         }
+         publish_runtime_stats();
+     }
+@@ -3507,7 +3559,11 @@
+                 if (!control_membership.empty()) {
+                     set_host_work_class(HostWorkClass::Control);
+                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
+-                    run_control_batch(control_membership);
++                    try { run_control_batch(control_membership); }
++                    catch (const kvmem::MemoryError&) {
++                        fail_consumed_memory_requests(control_membership.lane_span(), std::current_exception());
++                        continue;
++                    }
+                     decode_run += decode_run != std::numeric_limits<std::uint32_t>::max();
+                     recovery_streak_.record_success();
+                     continue;
+@@ -3556,7 +3612,11 @@
+                 if (action == ExecutionAction::Decode) {
+                     set_host_work_class(HostWorkClass::Decode, membership.lane_span());
+                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
+-                    run_decode_round(membership, cancelled_at_unit_start);
++                    try { run_decode_round(membership, cancelled_at_unit_start); }
++                    catch (const kvmem::MemoryError&) {
++                        fail_consumed_memory_requests(membership.lane_span(), std::current_exception());
++                        continue;
++                    }
+                     decode_run += decode_run != std::numeric_limits<std::uint32_t>::max();
+                     recovery_streak_.record_success();
+                     continue;
+diff --git a/src/runtime/engine/context_cache/resource_manager.h b/src/runtime/engine/context_cache/resource_manager.h
+--- a/src/runtime/engine/context_cache/resource_manager.h
++++ b/src/runtime/engine/context_cache/resource_manager.h
+@@ -1535,7 +1535,7 @@
+         for (const LaneId lane : lanes) { release_cancelled_lane(lane); }
+     }
+ 
+-    void release_failed_commit(std::span<const LaneId> lanes) noexcept {
++    void release_failed_execution(std::span<const LaneId> lanes) noexcept {
+         for (const LaneId lane : lanes) {
+             if (lane.value < lane_count_ && active_[lane.value].occupied) {
+                 try {
+diff --git a/src/runtime/engine/context_cache/hybrid_resource_manager.h b/src/runtime/engine/context_cache/hybrid_resource_manager.h
+--- a/src/runtime/engine/context_cache/hybrid_resource_manager.h
++++ b/src/runtime/engine/context_cache/hybrid_resource_manager.h
+@@ -324,7 +324,7 @@
+         for (const LaneId lane : lanes) { release_lane(lane); }
+     }
+ 
+-    void release_failed_commit(std::span<const LaneId> lanes) noexcept {
++    void release_failed_execution(std::span<const LaneId> lanes) noexcept {
+         for (const LaneId lane : lanes) {
+             if (lane.value < lane_count_ && (lanes_[lane.value] == Lane::Active ||
+                                              lanes_[lane.value] == Lane::TerminalPending)) {
+diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
+--- a/docs/maintainer/engine-architecture.md
++++ b/docs/maintainer/engine-architecture.md
+@@ -563,6 +563,13 @@
+ 
+ ### 7.4 Engine-wide failure
+ 
++KVMem 的显式容量/GC 不可用错误属于请求失败。准备阶段仍持有有效 sequence 时，Engine 通过有序
++abort 归还该 owner；decode、control 或批量 prefill 执行失败已消费 Program membership 时，只结清
++对应 ResourceManager 记录，不再次 abort 旧 capability。后者结束本批受影响请求并保留等待 FIFO，
++不会仅因辅助额度不足锁存整个 Engine。`BudgetExceeded`/`ServiceUnavailable` 经公共请求错误映射为
++Unavailable，已开始的流发送终态错误。存在未结清的 context transaction 时仍走共享状态故障路径，
++不能把尚未完成的事务伪装成请求已安全释放。
++
+ 以下情况说明共享物理状态已无法安全解释，必须使整个 Engine 失败：
+ 
+ - GPU mutation 后既不能 commit 也不能形成稳定 abort；
