@@ -43,7 +43,7 @@ uint64_t growth(uint64_t need, uint64_t old, uint64_t limit, uint64_t initial) {
 }
 void valid_event(const SourceEvent & e, uint64_t end) {
     if (!e.id || e.begin >= e.end || e.end > end ||
-        static_cast<unsigned>(e.kind) > static_cast<unsigned>(SourceEventKind::Control))
+        static_cast<unsigned>(e.kind) > static_cast<unsigned>(SourceEventKind::RawInput))
         throw MemoryError(MemoryErrorCode::InvalidPlan, "invalid accepted source event");
 }
 void valid_tokens(const int32_t * tokens, size_t count) {

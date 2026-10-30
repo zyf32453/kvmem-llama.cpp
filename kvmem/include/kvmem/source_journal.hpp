@@ -23,7 +23,7 @@ struct SourceRef {
     }
 };
 
-enum class SourceEventKind : uint8_t { System, User, Assistant, ToolResult, Control };
+enum class SourceEventKind : uint8_t { System, Developer, User, Assistant, ToolResult, Control, RawInput };
 struct SourceEvent {
     uint64_t id = 0; // caller's structured message/tool event, not inferred semantics
     uint64_t begin = 0, end = 0;

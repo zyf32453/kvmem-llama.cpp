@@ -1,0 +1,764 @@
+diff --git a/docs/cli.md b/docs/cli.md
+--- a/docs/cli.md
++++ b/docs/cli.md
+@@ -451,6 +451,38 @@
+ other engine statistics/workspace or thread stacks. A small auxiliary quota can
+ reject a request even when KV payload capacity is available.
+ 
++`--kvmem-source-mib N` separately opts into process-local RAM source recording.
++It requires KVMem, one running request, one GPU, RAM and none/MTP execution;
++the current qualification uses ordinary decode and MTP4. Text is supported;
++media, grafts and custom position rows cannot be recorded by this adapter.
++The default is off while recovery integration is incomplete. This records
++source data and does not enable checkpoint persistence or KV reconstruction.
++
++The complete admitted prepared input is saved before the first prefill unit.
++Its accepted source frontier is distinct from the computed KV frontier, so a
++cancelled prefill can retain input it has not executed. Generated rows enter
++the source only after the complete Program commit succeeds; discarded MTP
++drafts and provisional output do not enter it. Source configuration binds the
++actual tokenizer, active template/arguments, model artifact and runtime schema.
++The digest is not permission to restore retired KV.
++
++S bounds the fixed 256-entry directory and actual token/event capacities,
++including old+new growth reservations. Store/account and bounded allocation
++control objects, allocator overhead and prepared-request workspace are outside
++S; it is not a process RSS or checkpoint bound. Full source directories or
++insufficient S reject capture/append without automatically forgetting records.
++Branches/expiry, system-wide forget, durable recovery and source-driven rebuild
++are not exposed by this recording option yet. A separate record is currently
++retained for each admitted request, including source accepted before a later
++execution failure.
++
++`/props` reports source quota/current/peak/denials, record count and last accepted/
++computed frontiers. `source_last_tokens_fnv1a64` is a diagnostic FNV-1a digest of
++little-endian int32 source rows, not an identity or integrity authority.
++`--kvmem-verify-transfers` also compares each new journal row directly with the
++accepted Program rows. Source allocation failures use the same request-local
++Unavailable cleanup as other explicit KVMem quota failures.
++
+ `/props` reports `kvmem.gc_policy`, configured `gc_aux_budget_bytes`, and usage
+ fields `gc_aux_budget_bytes`, `gc_aux_bytes`, `gc_aux_peak_bytes`, `gc_aux_denied`.
+ Failed initialization does not publish a half-created GC domain. A disabled policy,
+diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
+--- a/docs/maintainer/engine-architecture.md
++++ b/docs/maintainer/engine-architecture.md
+@@ -570,6 +570,13 @@
+ Unavailable，已开始的流发送终态错误。存在未结清的 context transaction 时仍走共享状态故障路径，
+ 不能把尚未完成的事务伪装成请求已安全释放。
+ 
++可选 RAM source journal 由 Program 独立持有，不随 KV window/冷域驱逐销毁。首次 prefill 前保存
++已接纳的完整 prepared input，computed frontier 另外更新；不能把输入已保存解释成 KV 已算完。
++生成记录在 `commit` 或完整 `append_forced_tokens` 成功返回前的最后提交点追加，不挂在可能提前或
++重复调用的 prefix-identity helper 上。这样被取消/丢弃的 pending row 和 MTP draft 不会进入源记录。
++显式 source 配额不足保留之前记录并结束受影响请求，不隐式遗忘源数据或锁存整个 Engine。
++目前只提供单 lane、普通/MTP、文本、进程内 RAM 记录，不提供恢复执行或跨进程源身份。
++
+ 以下情况说明共享物理状态已无法安全解释，必须使整个 Engine 失败：
+ 
+ - GPU mutation 后既不能 commit 也不能形成稳定 abort；
+diff --git a/include/ninfer/engine_options.h b/include/ninfer/engine_options.h
+--- a/include/ninfer/engine_options.h
++++ b/include/ninfer/engine_options.h
+@@ -441,6 +441,9 @@
+     // Separate shared GC auxiliary account; zero selects the 1024 MiB default
+     // when GC is enabled. It is not part of native KV payload H.
+     std::uint64_t historical_gc_aux_bytes = 0;
++    // Opt-in RAM source recording; independent of H and GC auxiliary M.
++    // Pressure rejects capture/append, never implicitly forgets source rows.
++    std::uint64_t source_bytes = 0;
+     [[nodiscard]] bool historical_gc_enabled() const noexcept {
+         return historical_gc_lru || historical_gc_redundancy;
+     }
+diff --git a/include/ninfer/observability/resources.h b/include/ninfer/observability/resources.h
+--- a/include/ninfer/observability/resources.h
++++ b/include/ninfer/observability/resources.h
+@@ -96,6 +96,10 @@
+     std::uint32_t selected_tokens = 0, reserve_tokens = 0;
+     std::uint64_t host_payload_budget_bytes = 0, host_payload_bytes = 0;
+     std::uint64_t gc_aux_budget_bytes = 0, gc_aux_bytes = 0, gc_aux_peak_bytes = 0, gc_aux_denied = 0;
++    std::uint64_t source_budget_bytes = 0, source_bytes = 0, source_peak_bytes = 0, source_denied = 0;
++    std::uint64_t source_records = 0, source_last_id = 0, source_last_revision = 0;
++    std::uint64_t source_last_accepted_tokens = 0, source_last_computed_tokens = 0, source_last_events = 0;
++    std::uint64_t source_last_tokens_fnv1a64 = 0;
+     std::uint64_t disk_payload_budget_bytes = 0, disk_payload_bytes = 0;
+     std::uint64_t retained_payload_budget_bytes = 0;
+     std::uint64_t disk_read_bytes = 0, disk_written_bytes = 0;
+diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
+--- a/src/models/qwen3_5/frontend/frontend.cpp
++++ b/src/models/qwen3_5/frontend/frontend.cpp
+@@ -4,6 +4,7 @@
+ #include "models/qwen3_5/frontend/prepared_prompt.h"
+ 
+ #include "models/qwen3_5/frontend/chat_template.h"
++#include "models/qwen3_5/frontend/digest.h"
+ #include "models/qwen3_5/frontend/flint_output.h"
+ #include "models/qwen3_5/frontend/gemma_output.h"
+ #include "models/qwen3_5/frontend/media_cache.h"
+@@ -252,7 +253,8 @@
+ 
+ fi::CompiledChatTemplate compile_chat_template(const FrontendResources& resources,
+                                                const std::filesystem::path& override_path,
+-                                               bool qwen = true) {
++                                               bool qwen = true,
++                                               kvmem::SourceConfiguration* source_identity = nullptr) {
+     if (qwen) { validate_tokenizer_config(resources); }
+     nlohmann::ordered_json tokens = nlohmann::ordered_json::object();
+     const auto config             = nlohmann::ordered_json::parse(resources.tokenizer_config_json);
+@@ -283,6 +285,15 @@
+         if (!file.read(source.data(), static_cast<std::streamsize>(source.size()))) {
+             throw std::invalid_argument("cannot read chat template: " + name);
+         }
++    }
++    if (source_identity) {
++        std::array<std::uint8_t, 97> identity{};
++        identity[0] = 1; // text-source frontend schema
++        const std::array hashes{fi::sha256(resources.tokenizer_json),
++            fi::sha256(resources.tokenizer_config_json), fi::sha256(source)};
++        for (std::size_t i = 0; i < hashes.size(); ++i)
++            std::copy(hashes[i].begin(), hashes[i].end(), identity.begin() + 1 + 32 * i);
++        *source_identity = fi::sha256(identity);
+     }
+     return fi::CompiledChatTemplate::resolve(source, std::move(name), std::move(tokens));
+ }
+@@ -906,7 +917,8 @@
+     Impl(const FrontendResources& resources, FrontendOptions options)
+         : chat_template(compile_chat_template(resources, options.chat_template_path,
+                                               options.architecture != Architecture::Gemma4 &&
+-                                                  options.architecture != Architecture::Flint)),
++                                                  options.architecture != Architecture::Flint,
++                                              options.source_recording ? &source_configuration : nullptr)),
+           tokenizer(resources.tokenizer),
+           processor(!options.vision_enabled                        ? fi::ProcessorOptions{}
+                     : options.architecture == Architecture::Gemma4 ? fi::ProcessorOptions{}
+@@ -1075,6 +1087,7 @@
+     mutable std::unique_ptr<text::StructuredCompiler> grammar_compiler;
+     mutable bool tool_open_resolved = false;
+     mutable std::optional<TokenId> tool_open_token;
++    kvmem::SourceConfiguration source_configuration{};
+     fi::CompiledChatTemplate chat_template;
+     std::shared_ptr<const fi::Tokenizer> tokenizer;
+     fi::ProcessorOptions processor;
+@@ -1256,6 +1269,9 @@
+     data.positions = std::move(positions);
+     data.token_ids.resize(prefix);
+     data.token_types.resize(prefix);
++    std::erase_if(data.source_events, [prefix](const kvmem::SourceEvent& event) { return event.begin >= prefix; });
++    for (auto& event : data.source_events)
++        if (event.end > prefix) { event.end = prefix; event.complete = false; }
+     const auto beyond = [prefix](std::uint32_t frontier) { return frontier > prefix; };
+     std::erase_if(
+         data.context_cache.opportunities,
+@@ -1457,8 +1473,41 @@
+     for(std::size_t i=0;i+1<message_boundaries.size();++i) {
+         if((message_boundaries[i] || i==0) && message_boundaries[i+1]) {
+             const auto begin=message_boundaries[i].value_or(0),end=*message_boundaries[i+1];
+-            if(begin<end && end<=result.token_ids.size()) result.memory_messages.push_back({begin,end-begin});
+-        }
++            if(begin<end && end<=result.token_ids.size()) {
++                result.memory_messages.push_back({begin,end-begin});
++                if (impl_->source_configuration != kvmem::SourceConfiguration{} && i < message_roles.size()) {
++                    const auto kind = [&] {
++                        using Kind = kvmem::SourceEventKind;
++                        switch (message_roles[i]) {
++                        case ChatRole::System: return Kind::System;
++                        case ChatRole::Developer: return Kind::Developer;
++                        case ChatRole::User: return Kind::User;
++                        case ChatRole::Assistant: return Kind::Assistant;
++                        case ChatRole::Tool: return Kind::ToolResult;
++                        }
++                        throw std::logic_error("unknown source message role");
++                    }();
++                    result.source_events.push_back({i + 1, begin, end, kind, true});
++                }
++            }
++        }
++    }
++    if (impl_->source_configuration != kvmem::SourceConfiguration{}) {
++        if (result.has_media())
++            throw std::invalid_argument("source recording currently supports text only");
++        std::array<std::uint8_t, 68> key{};
++        std::copy(impl_->source_configuration.begin(), impl_->source_configuration.end(), key.begin());
++        const auto kwargs = fi::sha256(options.chat_template_kwargs_json);
++        std::copy(kwargs.begin(), kwargs.end(), key.begin() + 32);
++        key[64] = static_cast<std::uint8_t>(options.continuation);
++        key[65] = options.enable_thinking ? std::uint8_t(*options.enable_thinking) : 2;
++        key[66] = options.preserve_thinking ? std::uint8_t(*options.preserve_thinking) : 2;
++        key[67] = options.reasoning_effort ? std::uint8_t(*options.reasoning_effort) : 255;
++        result.source_configuration = fi::sha256(key);
++        const auto begin = result.source_events.empty() ? 0 : result.source_events.back().end;
++        if (result.memory_input_end && begin == result.memory_input_end && begin < result.token_ids.size())
++            result.source_events.push_back({message_roles.size() + 1, begin, result.token_ids.size(),
++                kvmem::SourceEventKind::Control, true});
+     }
+     if (impl_->ngram_archive_enabled && options.speculative_drafting) {
+         const std::span<const TokenId> tokens(result.token_ids);
+@@ -1601,6 +1650,14 @@
+     auto prepared              = std::make_unique<PreparedPromptData>();
+     PreparedPromptData& result = *prepared;
+     result.token_ids           = std::move(token_ids);
++    if (impl_->source_configuration != kvmem::SourceConfiguration{}) {
++        std::array<std::uint8_t, 33> key{};
++        std::copy(impl_->source_configuration.begin(), impl_->source_configuration.end(), key.begin());
++        key[32] = 255; // raw token input, distinct from chat rendering
++        result.source_configuration = fi::sha256(key);
++        if (!result.token_ids.empty())
++            result.source_events.push_back({1, 0, result.token_ids.size(), kvmem::SourceEventKind::RawInput, true});
++    }
+     const auto memory_open=impl_->tokenizer->encode("<think>");
+     const auto memory_close=impl_->tokenizer->encode("</think>");
+     if(memory_open.size()==1) result.memory_think_open=memory_open[0];
+diff --git a/src/models/qwen3_5/frontend/frontend.h b/src/models/qwen3_5/frontend/frontend.h
+--- a/src/models/qwen3_5/frontend/frontend.h
++++ b/src/models/qwen3_5/frontend/frontend.h
+@@ -26,6 +26,7 @@
+     std::filesystem::path chat_template_path;
+     Architecture architecture              = Architecture::Qwen3_5;
+     bool vision_enabled                    = true;
++    bool source_recording                  = false;
+     std::uint32_t max_context              = 2'048;
+     std::size_t media_cache_bytes          = kDefaultMediaCacheBytes;
+     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;
+diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
+--- a/src/models/qwen3_5/frontend/prepared_prompt.h
++++ b/src/models/qwen3_5/frontend/prepared_prompt.h
+@@ -2,6 +2,7 @@
+ 
+ #include "runtime/contract/resources.h"
+ #include "runtime/prefix_cache/tap_planner.h"
++#include "kvmem/source_journal.hpp"
+ 
+ #include "models/qwen3_5/frontend/frontend.h"
+ #include "models/qwen3_5/program/ngram_proposer.h"
+@@ -166,6 +167,8 @@
+     std::vector<std::uint64_t> block_hashes;
+     std::vector<std::uint64_t> block_extras;
+     std::vector<TokenId> token_ids;
++    kvmem::SourceConfiguration source_configuration{};
++    std::vector<kvmem::SourceEvent> source_events;
+     // Exact token range from frontend provenance. Absent means no trusted query;
+     // retrieval keeps its recency fallback. Raw token input explicitly uses all rows.
+     std::optional<TokenSpan> memory_query;
+diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
+--- a/src/models/qwen3_5/program/program_impl.cpp
++++ b/src/models/qwen3_5/program/program_impl.cpp
+@@ -251,6 +251,9 @@
+       kvmem_options(plan.kvmem),
+       historical_auxiliary(plan.kvmem.historical_gc_enabled()
+           ? std::make_shared<kvmem::HistoricalKvAuxBudget>(plan.kvmem.historical_gc_aux_bytes) : nullptr),
++      source_journal(plan.kvmem.source_bytes
++          ? std::make_unique<kvmem::SourceJournalStore>(kvmem::SourceLimits{
++              plan.kvmem.source_bytes, plan.capacity, plan.capacity, 256}) : nullptr),
+       memory_payload_storage(plan.kvmem.host_bytes, plan.kvmem.disk_bytes
+           ? std::make_shared<kvmem::SpillFile>(plan.kvmem.disk_path, plan.kvmem.disk_bytes) : nullptr),
+       memory_retained_budget(plan.kvmem.host_bytes),
+@@ -1133,6 +1136,20 @@
+             memory.gc_aux_peak_bytes = auxiliary.peak;
+             memory.gc_aux_denied = auxiliary.denied;
+         }
++        if (source_journal) {
++            const auto source = source_journal->stats();
++            memory.source_budget_bytes = source.capacity;
++            memory.source_bytes = source.charged;
++            memory.source_peak_bytes = source.peak;
++            memory.source_denied = source.denied;
++            memory.source_records = source.sources;
++            memory.source_last_id = source_last.ref.source.id;
++            memory.source_last_revision = source_last.ref.revision;
++            memory.source_last_accepted_tokens = source_last.accepted_frontier;
++            memory.source_last_computed_tokens = source_last.computed_frontier;
++            memory.source_last_events = source_last.events;
++            memory.source_last_tokens_fnv1a64 = source_last_tokens_fnv1a64;
++        }
+     }
+     out.device          = device.device;
+     out.max_context     = capacity;
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -8,6 +8,7 @@
+ #include "core/device_snapshot.h"
+ #include "core/vmm.h"
+ #include "kvmem/memory_contract.hpp"
++#include "kvmem/source_journal.hpp"
+ #include "kvmem/prefix_checkpoint.hpp"
+ #include "kvmem/checkpoint_policy.hpp"
+ #include "kvmem/checkpoint_image.hpp"
+@@ -633,6 +634,7 @@
+ }
+ 
+ struct KvmemWindowState {
++    kvmem::SourceRef source;
+     std::optional<PreparedSessionKey> session_key;
+     std::uint64_t publication_order = 0;
+     bool update_session_index = true;
+@@ -788,6 +790,7 @@
+ // Request/round control is not retained with a reusable SequenceState. A later concurrent Engine
+ // gives every occupied request slot its own instance of this state.
+ struct RequestControl {
++    kvmem::SourceRef source;
+     std::unique_ptr<NgramProposer> ngram;
+     std::shared_ptr<const NgramSnapshot> ngram_snapshot;
+     std::uint64_t ngram_copy_source = 0;
+@@ -900,6 +903,7 @@
+         allow_memory_reuse = false;
+         memory_payload_reservation = 0;
+         memory_session_key.reset();
++        source = {};
+         lease_settled        = false;
+         lease_space_limited  = false;
+         lease_minimum_target = {};
+@@ -1157,6 +1161,12 @@
+     const std::uint32_t kvmem_window_tokens;
+     const KvmemOptions kvmem_options;
+     std::shared_ptr<kvmem::HistoricalKvAuxBudget> historical_auxiliary;
++    std::unique_ptr<kvmem::SourceJournalStore> source_journal;
++    kvmem::SourceState source_last;
++    std::uint64_t source_last_tokens_fnv1a64 = 14695981039346656037ULL;
++    void capture_source(SequenceState&, RequestControl&);
++    void record_source_progress(SequenceState&, RequestControl&, bool accepted_output,
++        kvmem::SourceEventKind kind = kvmem::SourceEventKind::Assistant, bool terminal = false);
+     kvmem::HostKvStorage memory_payload_storage;
+     kvmem::HostKvStorage memory_transfer_storage; // bounded CPU scratch through GPU publication
+     kvmem::HostKvStorage memory_state_staging; // one admitted state-image read at a time
+diff --git a/src/models/qwen3_5/program/storage/context.cpp b/src/models/qwen3_5/program/storage/context.cpp
+--- a/src/models/qwen3_5/program/storage/context.cpp
++++ b/src/models/qwen3_5/program/storage/context.cpp
+@@ -967,7 +967,9 @@
+         throw std::logic_error("prefill advance requires a prefilling sequence");
+     }
+     try {
++        capture_source(active_sequence(lane), requests[lane]);
+         runtime::PrefillStepResult step = advance_prefill_raw(lane, failed_timing);
++        record_source_progress(active_sequence(lane), requests[lane], false);
+         if (failed_timing != nullptr) { *failed_timing += step.timing; }
+         return wrap_prefill(lane, std::move(step));
+     } catch (const kvmem::MemoryError&) {
+@@ -1024,7 +1026,10 @@
+     }
+     const std::span<const std::uint32_t> members(lanes.data(), sequences.size());
+     try {
+-        return advance_prefill_batch(members, failed_timing);
++        for (const auto lane : members) capture_source(active_sequence(lane), requests[lane]);
++        auto timing = advance_prefill_batch(members, failed_timing);
++        for (const auto lane : members) record_source_progress(active_sequence(lane), requests[lane], false);
++        return timing;
+     } catch (...) {
+         const Clock::time_point cleanup_started = Clock::now();
+         clear_execution_failure_lanes(members);
+diff --git a/src/models/qwen3_5/program/storage/source_journal.cpp b/src/models/qwen3_5/program/storage/source_journal.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/models/qwen3_5/program/storage/source_journal.cpp
+@@ -0,0 +1,129 @@
++#include "models/qwen3_5/program/program_impl.h"
++#include "models/qwen3_5/frontend/digest.h"
++
++#include <bit>
++#include <cstdio>
++
++namespace ninfer::models::qwen3_5::detail {
++namespace {
++kvmem::SourceConfiguration configuration(const ProgramImpl& program, const PreparedPromptData& prompt) {
++    // Explicit little-endian scalar encoding: no struct padding, pointer values,
++    // std::hash or source byte positions masquerading as computation identity.
++    std::array<std::uint8_t, 512> bytes{};
++    std::size_t used = 0;
++    const auto byte = [&](std::uint8_t x) {
++        if (used == bytes.size()) throw std::logic_error("source configuration encoding overflow");
++        bytes[used++] = x;
++    };
++    const auto integer = [&](std::uint64_t x) { for (int i = 0; i < 8; ++i) byte(std::uint8_t(x >> (8 * i))); };
++    for (const char x : std::string_view("ninfer/qwen3.5/text-source-configuration/v1")) byte(std::uint8_t(x));
++    for (auto x : program.parameters.model.info().artifact_id) byte(std::to_integer<std::uint8_t>(x));
++    for (auto x : prompt.source_configuration) byte(x);
++    integer(std::uint64_t(program.kv_storage)); integer(std::uint64_t(program.speculative_backend));
++    integer(program.capacity); integer(program.prefill_chunk); integer(program.fast_prefill_kernel);
++    integer(program.use_cuda_graph); integer(program.draft_window); integer(program.ngram_draft_window);
++    integer(program.mtp_attention_window);
++    integer(std::bit_cast<std::uint32_t>(program.rope_yarn.factor));
++    integer(program.rope_yarn.native_context);
++    integer(std::bit_cast<std::uint32_t>(program.rope_yarn.interpolation_factor));
++    integer(program.rope_yarn.interpolation_threshold);
++    const auto& m = program.kvmem_options;
++    for (auto value : {std::uint64_t(m.selected_tokens), std::uint64_t(m.reserve_tokens),
++        std::uint64_t(m.sink_tokens), std::uint64_t(m.recent_tokens),
++        std::uint64_t(m.query_replay_max_tokens), std::uint64_t(m.query_max_tokens),
++        std::uint64_t(m.query_meanq_cosine), std::uint64_t(m.score_agg_max), std::uint64_t(m.lrfu),
++        std::uint64_t(m.historical_gc_lru), std::uint64_t(m.historical_gc_redundancy),
++        std::bit_cast<std::uint64_t>(m.lrfu_lambda), std::bit_cast<std::uint64_t>(m.lrfu_top_fraction),
++        std::bit_cast<std::uint64_t>(m.graph_alpha)}) integer(value);
++    return frontend::sha256(std::span<const std::uint8_t>(bytes).first(used));
++}
++
++// Diagnostic only. Hash the actual journal rows, not the input/ledger pointer.
++// Source identity and checkpoint permission never depend on this FNV digest.
++std::uint64_t hash_rows(const kvmem::SourceJournalStore& store, kvmem::SourceRef ref,
++                       std::uint64_t begin, std::uint64_t end, std::uint64_t hash,
++                       std::span<const TokenId> expected = {}) {
++    std::array<std::int32_t, 64> rows{};
++    std::size_t compared = 0;
++    if (!expected.empty() && expected.size() != end - begin)
++        throw std::logic_error("source verification span has the wrong length");
++    while (begin < end) {
++        const auto count = std::min<std::uint64_t>(rows.size(), end - begin);
++        store.read_tokens(ref, begin, rows.data(), std::size_t(count));
++        if (!expected.empty() && !std::equal(rows.begin(), rows.begin() + count, expected.begin() + compared))
++            throw std::logic_error("accepted source row verification failed");
++        for (std::size_t i = 0; i < count; ++i)
++            for (unsigned b = 0; b < 4; ++b)
++                hash = (hash ^ std::uint8_t(std::uint32_t(rows[i]) >> (8 * b))) * 1099511628211ULL;
++        begin += count;
++        compared += std::size_t(count);
++    }
++    return hash;
++}
++}
++
++void ProgramImpl::capture_source(SequenceState& sequence, RequestControl& request) {
++    if (!source_journal || request.source.source.id) return;
++    if (!request.prefill) throw std::logic_error("source capture lost prepared input");
++    const auto& prompt = request.prefill->prompt;
++    const auto count = prompt.token_ids.size();
++    if (prompt.has_media() || !prompt.graft_name.empty() || prompt.rope_delta ||
++        prompt.token_types.size() != count || prompt.positions.size() != 3 * count ||
++        prompt.source_configuration == kvmem::SourceConfiguration{})
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported, "source recording requires prepared plain text rows");
++    for (std::size_t i = 0; i < count; ++i) {
++        if (prompt.token_types[i] != 0) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported, "source recording lacks media row assets");
++        for (std::size_t axis = 0; axis < 3; ++axis)
++            if (prompt.positions[axis * count + i] != std::int32_t(i))
++                throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported, "source recording lacks custom position rows");
++    }
++    // Admission already owns this complete prepared input. Source acceptance
++    // does not imply that all its KV has executed; computed frontier is separate.
++    const auto ref = source_journal->capture(configuration(*this, prompt), prompt.token_ids.data(), count,
++        prompt.source_events.data(), prompt.source_events.size(), sequence.text_kv_valid);
++    const auto state = source_journal->state(ref);
++    const auto digest = hash_rows(*source_journal, ref, 0, state.accepted_frontier, 14695981039346656037ULL,
++        kvmem_options.verify_transfers ? std::span<const TokenId>(prompt.token_ids) : std::span<const TokenId>{});
++    request.source = sequence.window.source = ref;
++    source_last = state; source_last_tokens_fnv1a64 = digest;
++    if (kvmem_options.verify_transfers)
++        std::fprintf(stderr, "KVMEM_SOURCE_CAPTURE id=%llu accepted=%llu computed=%llu events=%llu\n",
++            (unsigned long long)ref.source.id, (unsigned long long)state.accepted_frontier,
++            (unsigned long long)state.computed_frontier, (unsigned long long)state.events);
++}
++
++void ProgramImpl::record_source_progress(SequenceState& sequence, RequestControl& request,
++    bool accepted_output, kvmem::SourceEventKind kind, bool terminal) {
++    if (!source_journal || !request.source.source.id) return;
++    const auto old = source_journal->state(request.source);
++    const auto end = accepted_output ? std::uint64_t(sequence.ledger_frontier) : old.accepted_frontier;
++    const auto computed = accepted_output ? sequence.execution_frontier : sequence.text_kv_valid;
++    if (end < old.accepted_frontier || end > sequence.ledger.size() || computed > end)
++        throw std::logic_error("source commit disagrees with accepted Program frontier");
++    if (end == old.accepted_frontier && computed == old.computed_frontier) return;
++    std::array<kvmem::SourceEvent, 2> events{};
++    std::size_t count = 0;
++    if (end > old.accepted_frontier) {
++        kvmem::SourceEvent previous{};
++        if (old.events) previous = source_journal->event(request.source, old.events - 1);
++        if (old.events && !previous.complete && previous.kind == kind) {
++            previous.end = end; previous.complete = terminal;
++            events[count++] = previous;
++        } else {
++            if (old.events && !previous.complete) {
++                previous.complete = true; events[count++] = previous;
++            }
++            events[count++] = {previous.id + 1, old.accepted_frontier, end, kind, terminal};
++        }
++    }
++    const auto ref = source_journal->append(request.source,
++        sequence.ledger.data() + old.accepted_frontier, std::size_t(end - old.accepted_frontier),
++        events.data(), count, computed);
++    const auto state = source_journal->state(ref);
++    const auto digest = hash_rows(*source_journal, ref, old.accepted_frontier, end, source_last_tokens_fnv1a64,
++        kvmem_options.verify_transfers ? std::span<const TokenId>(sequence.ledger).subspan(
++            old.accepted_frontier, end - old.accepted_frontier) : std::span<const TokenId>{});
++    request.source = sequence.window.source = ref;
++    source_last = state; source_last_tokens_fnv1a64 = digest;
++}
++} // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/transactions/commit.cpp b/src/models/qwen3_5/program/transactions/commit.cpp
+--- a/src/models/qwen3_5/program/transactions/commit.cpp
++++ b/src/models/qwen3_5/program/transactions/commit.cpp
+@@ -485,6 +485,8 @@
+             request.timings.decode_seconds +=
+                 std::chrono::duration<double>(Clock::now() - started).count();
+         }
++        for (const auto lane : std::span<const std::uint32_t>(lanes.data(), members.size()))
++            record_source_progress(active_sequence(lane), requests[lane], true, kvmem::SourceEventKind::Control, true);
+         return timing.finish();
+     } catch (...) {
+         timing.begin_wait();
+@@ -625,6 +627,10 @@
+                 prefill.pending_capture_offer));
+         }
+         if (released_resource) { advance_resource_revision(); }
++        for (std::size_t row = 0; row < row_count; ++row)
++            if (!decisions[row].cancelled)
++                record_source_progress(active_sequence(lanes[row]), requests[lanes[row]], true,
++                    kvmem::SourceEventKind::Assistant, decisions[row].terminal);
+         out.timing = timing.finish();
+         return out;
+     } catch (...) {
+diff --git a/src/models/qwen3_5/program_sources.cmake b/src/models/qwen3_5/program_sources.cmake
+--- a/src/models/qwen3_5/program_sources.cmake
++++ b/src/models/qwen3_5/program_sources.cmake
+@@ -18,6 +18,7 @@
+   "${CMAKE_CURRENT_LIST_DIR}/program/transactions/materialization.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/context.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/kvmem_window.cpp"
++  "${CMAKE_CURRENT_LIST_DIR}/program/storage/source_journal.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/memory_statistics.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/disk_tier.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/session_snapshot.cpp"
+diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
+--- a/src/runtime/engine/model_instance.cpp
++++ b/src/runtime/engine/model_instance.cpp
+@@ -321,7 +321,7 @@
+     if ((options.kvmem.lrfu || options.kvmem.score_agg_max || options.kvmem.query_meanq_cosine || options.kvmem.graph_alpha != 0.2) && !options.kvmem.selected_tokens)
+         throw std::invalid_argument("KVMem retrieval options require selected_tokens");
+     if (!options.kvmem.selected_tokens &&
+-        (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
++        (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers || options.kvmem.source_bytes ||
+          options.kvmem.historical_gc_enabled() ||
+          !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes)) {
+         throw std::invalid_argument("KVMem auxiliary budgets require selected_tokens");
+@@ -340,6 +340,10 @@
+     if (options.kvmem.historical_gc_enabled() && options.max_concurrency != 1) {
+         throw std::invalid_argument("NInfer historical GC currently requires max_concurrency=1");
+     }
++    if (options.kvmem.source_bytes && (options.kvmem.disk_bytes || options.devices.size() > 1 ||
++        options.tensor_parallel || options.max_concurrency != 1 ||
++        (options.speculative.backend != SpeculativeBackend::None && options.speculative.backend != SpeculativeBackend::Mtp)))
++        throw std::invalid_argument("NInfer source recording currently requires single-GPU RAM, one lane and none/MTP");
+     if (options.kvmem.selected_tokens != 0) {
+         if (options.expert_residency != ExpertResidency::Device) {
+             throw std::invalid_argument("KVMem does not support host/disk routed expert residency");
+@@ -631,6 +635,7 @@
+           {.chat_template_path       = options.chat_template_path,
+            .architecture             = model->config().text.architecture,
+            .vision_enabled           = options.enable_vision,
++           .source_recording         = options.kvmem.source_bytes != 0,
+            .max_context              = options.max_context,
+            .media_cache_bytes        = options.media_cache_bytes,
+            .media_live_bytes         = options.media_live_bytes,
+diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
+--- a/src/serve/http_server.cpp
++++ b/src/serve/http_server.cpp
+@@ -1132,6 +1132,7 @@
+         {"recent_tokens", options.kvmem.recent_tokens},
+         {"host_payload_budget_bytes", options.kvmem.host_bytes},
+         {"gc_policy", options.kvmem.historical_gc_redundancy ? "redundancy" : options.kvmem.historical_gc_lru ? "lru" : "off"},
++        {"source_budget_bytes", options.kvmem.source_bytes},
+         {"gc_aux_budget_bytes", options.kvmem.historical_gc_aux_bytes}};
+     if (options.kvmem.selected_tokens) {
+         props["kvmem"]["usage"] = kvmem_status_json(service.runtime_stats().kvmem);
+diff --git a/src/serve/kvmem_status_json.h b/src/serve/kvmem_status_json.h
+--- a/src/serve/kvmem_status_json.h
++++ b/src/serve/kvmem_status_json.h
+@@ -9,6 +9,14 @@
+         {"host_payload_bytes", m.host_payload_bytes}, {"statistics_bytes", m.statistics_bytes},
+         {"gc_aux_budget_bytes", m.gc_aux_budget_bytes}, {"gc_aux_bytes", m.gc_aux_bytes},
+         {"gc_aux_peak_bytes", m.gc_aux_peak_bytes}, {"gc_aux_denied", m.gc_aux_denied},
++        {"source_budget_bytes", m.source_budget_bytes}, {"source_bytes", m.source_bytes},
++        {"source_peak_bytes", m.source_peak_bytes}, {"source_denied", m.source_denied},
++        {"source_records", m.source_records}, {"source_last_id", m.source_last_id},
++        {"source_last_revision", m.source_last_revision},
++        {"source_last_accepted_tokens", m.source_last_accepted_tokens},
++        {"source_last_computed_tokens", m.source_last_computed_tokens},
++        {"source_last_events", m.source_last_events},
++        {"source_last_tokens_fnv1a64", m.source_last_tokens_fnv1a64},
+         {"disk_payload_budget_bytes", m.disk_payload_budget_bytes}, {"disk_payload_bytes", m.disk_payload_bytes},
+         {"retained_payload_budget_bytes", m.retained_payload_budget_bytes},
+         {"disk_read_bytes", m.disk_read_bytes}, {"disk_written_bytes", m.disk_written_bytes},
+diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
+--- a/src/serve/serve_options.cpp
++++ b/src/serve/serve_options.cpp
+@@ -110,6 +110,7 @@
+            "  --kvmem-gc-lru               retire cold sealed Host pages between decode rounds (default off)\n"
+            "  --kvmem-gc-redundancy        retire similar sealed Host pages, then capacity fallback (experimental)\n"
+            "  --kvmem-gc-aux-mib N         positive shared GC metadata/features budget, MiB (default 1024)\n"
++           "  --kvmem-source-mib N         opt-in accepted text source quota, MiB (single-GPU RAM)\n"
+            "  --kvmem-sink-tokens N         always-kept prefix; default 0 = one 64-token\n"
+            "                                page; positive values round down, minimum one page\n"
+            "  --kvmem-recent-tokens N       always-kept newest suffix; default 64 (one page);\n"
+@@ -744,6 +745,13 @@
+             options.kvmem.historical_gc_aux_bytes = mib << 20;
+             continue;
+         }
++        if (arg == "--kvmem-source-mib") {
++            const auto mib = parse_u64(require_value(arg.c_str()), "kvmem-source-mib");
++            if (!mib || mib > UINT64_MAX / (1ULL << 20))
++                throw std::invalid_argument("--kvmem-source-mib must be positive and fit bytes");
++            options.kvmem.source_bytes = mib << 20;
++            continue;
++        }
+         if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
+             // --vram-headroom-mib is the Wallawalla47 fork's name for the same headroom.
+             const std::uint64_t mib = parse_u64(require_value(arg.c_str()), arg.c_str() + 2);
+@@ -2039,7 +2047,7 @@
+         // --no-prefix-reuse still controls request reuse. Only the native catalog
+         // is disabled here; KVMem owns the current session's trusted checkpoint.
+         options.context_cache.enabled = false;
+-    } else if (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
++    } else if (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers || options.kvmem.source_bytes ||
+          options.kvmem.historical_gc_enabled() ||
+          !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes) {
+         throw std::invalid_argument("KVMem auxiliary options require --kvmem-budget");
+@@ -2055,6 +2063,10 @@
+             throw std::invalid_argument("NInfer historical GC currently requires single-GPU RAM history");
+         if (!options.kvmem.historical_gc_aux_bytes) options.kvmem.historical_gc_aux_bytes = 1024ULL << 20;
+     }
++    if (options.kvmem.source_bytes && (options.kvmem.disk_bytes || options.devices.size() > 1 ||
++        options.tensor_parallel || options.max_concurrency != 1 ||
++        (options.speculative.backend != SpeculativeBackend::None && options.speculative.backend != SpeculativeBackend::Mtp)))
++        throw std::invalid_argument("NInfer source recording currently requires single-GPU RAM, one lane and none/MTP");
+     if (options.kvmem.disk_path.empty() != (options.kvmem.disk_bytes == 0) ||
+         options.kvmem.host_bytes > UINT64_MAX - options.kvmem.disk_bytes)
+         throw std::invalid_argument("KVMem SSD requires both --kvmem-disk-path and --kvmem-disk-mib");
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -118,7 +118,7 @@
+ 
+ # The query provenance tests are also runnable without linking unrelated GPU test families.
+ ninfer_add_test(ninfer_memory_frontend STANDALONE NEEDS_SOURCE_DIR
+-  SOURCES models/qwen3_5/test_frontend.cpp LIBRARIES ninfer_engine ninfer_core ninfer::json)
++  SOURCES models/qwen3_5/test_frontend.cpp LIBRARIES ninfer_engine ninfer_model_runtime ninfer_core ninfer::json)
+ ninfer_stage_runtime_dlls(ninfer_memory_frontend)
+ ninfer_add_test(ninfer_token_sums STANDALONE
+   SOURCES experimental/token_sums.cpp LIBRARIES ninfer_ops)
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -39,7 +39,7 @@
+ 
+ ninfer_add_test(ninfer_context_cache_defaults_test
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_context_cache_defaults.cpp"
+-  LIBRARIES ninfer_engine ninfer_core ninfer::json)
++  LIBRARIES ninfer_engine ninfer_model_runtime ninfer_core ninfer::json)
+ 
+ ninfer_add_test(ninfer_sampling_defaults_test
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_sampling_defaults.cpp"
+diff --git a/tests/models/qwen3_5/test_frontend.cpp b/tests/models/qwen3_5/test_frontend.cpp
+--- a/tests/models/qwen3_5/test_frontend.cpp
++++ b/tests/models/qwen3_5/test_frontend.cpp
+@@ -1225,6 +1225,57 @@
+         after.input_ids.size() > before.input_ids.size() &&
+             std::equal(before.input_ids.begin(), before.input_ids.end(), after.input_ids.begin()),
+         "appending diagnostics changed the token prefix of quoted message content");
++    return failures;
++}
++
++int test_source_recording_provenance() {
++    FrontendOptions options;
++    options.vision_enabled = false;
++    options.source_recording = true;
++    options.max_context = 4096;
++    const auto frontend = make_frontend(resources(), options);
++    ninfer::PromptInput input;
++    for (const auto role : {ninfer::ChatRole::User, ninfer::ChatRole::Assistant,
++                          ninfer::ChatRole::Tool, ninfer::ChatRole::User}) {
++        ninfer::ChatMessage message; message.role = role;
++        message.parts.push_back({.kind = ninfer::MessagePartKind::Text,
++            .text = role == ninfer::ChatRole::Tool ? "stored result" : "question", .media = {}});
++        if (role == ninfer::ChatRole::Assistant)
++            message.tool_calls.push_back({.id = "call1", .name = "lookup", .arguments_json = "{}"});
++        if (role == ninfer::ChatRole::Tool) message.tool_call_id = "call1";
++        input.messages.push_back(std::move(message));
++    }
++    const auto prepared = frontend.prepare(input);
++    const auto repeated = frontend.prepare(input);
++    const auto& data = FrontendFactory::inspect(prepared);
++    int failures = check(data.source_configuration != kvmem::SourceConfiguration{} &&
++        data.source_configuration == FrontendFactory::inspect(repeated).source_configuration,
++        "source input configuration is missing or unstable");
++    bool tool = false;
++    std::uint64_t previous = 0;
++    for (const auto& event : data.source_events) {
++        failures += check(event.id && event.begin >= previous && event.begin < event.end &&
++            event.end <= data.token_ids.size(), "source event is outside exact frontend token boundaries");
++        previous = event.end;
++        tool |= event.kind == kvmem::SourceEventKind::ToolResult;
++    }
++    failures += check(tool, "real Tool input lost its source provenance");
++    const auto raw = frontend.prepare_tokens({0, 0, 0});
++    const auto& raw_data = FrontendFactory::inspect(raw);
++    failures += check(raw_data.source_configuration != data.source_configuration &&
++        raw_data.source_events.size() == 1 && raw_data.source_events[0].kind == kvmem::SourceEventKind::RawInput,
++        "raw token input was confused with chat/control provenance");
++    const auto altered = make_frontend(resources(thinking_toggle_template_source() + "\n"), options).prepare(input);
++    failures += check(FrontendFactory::inspect(altered).source_configuration != data.source_configuration,
++        "source configuration ignored a changed active template");
++    input.options.chat_template_kwargs_json = "{\"source_fixture\":true}";
++    const auto kwargs = frontend.prepare(input);
++    failures += check(FrontendFactory::inspect(kwargs).source_configuration != data.source_configuration,
++        "source configuration ignored template arguments");
++    const auto disabled = make_frontend(resources(), false).prepare(input);
++    failures += check(FrontendFactory::inspect(disabled).source_events.empty() &&
++        FrontendFactory::inspect(disabled).source_configuration == kvmem::SourceConfiguration{},
++        "disabled source recording collected provenance");
+     return failures;
+ }
+ 
+@@ -4736,6 +4787,7 @@
+     failures += test_assistant_continuation();
+     failures += test_rewrite_checkpoint_trace();
+     failures += test_adjacent_tool_message_boundary();
++    failures += test_source_recording_provenance();
+     failures += test_literal_cache_boundary();
+     failures += test_reasoning_effort_substitution();
+     failures += test_selected_template_recovery_boundary();
+diff --git a/tests/models/qwen3_5/tests.cmake b/tests/models/qwen3_5/tests.cmake
+--- a/tests/models/qwen3_5/tests.cmake
++++ b/tests/models/qwen3_5/tests.cmake
+@@ -7,7 +7,7 @@
+ 
+ ninfer_add_test(ninfer_ngram_graph_planning_test
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_ngram_graph_planning.cpp"
+-  LIBRARIES ninfer_engine ninfer_core ninfer::json)
++  LIBRARIES ninfer_engine ninfer_model_runtime ninfer_core ninfer::json)
+ add_test(NAME ninfer_ngram_graph_planning_real
+   COMMAND ninfer_tests ninfer_ngram_graph_planning_test --real)
+ set_tests_properties(ninfer_ngram_graph_planning_real PROPERTIES SKIP_RETURN_CODE 77)
+@@ -45,7 +45,7 @@
+ ninfer_add_test(ninfer_qwen3_5_frontend_test
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_frontend.cpp"
+   NEEDS_SOURCE_DIR
+-  LIBRARIES ninfer_engine ninfer_core ninfer::json)
++  LIBRARIES ninfer_engine ninfer_model_runtime ninfer_core ninfer::json)
+ 
+ ninfer_add_test(ninfer_gemma4_output_test
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_gemma_output.cpp"
+diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
+--- a/tests/test_serve_options.cpp
++++ b/tests/test_serve_options.cpp
+@@ -161,6 +161,25 @@
+         "--kvmem-budget", "384", "--kvmem-gen-reserve", "128", "--kvmem-host-mib", "16384"};
+     const auto kvmem = parse(memory_args);
+     const auto kvmem_engine = make_engine_options(kvmem);
++    {
++        auto args = memory_args;
++        args.insert(args.end(), {"--kvmem-source-mib", "1"});
++        failures += check(make_engine_options(parse(args)).kvmem.source_bytes == (1ULL << 20),
++                          "source quota was lost between CLI and Engine");
++        for (const auto& suffix : std::vector<std::vector<std::string>>{
++            {"--kvmem-source-mib", "0"}, {"--kvmem-source-mib", "18446744073709551615"},
++            {"--kvmem-source-mib"}, {"--max-concurrency", "2"}, {"--devices", "0,1"},
++            {"--kvmem-disk-mib", "1", "--kvmem-disk-path", "source-unsupported.tmp"}}) {
++            auto bad = args; bad.insert(bad.end(), suffix.begin(), suffix.end());
++            bool invalid = false;
++            try { (void)parse(bad); } catch (const std::invalid_argument&) { invalid = true; }
++            failures += check(invalid, "source recording accepted an invalid quota or unsupported topology");
++        }
++        bool invalid = false;
++        try { (void)parse({"ninfer-serve", "model.ninfer", "--kvmem-source-mib", "1"}); }
++        catch (const std::invalid_argument&) { invalid = true; }
++        failures += check(invalid, "source quota was accepted without KVMem");
++    }
+     {
+         auto args = memory_args;
+         args.push_back("--kvmem-gc-lru");

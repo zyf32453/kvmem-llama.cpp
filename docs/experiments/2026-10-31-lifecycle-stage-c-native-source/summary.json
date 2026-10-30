@@ -1,0 +1,518 @@
+{
+  "date": "2026-10-31",
+  "stage": "C2_native_source_recording",
+  "status": "opt_in_recording_and_service_gates_passed_recovery_incomplete",
+  "production_qualified": false,
+  "parent_commit": "763889597c022a52ac42f8b4ad5c0301cdfad1d7",
+  "manifest_sha256": "8254d224f1c0902c3e3e579faae889e39f4f7b950f96146c83a85be5993273ee",
+  "source_pins": 99,
+  "native_inputs": {
+    "base_tree": "1ad96bf9efbcd99f87bf63a36cb4ecf72f85c082",
+    "patched_tree": "3a7573b8f77e5e0d266e67e2a78b252e78e96ec2",
+    "patch_sha256": "a05efd3d8eaa3616f32b5b328722c902e1f33ac255dd714e12490b689729a33c",
+    "delta_sha256": "5220d9de08ad44fdb95a0ac75cce984288f25971cf3fb7a932036fc5d54a5e1a",
+    "changed_files": {
+      "backends/ninfer/docs/cli.md": "bcb48273cec403cc68bc28167745829b1cad502a293f728952ab8213ab9c7720",
+      "backends/ninfer/docs/maintainer/engine-architecture.md": "4200c051d6457aa4bc5f3d5b1022fdf73ab651aae85eed92b7fb3e9929b64ea6",
+      "backends/ninfer/include/ninfer/engine_options.h": "f4243cd1ecd50fd6b46721c248a3f9c50cb25af563e623fb608cb30b4632fe6f",
+      "backends/ninfer/include/ninfer/observability/resources.h": "5c1902e0943634989116815e0687931913ae99a5793b2b95a56ab02093e16b09",
+      "backends/ninfer/src/models/qwen3_5/frontend/frontend.cpp": "6cf4f2a9a3e6c6fdaf4d94f44a62136434616489c3fb6d8003adafe94ea90449",
+      "backends/ninfer/src/models/qwen3_5/frontend/frontend.h": "334b84c80d422e64b636801f2f4dfb7c847735c4d7428adedfdd29efd0c79be6",
+      "backends/ninfer/src/models/qwen3_5/frontend/prepared_prompt.h": "0e71cc11674c914ec4a01f159b796770a3d10345fc2b417001109ed2c48b0505",
+      "backends/ninfer/src/models/qwen3_5/program/program_impl.cpp": "396d70c5991ffa118337589379b2fb585802ec08ea93353bbe414c7b06052392",
+      "backends/ninfer/src/models/qwen3_5/program/program_impl.h": "d5fa8088220657fba6b4edcc94b56035e290fb9e9da0e736ee710f9c8488ca5f",
+      "backends/ninfer/src/models/qwen3_5/program/storage/context.cpp": "f07f2c3303852da3b9c1f770ee115f681827898de916f07eb764d4f7d7bbb018",
+      "backends/ninfer/src/models/qwen3_5/program/storage/source_journal.cpp": "f61d24445b5c3cf2077912a1aa5c1e688adef4e39e6effd6b2a95f05bcba33da",
+      "backends/ninfer/src/models/qwen3_5/program/transactions/commit.cpp": "123758efb9f2128ec43b57e8add6c52f9b7cd5ca0a4cf4de6ad36a9b225eba67",
+      "backends/ninfer/src/models/qwen3_5/program_sources.cmake": "9e113205986bb4bfc50ea988f0bf104754ecbb51dcd630c3e8128d5271820609",
+      "backends/ninfer/src/runtime/engine/model_instance.cpp": "f8754380d185bfc2080ba7e760d5e9cafbce6d45650953b2d93ce7866ce2aa52",
+      "backends/ninfer/src/serve/http_server.cpp": "b0c9f6b9910f6c07510817f042d0db16a86e2329843134f36f672e4cb4554f32",
+      "backends/ninfer/src/serve/kvmem_status_json.h": "974521554ab98b69ce031a8dcbf1656cffc91c112580ae66197849a7bfaf2d96",
+      "backends/ninfer/src/serve/serve_options.cpp": "feb62d1f07025b1861c7d3dbadc74ea429ab7a6a6bc108af2014a097d4712ef1",
+      "backends/ninfer/tests/CMakeLists.txt": "e118120d134c4a6fb01b3d4a976942cd97d4978b3cfbdf4ac9a1e734c058f0f6",
+      "backends/ninfer/tests/cmake/RuntimeTests.cmake": "48cc31b4199da8f510220ef86dfbd0c6fafeaec90e6a3bc9271be80b366c6fd7",
+      "backends/ninfer/tests/models/qwen3_5/test_frontend.cpp": "1ba58014b3c776c14cf031950f5a6f0c302ec8c9122176607c6bd57f82940523",
+      "backends/ninfer/tests/models/qwen3_5/tests.cmake": "fc3e81339d20c85937e05fdf8498637611e80445f10609f9c60fede8a9f990c7",
+      "backends/ninfer/tests/test_serve_options.cpp": "ab9fcd0fa24cf91738550fba36de4bbac240150043a124fdcb4d9d977495afa3",
+      "backends/versions.json": "04b3ae3c869886488b64c4e6bfd3b9bc97ebc03d47464a71633e4acc3f189ad8",
+      "backends/patches/ninfer-source-journal.patch": "a05efd3d8eaa3616f32b5b328722c902e1f33ac255dd714e12490b689729a33c",
+      "kvmem/CMakeLists.txt": "4147e77716556a378eba39cd43668200f687d3a6d15d44ca0bb4051fd3273142",
+      "kvmem/include/kvmem/source_journal.hpp": "c4ddade8430bd56e160074f341172935790b9488aa3c0791e8ba4abe627c134e",
+      "kvmem/src/host/source_journal.cpp": "fcd008121b4d91b95795d2e2d6a8346363534e55c50d77ed87c6a0c88381aeb4",
+      "kvmem/tests/source_journal_test.cpp": "e529f7ac280923e7426081f45617c787f3f5192cf5ee7908eac15541e2606512"
+    },
+    "native_files": [
+      "NOTICE",
+      "docs/cli.md",
+      "docs/maintainer/engine-architecture.md",
+      "include/ninfer/engine_options.h",
+      "include/ninfer/observability/resources.h",
+      "include/ninfer/ops/attention_page_mass.h",
+      "include/ninfer/ops/token_sums.h",
+      "src/core/resident_memory.cpp",
+      "src/core/resident_memory.h",
+      "src/core/resident_scan.cu",
+      "src/models/qwen3_5/execution/memory_statistics.h",
+      "src/models/qwen3_5/frontend/frontend.cpp",
+      "src/models/qwen3_5/frontend/frontend.h",
+      "src/models/qwen3_5/frontend/prepared_prompt.h",
+      "src/models/qwen3_5/frontend/tool_contract.cpp",
+      "src/models/qwen3_5/frontend/tool_grammar.cpp",
+      "src/models/qwen3_5/frontend/tool_grammar.h",
+      "src/models/qwen3_5/frontend/tool_open_token.h",
+      "src/models/qwen3_5/load/vision_cpu_cache.cpp",
+      "src/models/qwen3_5/load/vision_cpu_cache.h",
+      "src/models/qwen3_5/program/planning/prefill_service_work.h",
+      "src/models/qwen3_5/program/program_impl.cpp",
+      "src/models/qwen3_5/program/program_impl.h",
+      "src/models/qwen3_5/program/query_test_support.h",
+      "src/models/qwen3_5/program/storage/checkpoint_buffer_pool.h",
+      "src/models/qwen3_5/program/storage/context.cpp",
+      "src/models/qwen3_5/program/storage/kvmem_transfer_trace.h",
+      "src/models/qwen3_5/program/storage/kvmem_window.cpp",
+      "src/models/qwen3_5/program/storage/memory_statistics.cpp",
+      "src/models/qwen3_5/program/storage/source_journal.cpp",
+      "src/models/qwen3_5/program/tool_open_mask.h",
+      "src/models/qwen3_5/program/transactions/commit.cpp",
+      "src/models/qwen3_5/program_sources.cmake",
+      "src/ops/attn_input_proj/nvfp4/nvfp4_attn_input_int8.cu",
+      "src/ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_int8.cu",
+      "src/ops/linear/nvfp4/nvfp4_e4m3_scale.h",
+      "src/ops/linear/nvfp4/nvfp4_int8_fused_norm_quant.cu",
+      "src/ops/linear/nvfp4/nvfp4_int8_fused_norm_quant.cuh",
+      "src/ops/linear/nvfp4/nvfp4_int8_fused_norm_quant.h",
+      "src/ops/linear/nvfp4/nvfp4_int8_grouped.cu",
+      "src/ops/linear/nvfp4/nvfp4_int8_grouped_host.h",
+      "src/ops/linear/nvfp4/nvfp4_int8_grouped_mma.cuh",
+      "src/ops/linear/nvfp4/nvfp4_int8_narrow_host.h",
+      "src/ops/linear/nvfp4/nvfp4_int8_narrow_launch.cuh",
+      "src/ops/linear/nvfp4/nvfp4_int8_narrow_mma.cuh",
+      "src/ops/linear/nvfp4/nvfp4_int8_route.h",
+      "src/ops/linear/nvfp4/nvfp4_mmq_host.h",
+      "src/ops/linear/nvfp4/nvfp4_mmq_launch.cuh",
+      "src/ops/linear/nvfp4/nvfp4_mmq_mma.cuh",
+      "src/ops/linear/nvfp4/nvfp4_mmvq_host.h",
+      "src/ops/linear/nvfp4/nvfp4_mmvq_launch.cuh",
+      "src/ops/linear/nvfp4/nvfp4_mmvq_mma.cuh",
+      "src/ops/linear/nvfp4/shapes/dflash2.cu",
+      "src/ops/linear/nvfp4/shapes/dflash2_unified.cu",
+      "src/ops/linear/nvfp4/shapes/n8192_k4096_unified.cu",
+      "src/ops/linear/ptq1/ptq1_dispatch.cpp",
+      "src/ops/linear/ptq1/ptq1_dispatch.h",
+      "src/ops/linear/t2/t2_ptq1_repack.cuh",
+      "src/ops/linear/t2/t2_ptq1_wide_t.cu",
+      "src/ops/linear/t2/t2_ptq1_wide_t.cuh",
+      "src/ops/linear/t2/t2_s8_ptq1_decode.cuh",
+      "src/ops/linear/t5/sources.cmake",
+      "src/ops/linear/t5/t5_a8.cuh",
+      "src/ops/linear/t5/t5_embedding.cu",
+      "src/ops/linear/t5/t5_project.cu",
+      "src/ops/linear/t5/t5_project.h",
+      "src/ops/linear_add/nvfp4/nvfp4_linear_add_int8.cu",
+      "src/ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_a16_mma.cu",
+      "src/ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_int8_grouped.cu",
+      "src/ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_int8_grouped.cuh",
+      "src/ops/token_sums/attention_page_mass.cu",
+      "src/ops/token_sums/sources.cmake",
+      "src/ops/token_sums/token_sums.cu",
+      "src/product/cuda_memory_options.h",
+      "src/runtime/engine/graph_probe.h",
+      "src/runtime/engine/model_instance.cpp",
+      "src/runtime/speculative_limits.h",
+      "src/serve/cuda_residency_json.h",
+      "src/serve/http_server.cpp",
+      "src/serve/kvmem_metrics.h",
+      "src/serve/kvmem_status_json.h",
+      "src/serve/serve_options.cpp",
+      "tests/CMakeLists.txt",
+      "tests/artifact/test_ptq1.cpp",
+      "tests/artifact/test_ptq1.py",
+      "tests/artifact/test_t5.py",
+      "tests/cmake/RuntimeTests.cmake",
+      "tests/convert/test_dense_geometry.py",
+      "tests/convert/test_dflash2_gguf.py",
+      "tests/convert/test_nvfp4_draft.py",
+      "tests/experimental/active_kv_ssd.cpp",
+      "tests/experimental/attention_page_mass.cpp",
+      "tests/experimental/kvmem_test_options.h",
+      "tests/experimental/memory_concurrency.cpp",
+      "tests/experimental/memory_disk.cpp",
+      "tests/experimental/memory_ngram.cpp",
+      "tests/experimental/memory_ram_budget.cpp",
+      "tests/experimental/memory_sessions.cpp",
+      "tests/experimental/memory_vision.cpp",
+      "tests/experimental/migration_concurrency.cpp",
+      "tests/experimental/nvfp4_mode_binding.cpp",
+      "tests/experimental/nvfp4_native_scale.cu",
+      "tests/experimental/nvfp4_scope.cpp",
+      "tests/experimental/p1_engine.cpp",
+      "tests/experimental/p1_options.cpp",
+      "tests/experimental/p1_payload.cpp",
+      "tests/experimental/p1_rope.cpp",
+      "tests/experimental/p1_sparse.cpp",
+      "tests/experimental/p4_history.cpp",
+      "tests/experimental/p4_quality.cpp",
+      "tests/experimental/p4_retrieval.cpp",
+      "tests/experimental/ssd_failure.cpp",
+      "tests/experimental/token_sums.cpp",
+      "tests/fixtures/nvfp4_int8_real/generate_fixture.py",
+      "tests/host/test_prefill_service_work.cpp",
+      "tests/models/qwen3_5/test_checkpoint_buffer_pool.cpp",
+      "tests/models/qwen3_5/test_cpu_vision_cache.cpp",
+      "tests/models/qwen3_5/test_frontend.cpp",
+      "tests/models/qwen3_5/test_tool_constraints.cpp",
+      "tests/models/qwen3_5/tests.cmake",
+      "tests/ops/linear/test_nvfp4_int8.cpp",
+      "tests/ops/linear/test_nvfp4_int8_fused_norm.cpp",
+      "tests/ops/linear/test_ptq1.cpp",
+      "tests/ops/linear/test_ptq1_a8.cpp",
+      "tests/ops/linear/test_t5.cpp",
+      "tests/ops/linear_add/test_ptq1.cpp",
+      "tests/ops/linear_swiglu/test_ptq1.cpp",
+      "tests/ops/test_nvfp4_int8_real.cpp",
+      "tests/test_graph_probe.cpp",
+      "tests/test_serve_options.cpp",
+      "third_party/xgrammar/cpp/json_string_grammar.cc",
+      "third_party/xgrammar/cpp/json_string_grammar.h",
+      "tools/artifact/codecs/ptq1.py",
+      "tools/artifact/codecs/t5.py",
+      "tools/convert/dense_geometry.py",
+      "tools/convert/dflash2_gguf.py",
+      "tools/convert/nvfp4.py",
+      "tools/convert/recipes/dflash2_gguf_blocks.py",
+      "tools/convert/recipes/dflash2_import_nvfp4.py",
+      "tools/convert/recipes/dflash2_nvfp4.py",
+      "tools/convert/repack_t5.py"
+    ]
+  },
+  "native_service_binary_sha256": "919b18eb350ef5cbd9d67d5d7736f04a3d4305be145c694413fb0859dc47c874",
+  "native_checks": [
+    {
+      "name": "ninfer_cli_options_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_serve_options_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_kv_capacity_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_context_cache_defaults_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_unique_strings_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_qwen3_5_frontend_test",
+      "exit": 0
+    },
+    {
+      "name": "source_journal_test",
+      "exit": 0
+    }
+  ],
+  "host_contracts": {
+    "results": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 1.04728
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.779839
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 1.01276
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 16.5052
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 1.00005
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.798117
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.915889
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.890044
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.815752
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.981495
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.689838
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 1.33354
+      },
+      {
+        "name": "source_journal_test",
+        "seconds": 0.0775214
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.895535
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.615569
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.680694
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.711441
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.715308
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.618821
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.684013
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.943914
+      }
+    ],
+    "binary_sha256": {
+      "historical_gc_ninfer_core_test": "d46b64d4d0b90e8df4a4862ca6b6adab11c1d30eb231ab6f063d769f537549d7",
+      "memory_contract_test": "4464e14f55e176811020a746624ad67bc732bf078e194d92b5d384af54129476",
+      "native_kv_payload_test": "14d64a5a8bab98cc78021e5db642e5103015652fcfb8081312580253ef4e80c7",
+      "host_kv_storage_test": "5ccb17814b78e6dfa0a75330c260541b6dce2f290f8f0aaa5024423e699a18ce",
+      "spill_io_test": "dc1a22633cf944c12b17496abb77228ec2b2f73f8e40907c3504696b3049b7bf",
+      "tiered_kv_storage_test": "95b1c256578d597ba89b9b4bbf4bffe0627e6ba73994990473433734b49ac216",
+      "native_residency_test": "a5da72bc9e6381cee5959cd45c8b35636b1a91f8a6abda9f477b37726bda8ee2",
+      "kv_content_test": "2a524e8a41961a797897ec5a43e7706829065d1ecbf40d659ede0b3ea5b6f266",
+      "prefix_checkpoint_test": "96ece36032f40a8da4234caae2d792d730ecc4d0a00ae0ccc9f05c733f2dff8e",
+      "checkpoint_policy_test": "de6e50c80fb52a3c971a96a1a97ee5ea0314e966208fa43644095f88c6950568",
+      "checkpoint_image_test": "45c7f6fea57cfe577580d17f2f9c9c52f1ae64ea1513adaf944bfee68567c335",
+      "historical_kv_boundary_mailbox_test": "a2416e150dd103d097737dd7842a723c42fe75cb8de3fc38afc0fb7d6f0b29ad",
+      "historical_kv_commit_conditions_test": "7fe4c9ff8f9b91d73d5f9901234ee027ce9dd9941745c7e3324c3caf0eaad004",
+      "historical_kv_range_lock_test": "851641dea150ca1c0c25d2e30c4f83700779d66b6fda1cc0ce5a055adb2acffd",
+      "historical_kv_witness_lifecycle_test": "13bcddd083c95995825f8d3f1f7156e7dbd467442e7e2ddfb0347b2e1db2f235",
+      "historical_kv_score_evidence_test": "7371942f85532ca28d9cd18b4dc6cdc30070f5c56c5272892e491a8ce913d778",
+      "historical_kv_auxiliary_budget_test": "a46d3148008438e404359bc5575c9fc4d0aaf79b1f409ebee1acbb9bf2a1cc77",
+      "historical_kv_owner_budget_test": "91cb098ed908a687feeb8775f34f7be0e6957f223295132f4d70dbf9c7eaf1fe",
+      "historical_kv_service_health_test": "039c10e26ec4e0a140e55c789e93428e9616298fa05a841c517f16b8689fc71e",
+      "mean_key_retrieval_test": "3f028870fcb2a77e3166737c323fbc2fadfcdc0460772403072133cca848ef0e",
+      "source_journal_test": "170ac6cbe702ee43e2a3a261e98973b39a02bc2f1db263a88d106e2964f85004"
+    },
+    "compiler": "C:/mingw/mingw64/bin/c++.exe",
+    "build_type": "Debug"
+  },
+  "capture": [
+    {
+      "config": "lru-none",
+      "input_tokens": 6943,
+      "output_tokens": 64,
+      "source_records": 2,
+      "source_bytes": 99320,
+      "source_peak": 127092,
+      "source_cap": 16777216,
+      "accepted": 7007,
+      "computed": 7006,
+      "journal_fnv": 8266218837466887512
+    },
+    {
+      "config": "lru-mtp4",
+      "input_tokens": 6943,
+      "output_tokens": 64,
+      "source_records": 2,
+      "source_bytes": 99320,
+      "source_peak": 127092,
+      "source_cap": 16777216,
+      "accepted": 7007,
+      "computed": 7006,
+      "journal_fnv": 8266218837466887512
+    },
+    {
+      "config": "redundancy-none",
+      "input_tokens": 6943,
+      "output_tokens": 64,
+      "source_records": 2,
+      "source_bytes": 99320,
+      "source_peak": 127092,
+      "source_cap": 16777216,
+      "accepted": 7007,
+      "computed": 7006,
+      "journal_fnv": 8266218837466887512
+    },
+    {
+      "config": "redundancy-mtp4",
+      "input_tokens": 6943,
+      "output_tokens": 64,
+      "source_records": 2,
+      "source_bytes": 99320,
+      "source_peak": 127092,
+      "source_cap": 16777216,
+      "accepted": 7007,
+      "computed": 7006,
+      "journal_fnv": 8266218837466887512
+    }
+  ],
+  "quota": [
+    {
+      "config": "lru-none",
+      "successful_fill_requests": 14,
+      "failed_fill_requests": 1,
+      "frames_before_terminal_error": 844,
+      "source_bytes": 1046080,
+      "source_peak": 1047576,
+      "source_cap": 1048576,
+      "source_denied": 3,
+      "records": 20,
+      "queued_answer": "599"
+    },
+    {
+      "config": "lru-mtp4",
+      "successful_fill_requests": 14,
+      "failed_fill_requests": 1,
+      "frames_before_terminal_error": 248,
+      "source_bytes": 1046080,
+      "source_peak": 1047576,
+      "source_cap": 1048576,
+      "source_denied": 3,
+      "records": 20,
+      "queued_answer": "599"
+    }
+  ],
+  "cancel": [
+    {
+      "config": "lru-none",
+      "phase": "prefill",
+      "input_tokens": 13897,
+      "accepted": 13897,
+      "computed": 1024,
+      "source_records": 2,
+      "followup_status": 200
+    },
+    {
+      "config": "lru-none",
+      "phase": "decode",
+      "input_tokens": 3529,
+      "accepted": 3547,
+      "computed": 3546,
+      "source_records": 2,
+      "followup_status": 200
+    },
+    {
+      "config": "redundancy-mtp4",
+      "phase": "prefill",
+      "input_tokens": 13897,
+      "accepted": 13897,
+      "computed": 1024,
+      "source_records": 2,
+      "followup_status": 200
+    },
+    {
+      "config": "redundancy-mtp4",
+      "phase": "decode",
+      "input_tokens": 3529,
+      "accepted": 3552,
+      "computed": 3551,
+      "source_records": 2,
+      "followup_status": 200
+    }
+  ],
+  "earlier_binary": {
+    "binary_sha256": "0668e3979b28b2e43a73a8185226b118f3345e2cdaef0c79ff6eb4ffa65f8bb3",
+    "capture": [
+      {
+        "config": "lru-none",
+        "case": "capture",
+        "passed": true,
+        "error": null
+      },
+      {
+        "config": "lru-mtp4",
+        "case": "capture",
+        "passed": true,
+        "error": null
+      },
+      {
+        "config": "redundancy-none",
+        "case": "capture",
+        "passed": true,
+        "error": null
+      },
+      {
+        "config": "redundancy-mtp4",
+        "case": "capture",
+        "passed": true,
+        "error": null
+      }
+    ],
+    "quota": [
+      {
+        "config": "lru-none",
+        "case": "quota",
+        "passed": true,
+        "error": null
+      },
+      {
+        "config": "lru-mtp4",
+        "case": "quota",
+        "passed": true,
+        "error": null
+      }
+    ]
+  },
+  "resolved_failures": [
+    "Initial runner copied absent /old/tests; failed setup directory retained",
+    "First native compile exposed missing direct model-library dependency in a test; affected model-header consumers fixed",
+    "Embedded core had no root CTest registration; exact built component run directly, original CTest exit 8 retained; final runner uses executable"
+  ],
+  "limitations": [
+    "Source recording is opt-in, process-local RAM, one GPU/lane, text, ordinary/MTP4 qualified",
+    "Each admitted input including warmup/failed execution retains a separate source; no source expiry/dedup/public forget yet",
+    "S is directory and buffer/reservation capacity, not RSS, checkpoint or prepared-request workspace; growth needs old+new room",
+    "No recovery planner/execution, durable fence, archive restore or system-wide ForgetSource delivered",
+    "No paired performance or new Agent tests; old intermittent CUDA and TSan limitations remain open; stages C-F incomplete"
+  ],
+  "evidence": [
+    {
+      "path": "artifacts/lifecycle-stage-c-native-source/final-evidence.tar.gz",
+      "bytes": 863530,
+      "sha256": "a842b11aa64cc78ebdb490b6057a41e1d960fb5524e3230da18d26960298b284"
+    },
+    {
+      "path": "artifacts/lifecycle-stage-c-native-source/intermediate-evidence.tar.gz",
+      "bytes": 792969,
+      "sha256": "96fbfca2fac453d401fb7edd9583a322f12be719fce5bf3606c10fd4af3ffc32"
+    },
+    {
+      "path": "artifacts/lifecycle-stage-c-native-source/failed-compile-evidence.tar.gz",
+      "bytes": 609925,
+      "sha256": "1f9c387170b9e9a8537b98da332d50a92e01374256700ac8d1976c71835e6a53"
+    }
+  ]
+}

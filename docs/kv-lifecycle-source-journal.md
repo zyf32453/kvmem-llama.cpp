@@ -2,6 +2,8 @@
 
 日期：2026-10-31。父提交 `e595b746ea2db1e9902c1d72f1fad606a470c501`。本批实现公共源记录组件，尚未接入 NInfer 的请求提交、恢复执行或持久化。阶段 C 及完整生产系统均未完成。
 
+后续更新：本文保留 C1 的实现与证据归属。C2 已完成 NInfer 记录、配置/事件来源、原生配额及服务检查，见 [C2 原生接线](kv-lifecycle-native-source.md)；它仍未提供恢复执行或持久化，不能把 C1 的主机证据重新归属给原生 GPU。
+
 ## 源记录与 KV 的关系
 
 新增 `SourceJournalStore`，复用既有 `HostKvStorage` 保存 token/event 数组，并复用 `SessionIdentity` 的身份格式。目录与派生 KV 的 repository、Host payload H、GC 辅助 M 独立：CPU KV 页真实释放后，源 token 仍可读取；读取源记录不会重新授权已经退休的 KV 身份。
