@@ -35,6 +35,7 @@ public:
 
 static void native_page_feature_snapshot() {
     kvmem::HistoricalKvPageFeatures features(3, 3);
+    features.publish_page(0, {0.0f, 1.0f, 0.0f});
     features.publish_page(1, {1.0f, 2.0f, 3.0f});
     require(features.has_page(1));
     features.publish_question_scores({0.1, -0.2, 0.3});
@@ -59,8 +60,19 @@ static void native_page_feature_snapshot() {
     require(features.question_epoch() > epoch);
     require(features.begin_round(1));
     require(features.read(meta, descriptor.data(), importance) && importance == 0.0);
-    features.clear_from(1);
+    // Restoring to 96 tokens keeps one complete 64-token page and a half
+    // page. Its former full-page descriptor must not survive the rewind.
+    features.truncate_to(96, 64);
+    require(features.has_page(0));
     require(!features.has_page(1) && !features.read(meta, descriptor.data(), importance));
+    features.publish_page(1, {3.0f, 2.0f, 1.0f});
+    require(features.begin_round(2));
+    require(features.read(meta, descriptor.data(), importance));
+    require(descriptor == (std::array<float, 3>{3.0f, 2.0f, 1.0f}));
+    features.truncate_to(128, 64); // A fully preserved page remains immutable.
+    require(features.has_page(0) && features.has_page(1));
+    features.truncate_to(64, 64);
+    require(features.has_page(0) && !features.has_page(1));
 }
 
 static void truncated_thinking_reopens_candidates() {

@@ -1,0 +1,21 @@
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1552,7 +1552,7 @@
+     // Rewinding destroys suffix records. Retire the old page directory with
+     // its worker before those logical IDs can be reused by a new suffix.
+     window.historical_gc.reset();
+-    if (window.historical_features) window.historical_features->clear_from(pages);
++    if (window.historical_features) window.historical_features->truncate_to(frontier, page_tokens);
+     if (window.historical_thinking) window.historical_thinking->truncate(frontier);
+     if (window.historical_think_start >= frontier) window.historical_think_start = UINT64_MAX;
+     window.archive.resize(pages);
+@@ -2075,7 +2075,7 @@
+             (unsigned long long)policy.comparisons, (unsigned long long)policy.lossy_intents);
+     }
+     window.historical_gc.reset();
+-    if (window.historical_features) window.historical_features->clear_from(pages);
++    if (window.historical_features) window.historical_features->truncate_to(frontier, page_tokens);
+     if (window.historical_thinking) window.historical_thinking->truncate(frontier);
+     if (window.historical_think_start >= frontier) window.historical_think_start = UINT64_MAX;
+     window.archive.resize(pages);

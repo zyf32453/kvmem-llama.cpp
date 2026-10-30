@@ -25,7 +25,7 @@ public:
     }
 
     bool has_page(uint32_t page) const;
-    // A sealed page is published once. Rewriting an ID requires clear_from()
+    // A sealed page is published once. Rewriting an ID requires truncate_to()
     // after the old GC owner has stopped and every speculative suffix is gone.
     void publish_page(uint32_t page, const std::vector<float> & descriptor);
     // Partial accepted Query updates keep the same question epoch so a long
@@ -33,7 +33,9 @@ public:
     void publish_question_scores(const std::vector<double> & scores, bool new_question = true);
     void publish_output_attention(uint32_t page, double mass);
     void clear_question();
-    void clear_from(uint32_t page);
+    // Only complete pages before this token frontier remain immutable.
+    // A partial tail must be recomputed when new tokens seal it again.
+    void truncate_to(uint64_t token_frontier, uint32_t page_tokens);
 
 private:
     const size_t dimensions_;

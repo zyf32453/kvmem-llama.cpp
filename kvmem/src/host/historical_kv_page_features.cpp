@@ -52,7 +52,9 @@ void HistoricalKvPageFeatures::clear_question() {
     question_epoch_.fetch_add(1, std::memory_order_release);
 }
 
-void HistoricalKvPageFeatures::clear_from(uint32_t page) {
+void HistoricalKvPageFeatures::truncate_to(uint64_t token_frontier, uint32_t page_tokens) {
+    if (!page_tokens) throw std::invalid_argument("historical page token width");
+    const auto page = token_frontier / page_tokens;
     std::lock_guard<std::mutex> lock(mu_);
     if (page >= pages_.size()) return;
     for (size_t id = page; id < pages_.size(); ++id) {
