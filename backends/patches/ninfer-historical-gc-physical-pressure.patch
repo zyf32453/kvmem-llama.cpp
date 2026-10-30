@@ -1,0 +1,24 @@
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -670,6 +670,8 @@
+         config.recent_tokens = uint64_t(kvmem_options.recent_blocks()) * page_tokens;
+         config.low_ready = low;
+         config.high_ready = high;
++        config.physical_storage = memory_payload_storage;
++        config.physical_page_bytes = stride;
+         std::fprintf(stderr, "KVMEM_NATIVE_GC_CONFIG capacity=%u slots=%u logical_pages=%u page_bytes=%llu low=%u high=%u poll_ms=%u\n",
+             capacity, slots, logical_pages, (unsigned long long)stride, low, high, config.poll_ms);
+         if (kvmem_options.historical_gc_redundancy) {
+@@ -2056,6 +2058,11 @@
+                 window.host_versions[id] == page_tokens;
+             eligible += is_live && id < window.gc_protected.size() && !window.gc_protected[id];
+         }
++        const auto capacity_bytes = memory_payload_storage.capacity_bytes();
++        const auto charged_bytes = memory_payload_storage.charged_bytes();
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_RAM capacity_bytes=%llu charged_bytes=%llu free_bytes=%llu\n",
++            (unsigned long long)capacity_bytes, (unsigned long long)charged_bytes,
++            (unsigned long long)(charged_bytes < capacity_bytes ? capacity_bytes - charged_bytes : 0));
+         std::fprintf(stderr, "KVMEM_NATIVE_GC_INVENTORY frontier=%u registered=%u live=%u sealed=%u eligible=%u ticks=%llu policy_failures=%llu worker_failures=%llu\n",
+             sequence.text_kv_valid, registered, live, sealed, eligible, (unsigned long long)stats.ticks,
+             (unsigned long long)stats.policy_failures, (unsigned long long)stats.worker_failures);

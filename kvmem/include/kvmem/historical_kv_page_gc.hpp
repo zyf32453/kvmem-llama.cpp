@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace kvmem {
@@ -27,6 +28,11 @@ public:
         uint32_t high_ready = 0;
         uint32_t batch_blocks = 64;
         uint32_t poll_ms = 25;
+        // Native RAM charges include unsealed records and outstanding readers,
+        // which do not necessarily occupy repository slots yet. The worker
+        // reads only this allocator's thread-safe byte counters.
+        std::optional<HostKvStorage> physical_storage;
+        uint64_t physical_page_bytes = 0;
     };
     struct RetiredPage {
         uint32_t page = 0;

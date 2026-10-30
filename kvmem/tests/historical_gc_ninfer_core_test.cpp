@@ -285,7 +285,52 @@ static void native_thinking_partial_lru_fallback() {
     require(preferred == 1 && fallback == 2);
 }
 
+static void native_unsealed_pages_drive_pressure() {
+    kvmem::HostKvStorage storage(10 * 64);
+    kvmem::HistoricalKvPageGc::Config config;
+    config.slots = config.logical_pages = 10;
+    config.low_ready = 2;
+    config.high_ready = 4;
+    config.sink_tokens = 64;
+    config.batch_blocks = 4;
+    config.physical_storage = storage;
+    config.physical_page_bytes = 64;
+    kvmem::HistoricalKvPageGc bridge(config);
+    std::vector<kvmem::HostKvRecord> records;
+    records.reserve(9);
+    for (uint32_t page = 0; page < 6; ++page) {
+        records.push_back(storage.allocate(64));
+        records.back().seal();
+        require(bridge.register_page(page, 64, page + 1));
+        if (page) bridge.protect_page(page, false);
+    }
+    for (int i = 0; i < 8; ++i) bridge.manual_tick();
+    require(bridge.stats().proposed == 0); // Four real free pages meet the high water.
+    // These native append buffers occupy RAM before they have captured KV.
+    // Repository accounting still reports four free slots, but RAM has only one.
+    for (int i = 0; i < 3; ++i) records.push_back(storage.allocate(64));
+    auto reader = records[1].lease();
+    for (int i = 0; i < 12 && !bridge.stats().proposed; ++i) bridge.manual_tick();
+    require(bridge.stats().proposed == 3);
+    const auto& retired = bridge.commit_boundary();
+    require(retired.size() == 3 && bridge.is_live(0));
+    for (const auto& page : retired) {
+        require(page.page > 0 && page.page < 6);
+        bridge.acknowledge_host_release(page, std::move(records[page.page]));
+    }
+    for (int i = 0; i < 12; ++i) bridge.manual_tick();
+    require(bridge.stats().reclaimed == 2 && storage.charged_bytes() == 7 * 64);
+    require(bridge.stats().proposed == 3); // Pending reader release already covers the deficit.
+    reader = {};
+    for (int i = 0; i < 12 && bridge.stats().reclaimed < 3; ++i) bridge.manual_tick();
+    require(bridge.stats().reclaimed == 3 && storage.charged_bytes() == 6 * 64);
+    for (int i = 0; i < 12; ++i) bridge.manual_tick();
+    require(bridge.stats().proposed == 3); // Actual headroom reached the high water.
+    require(records[6] && records[7] && records[8] && !bridge.contains(6));
+}
+
 int main() {
+    native_unsealed_pages_drive_pressure();
     native_page_feature_snapshot();
     truncated_thinking_reopens_candidates();
     native_page_handoff();

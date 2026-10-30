@@ -1,0 +1,46 @@
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -1847,6 +1847,11 @@
+     bool drafts_pending, runtime::ExecutionTimingRecorder& timing) {
+     RequestControl::Prefill& staged   = *request.prefill;
+     const std::uint32_t prompt_tokens = staged.prompt_tokens;
++    if (sequence.window.historical_gc) {
++        const auto stats = sequence.window.historical_gc->stats();
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_PREFILL frontier=%u committed=%llu reclaimed=%llu\n",
++            prompt_tokens, (unsigned long long)stats.committed, (unsigned long long)stats.reclaimed);
++    }
+     sequence.window.query_replay_active = false;
+     // The Query view is a prefill lease. Decode can replace that view; keeping
+     // these old IDs would pin a second working set for the whole generation.
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -670,6 +670,8 @@
+         config.recent_tokens = uint64_t(kvmem_options.recent_blocks()) * page_tokens;
+         config.low_ready = low;
+         config.high_ready = high;
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_CONFIG capacity=%u slots=%u logical_pages=%u page_bytes=%llu low=%u high=%u poll_ms=%u\n",
++            capacity, slots, logical_pages, (unsigned long long)stride, low, high, config.poll_ms);
+         if (kvmem_options.historical_gc_redundancy) {
+             const auto& model = parameters.model.config().text;
+             const auto dimensions = std::size_t(model.full_attention_layers) *
+@@ -2045,6 +2047,18 @@
+     if (window.historical_gc) {
+         const auto stats = window.historical_gc->stats();
+         const auto policy = window.historical_gc->policy_metrics();
++        uint32_t registered = 0, live = 0, sealed = 0, eligible = 0;
++        for (uint32_t id = 0; id < window.archive.size(); ++id) {
++            registered += window.historical_gc->contains(id);
++            const bool is_live = window.historical_gc->is_live(id);
++            live += is_live;
++            sealed += window.archive[id] && id < window.host_versions.size() &&
++                window.host_versions[id] == page_tokens;
++            eligible += is_live && id < window.gc_protected.size() && !window.gc_protected[id];
++        }
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_INVENTORY frontier=%u registered=%u live=%u sealed=%u eligible=%u ticks=%llu policy_failures=%llu worker_failures=%llu\n",
++            sequence.text_kv_valid, registered, live, sealed, eligible, (unsigned long long)stats.ticks,
++            (unsigned long long)stats.policy_failures, (unsigned long long)stats.worker_failures);
+         // One terminal observation keeps production timing runs auditable
+         // without per-token transfer tracing or per-victim diagnostic IO.
+         std::fprintf(stderr, "KVMEM_NATIVE_GC_SUMMARY policy=%s frontier=%u proposed=%llu committed=%llu reclaimed=%llu boundary_committed=%llu comparisons=%llu lossy=%llu\n",

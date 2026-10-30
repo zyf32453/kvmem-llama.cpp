@@ -50,7 +50,7 @@ def request(port, directory, records, output_tokens, timeout=600):
     )
     prompt = (
         "<|im_start|>user\n" + context +
-        "Write the integers from 1 through 2000, one number per line. No explanation."
+        f"Write the integers from 1 through {50000 if output_tokens > 4096 else 2000}, one number per line. No explanation."
         "<|im_end|>\n<|im_start|>assistant\n<think>\n</think>\n\n1\n"
     )
     payload = dict(prompt=prompt, n_predict=output_tokens, temperature=0, seed=42,
@@ -117,31 +117,43 @@ def main():
                    default=["off", "lru", "redundancy"])
     p.add_argument("--repetitions", type=int, default=6)
     p.add_argument("--records", type=int)
-    p.add_argument("--output-tokens", type=int, default=2048)
+    p.add_argument("--output-tokens", type=int)
+    p.add_argument("--require-decode-gc", action="store_true")
     p.add_argument("--warmup-tokens", type=int, default=512)
+    p.add_argument("--warmup-attempts", type=int, default=6)
     p.add_argument("--warmup-target-c", type=int, default=80)
     p.add_argument("--port", type=int, default=18111)
     args = p.parse_args()
     if args.records is None:
-        args.records = 6660 if args.profile == "teacher" else 450
-    if min(args.repetitions, args.records, args.output_tokens) < 1:
+        args.records = 6800 if args.profile == "teacher" else 520
+    if args.output_tokens is None:
+        args.output_tokens = 16384 if args.profile == "teacher" else 2048
+    if min(args.repetitions, args.records, args.output_tokens, args.warmup_attempts) < 1:
         p.error("counts must be positive")
     args.out.mkdir(parents=True, exist_ok=True)
     active, reserve, host, context = ((98304, 16384, 4760, 262144)
                                     if args.profile == "teacher" else (2048, 512, 320, 16384))
-    plan = dict(profile=args.profile, host_mib=host, active_tokens=active,
+    manifest = json.loads((args.root / "backends/versions.json").read_text())["ninfer"]
+    binary = args.root / "build-native/apps/ninfer-serve"
+    plan = dict(binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                backend_prepared_tree=manifest["patched_tree"],
+                profile=args.profile, host_mib=host, active_tokens=active,
                 reserve_tokens=reserve, context_tokens=context,
                 spec=args.spec, modes=args.modes, repetitions=args.repetitions, records=args.records,
                 output_tokens=args.output_tokens, request_timeout_seconds=1800 if args.profile == "teacher" else 600,
                 audit=False, verify_transfers=False,
                 warmup_tokens=args.warmup_tokens, warmup_cache_prompt=False,
-                warmup_target_c=args.warmup_target_c, warmup_max_repetitions=6,
-                fresh_model_and_host_per_case=True,
+                warmup_target_c=args.warmup_target_c, warmup_max_repetitions=args.warmup_attempts,
+                fresh_model_and_host_per_case=True, require_decode_gc=args.require_decode_gc,
                 acceptance="Pooled decode p95 increase <=5%; aggregate decode throughput decrease <=3%; "
                            "disclose per-run worst change. Ordinary decode requires complete token timing coverage; "
                            "MTP measurements are decode-round latency.")
     (args.out / "plan.json").write_text(json.dumps(plan, indent=2) + "\n")
-    orders = list(itertools.permutations(args.modes))
+    # Three repetitions rotate all modes through each position; six retain
+    # every permutation for the longer qualification protocol.
+    orders = ([args.modes[i:] + args.modes[:i] for i in range(len(args.modes))]
+              if args.repetitions == len(args.modes)
+              else list(itertools.permutations(args.modes)))
     results = []
     for repeat in range(args.repetitions):
         for mode in orders[repeat % len(orders)]:
@@ -185,7 +197,7 @@ def main():
                         time.sleep(.5)
                 result["gpu_before_warmup"] = gpu_state(name)
                 result["warmup_states"] = []
-                for iteration in range(1, 7):
+                for iteration in range(1, args.warmup_attempts + 1):
                     warmup(args.port, args.warmup_tokens, directory, iteration)
                     state = gpu_state(name)
                     result["warmup_states"].append(state)
@@ -206,14 +218,35 @@ def main():
                 (directory / "server.log").write_text(log)
                 summaries = re.findall(r"KVMEM_NATIVE_GC_SUMMARY ([^\n]+)", log)
                 result["gc_summaries"] = [dict(re.findall(r"(\w+)=([^ ]+)", row)) for row in summaries]
+                for key, marker in (("gc_configs", "CONFIG"), ("gc_prefill", "PREFILL"), ("gc_inventory", "INVENTORY"), ("gc_ram", "RAM")):
+                    result[key] = [dict(re.findall(r"(\w+)=([^ ]+)", row)) for row in
+                                   re.findall(r"KVMEM_NATIVE_GC_" + marker + r" ([^\n]+)", log)]
+                timing = result.get("final_timings") or {}
+                prompt_tokens = timing.get("prompt_n")
+                if prompt_tokens is not None:
+                    prompt_tokens += timing.get("cache_n", 0)
+                before_decode = [row for row in result["gc_prefill"] if int(row["frontier"]) == prompt_tokens]
+                if before_decode and result["gc_summaries"]:
+                    result["decode_committed"] = int(result["gc_summaries"][-1]["committed"]) - int(before_decode[-1]["committed"])
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+                if args.require_decode_gc:
+                    valid = (result.get("http_status") == 200 and not result.get("stream_errors") and
+                             not result.get("exception") and result.get("expected_prefix") and
+                             result.get("observed_tokens") == args.output_tokens and
+                             (args.spec != "none" or result.get("complete_single_token_coverage")))
+                    if not valid:
+                        result["coverage_failure"] = "request or token-timing coverage failed"
+                    elif mode != "off" and result.get("decode_committed", 0) <= 0:
+                        result["coverage_failure"] = "no GC retirement after prefill; not active-decode GC acceptance"
                 (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
                 results.append(result)
                 (args.out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
                 print(json.dumps({key: result.get(key) for key in (
                     "repeat", "mode", "spec", "http_status", "exception", "observed_tokens",
                     "complete_single_token_coverage", "single_token_p95_ms", "decode_round_p95_ms",
-                    "decode_tokens_per_second", "gc_summaries")}), flush=True)
+                    "decode_tokens_per_second", "decode_committed", "gc_summaries")}), flush=True)
+                if result.get("coverage_failure"):
+                    raise SystemExit(result["coverage_failure"])
 
 
 if __name__ == "__main__":

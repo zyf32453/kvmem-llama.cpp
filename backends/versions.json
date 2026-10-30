@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "d2f18aedb638225d14326e24a840dd4dfc316f34",
+    "patched_tree": "1cc9520fe09ba9c749d989e198334d81d3fcbed0",
     "patches": [
       {
         "id": "kvmem",
@@ -270,6 +270,26 @@
         ],
         "after_tree": "d2f18aedb638225d14326e24a840dd4dfc316f34",
         "source": "Expire Query pins at prefill completion; invalidate optional checkpoint aliases when Host GC retires required pages while keeping active Query replay dependencies pinned"
+      },
+      {
+        "id": "historical-gc-observation",
+        "path": "backends/patches/ninfer-historical-gc-observation.patch",
+        "sha256": "1101352b82d71dba8ddaf78b12361f9e7865a514a295fe2897ae3bde2060ca30",
+        "requires": [
+          "historical-gc-protection-lifecycle"
+        ],
+        "after_tree": "566a680faf26f72d70cce1cf15ed5eafcf0b5cc4",
+        "source": "One-time capacity, prefill and terminal inventory observations, outside the per-token decode path, to distinguish idle GC from actual phase-specific reclamation"
+      },
+      {
+        "id": "historical-gc-physical-pressure",
+        "path": "backends/patches/ninfer-historical-gc-physical-pressure.patch",
+        "sha256": "22f850b1117452442644078d07f527a046c757c1f92badd07c29731b6d92c89b",
+        "requires": [
+          "historical-gc-observation"
+        ],
+        "after_tree": "1cc9520fe09ba9c749d989e198334d81d3fcbed0",
+        "source": "Feed real native Host allocator charges, including unsealed buffers and reader leases, into GC pressure instead of treating unregistered RAM as free repository slots"
       }
     ]
   },

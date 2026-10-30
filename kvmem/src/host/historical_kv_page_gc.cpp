@@ -34,8 +34,10 @@ struct HistoricalKvPageGc::ReleaseState {
 class HistoricalKvPageGc::ProtectedPolicy final : public HistoricalKvPolicy {
 public:
     ProtectedPolicy(std::unique_ptr<HistoricalKvPolicy> inner,
-                    std::shared_ptr<ReleaseState> state, uint32_t capacity)
-        : inner_(std::move(inner)), state_(std::move(state)) {
+                    std::shared_ptr<ReleaseState> state, uint32_t capacity,
+                    std::optional<HostKvStorage> storage, uint64_t page_bytes)
+        : inner_(std::move(inner)), state_(std::move(state)), capacity_(capacity),
+          physical_storage_(std::move(storage)), physical_page_bytes_(page_bytes) {
         filtered_.blocks.reserve(capacity);
     }
     bool permits(const HistoricalKvBlockMeta & block) const noexcept override {
@@ -59,7 +61,15 @@ public:
                 filtered_.blocks.push_back(annotated);
             }
         }
-        return inner_->step(filtered_, pressure, budget, out);
+        auto observed = pressure;
+        if (physical_storage_) {
+            const auto capacity = physical_storage_->capacity_bytes();
+            const auto charged = physical_storage_->charged_bytes();
+            const auto bytes = charged < capacity ? capacity - charged : 0;
+            observed.ready = static_cast<uint32_t>(std::min<uint64_t>(
+                capacity_, bytes / physical_page_bytes_));
+        }
+        return inner_->step(filtered_, observed, budget, out);
     }
     void on_result(const HistoricalKvCommitResult & result) noexcept override {
         inner_->on_result(result);
@@ -69,6 +79,9 @@ private:
     std::unique_ptr<HistoricalKvPolicy> inner_;
     std::shared_ptr<ReleaseState> state_;
     HistoricalKvSnapshot filtered_;
+    uint32_t capacity_;
+    std::optional<HostKvStorage> physical_storage_;
+    uint64_t physical_page_bytes_;
     uint64_t round_ = 0, incarnation_ = 0;
 };
 
@@ -84,7 +97,8 @@ HistoricalKvPageGc::HistoricalKvPageGc(Config config, std::unique_ptr<Historical
       slot_to_page_(config.slots, UINT32_MAX) {
     if (!inner || !config.slots || !config.logical_pages || !config.batch_blocks ||
         !config.page_tokens || !config.low_ready || config.low_ready >= config.high_ready ||
-        config.high_ready > config.slots || !config.poll_ms)
+        config.high_ready > config.slots || !config.poll_ms ||
+        (config.physical_storage && !config.physical_page_bytes))
         throw std::invalid_argument("NInfer historical GC page capacity/watermarks");
     committed_.reserve(config.batch_blocks);
     HistoricalKvGc::Config gc;
@@ -98,7 +112,8 @@ HistoricalKvPageGc::HistoricalKvPageGc(Config config, std::unique_ptr<Historical
     gc.retire_at_decode_boundary = true;
     gc.on_boundary_retired = &HistoricalKvPageGc::on_retired;
     gc.boundary_context = this;
-    auto policy = std::make_unique<ProtectedPolicy>(std::move(inner), releases_, config.slots);
+    auto policy = std::make_unique<ProtectedPolicy>(std::move(inner), releases_, config.slots,
+        config.physical_storage, config.physical_page_bytes);
     manager_ = std::make_unique<HistoricalKvGc>(repository_, std::move(policy), gc);
 }
 
