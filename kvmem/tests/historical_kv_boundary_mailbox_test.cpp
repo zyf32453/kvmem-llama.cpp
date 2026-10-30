@@ -44,6 +44,11 @@ struct Gate {
 class OnePerRound final : public kvmem::HistoricalKvPolicy {
 public:
     explicit OnePerRound(Gate * acknowledgement = nullptr) : acknowledgement_(acknowledgement) {}
+    kvmem::HistoricalKvPrepareCode prepare_commit(const kvmem::HistoricalKvBlockMeta &,
+        kvmem::HistoricalKvCommitConditions & conditions) const noexcept override {
+        conditions = {};
+        return kvmem::HistoricalKvPrepareCode::Ready;
+    }
     kvmem::HistoricalKvStepResult step(const kvmem::HistoricalKvSnapshot & snapshot,
         const kvmem::HistoricalKvPressure &, kvmem::HistoricalKvWorkBudget,
         kvmem::HistoricalKvDecisionBuffer & out) override {

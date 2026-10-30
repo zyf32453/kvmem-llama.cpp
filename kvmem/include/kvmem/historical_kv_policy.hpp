@@ -6,6 +6,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
+#include <atomic>
 #include <optional>
 #include <memory>
 #include <vector>
@@ -49,6 +51,33 @@ struct HistoricalKvBlockMeta {
     uint64_t pinned_bytes = 0;
     bool pinned_released = false;
 };
+
+// Bounded, allocation-free commit conditions compiled by the policy worker.
+// Referenced atomics must be owned by that policy/backend for the GC manager's
+// entire lifetime. Producers and commits share the native serialized execution
+// owner; these checks do not make concurrent arbitrary source mutation atomic
+// with repository retirement. No policy function runs in matches().
+struct HistoricalKvEpochGuard {
+    const std::atomic<uint64_t> * value = nullptr;
+    uint64_t expected = 0;
+};
+
+struct HistoricalKvCommitConditions {
+    static constexpr size_t kEpochGuards = 3;
+    static_assert(std::atomic<uint64_t>::is_always_lock_free &&
+                  std::atomic<uint8_t>::is_always_lock_free,
+                  "historical commit conditions require lock-free counters");
+    bool live_only = false;
+    bool sealed_only = false;
+    bool reject_mandatory = false;
+    const std::atomic<uint8_t> * protected_page = nullptr;
+    std::array<HistoricalKvEpochGuard, kEpochGuards> epochs{};
+    size_t epoch_count = 0;
+    bool add_epoch(HistoricalKvEpochGuard guard) noexcept;
+    bool matches(const HistoricalKvBlockMeta &) const noexcept;
+};
+
+enum class HistoricalKvPrepareCode { Ready, Reevaluate, Unsupported };
 
 // The manager owns this immutable-for-one-round, safely sampled observation.
 // A snapshot need not represent a globally simultaneous instant.
@@ -129,6 +158,10 @@ public:
     // Revalidate delayed decisions against the same generation's current
     // metadata. Custom strategies remain free to retire Writing/active blocks.
     virtual bool permits(const HistoricalKvBlockMeta &) const noexcept { return true; }
+    // Worker-only preparation for boundary mode. Unsupported custom conditions
+    // fail closed; do not fall back to calling permits() on the foreground.
+    virtual HistoricalKvPrepareCode prepare_commit(const HistoricalKvBlockMeta &,
+        HistoricalKvCommitConditions &) const noexcept { return HistoricalKvPrepareCode::Unsupported; }
     virtual HistoricalKvStepResult step(const HistoricalKvSnapshot & snapshot,
                                         const HistoricalKvPressure & pressure,
                                         HistoricalKvWorkBudget budget,
@@ -149,6 +182,8 @@ public:
     explicit HistoricalKvLruPolicy(size_t capacity, bool keep_mandatory = true,
         std::shared_ptr<HistoricalKvThinkingRanges> content_ranges = {});
     bool permits(const HistoricalKvBlockMeta & block) const noexcept override;
+    HistoricalKvPrepareCode prepare_commit(const HistoricalKvBlockMeta &,
+                        HistoricalKvCommitConditions &) const noexcept override;
     HistoricalKvStepResult step(const HistoricalKvSnapshot & snapshot,
                                 const HistoricalKvPressure & pressure,
                                 HistoricalKvWorkBudget budget,

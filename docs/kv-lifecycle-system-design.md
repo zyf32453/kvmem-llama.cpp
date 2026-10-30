@@ -1,6 +1,6 @@
 # 分离式 KV 生命周期管理系统设计与实施计划
 
-日期：2026-10-31。状态：第一阶段基线与契约已落实，其余阶段仍为设计与实施计划。
+日期：2026-10-31。状态：第一阶段基线与契约已落实，第二阶段实现中，完整状态见 [六阶段进度](kv-lifecycle-progress.md)。
 
 第一阶段已确定 NInfer 为主后端，固定版本、模型身份、首批支持档位并完成主机契约检查，见 [第一阶段基线](kv-lifecycle-baseline.md)。新基线已有公共 MemoryStamp、BlockDescriptor、CheckpointIdentity 和 HostKvStorage，后续在这些类型上扩展，不重复建设。下文保留原总体设计及其边界。
 

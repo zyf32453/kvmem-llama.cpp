@@ -7,6 +7,24 @@
 
 namespace kvmem {
 
+bool HistoricalKvCommitConditions::add_epoch(HistoricalKvEpochGuard guard) noexcept {
+    // Saturated counters permanently revoke certificates instead of wrapping.
+    if (!guard.value || guard.expected == UINT64_MAX || epoch_count == epochs.size()) return false;
+    epochs[epoch_count++] = guard;
+    return true;
+}
+
+bool HistoricalKvCommitConditions::matches(const HistoricalKvBlockMeta & block) const noexcept {
+    if ((live_only && block.life != HistoricalKvLife::Live) ||
+        (sealed_only && !block.sealed) || (reject_mandatory && block.mandatory) ||
+        epoch_count > epochs.size()) return false;
+    if (protected_page && protected_page->load(std::memory_order_acquire)) return false;
+    for (size_t i = 0; i < epoch_count; ++i)
+        if (!epochs[i].value || epochs[i].expected == UINT64_MAX ||
+            epochs[i].value->load(std::memory_order_acquire) != epochs[i].expected) return false;
+    return true;
+}
+
 HistoricalKvDecisionBuffer::HistoricalKvDecisionBuffer(size_t limit) : limit_(limit) {
     values_.reserve(limit);
 }
@@ -36,6 +54,16 @@ bool HistoricalKvLruPolicy::permits(const HistoricalKvBlockMeta & block) const n
     return block.life == HistoricalKvLife::Live && block.sealed &&
            (!keep_mandatory_ || !block.mandatory) &&
            (!content_ranges_ || content_ranges_->priority(block.original_begin, block.valid_tokens) < 2);
+}
+
+HistoricalKvPrepareCode HistoricalKvLruPolicy::prepare_commit(const HistoricalKvBlockMeta & block,
+                                           HistoricalKvCommitConditions & conditions) const noexcept {
+    conditions = {};
+    conditions.live_only = conditions.sealed_only = true;
+    conditions.reject_mandatory = keep_mandatory_;
+    return !content_ranges_ || content_ranges_->prepare_commit(
+        block.original_begin, block.valid_tokens, (1u << 0) | (1u << 1), conditions)
+        ? HistoricalKvPrepareCode::Ready : HistoricalKvPrepareCode::Reevaluate;
 }
 
 HistoricalKvStepResult HistoricalKvLruPolicy::step(

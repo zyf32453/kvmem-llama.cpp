@@ -33,13 +33,24 @@ public:
     void note_completed_reply(uint64_t begin, uint64_t end);
     // 0 = thinking, 1 = older completed reply, 2 = protected/unclassified.
     unsigned priority(uint64_t begin, uint32_t tokens) const noexcept;
+    // Worker-only classification certificate. Monotone appends cannot change
+    // classifications entirely before the captured thinking frontier. Rewinds,
+    // overlapping edits and reply-tier changes revoke such certificates.
+    bool prepare_commit(uint64_t begin, uint32_t tokens, unsigned allowed_tiers,
+                        HistoricalKvCommitConditions &) const noexcept;
 private:
+    friend struct HistoricalKvThinkingRangesTestAccess;
+    unsigned priority_locked(uint64_t begin, uint64_t end) const noexcept;
+    static void advance(std::atomic<uint64_t> &) noexcept;
     struct Span { uint64_t begin = 0; uint64_t end = 0; };
     mutable std::mutex mu_;
     std::vector<Span> spans_;
     bool armed_ = false;
     bool tiered_ = false;
     std::vector<Span> completed_replies_;
+    uint64_t thinking_frontier_ = 0;
+    std::atomic<uint64_t> classification_revision_{1};
+    std::atomic<uint64_t> growth_revision_{1};
 };
 
 // A read-only feature boundary. The strategy never owns a release callback.
@@ -66,6 +77,11 @@ public:
     // policy can drop request-local importance peaks without forgetting
     // content-based substitutes.
     virtual uint64_t question_epoch() const noexcept { return 0; }
+    // Dynamic sources must expose a stable atomic owned for their lifetime.
+    // The default is deliberately unsupported, even if question_epoch() is 0.
+    virtual std::optional<HistoricalKvEpochGuard> commit_epoch_guard(uint64_t) const noexcept {
+        return std::nullopt;
+    }
 };
 class HistoricalKvRedundancyPolicy final : public HistoricalKvPolicy {
 public:
@@ -96,6 +112,8 @@ public:
     HistoricalKvRedundancyPolicy(size_t capacity,
         std::shared_ptr<HistoricalKvRedundancySource> source, Config config);
     bool permits(const HistoricalKvBlockMeta &) const noexcept override;
+    HistoricalKvPrepareCode prepare_commit(const HistoricalKvBlockMeta &,
+                        HistoricalKvCommitConditions &) const noexcept override;
     HistoricalKvStepResult step(const HistoricalKvSnapshot &, const HistoricalKvPressure &,
         HistoricalKvWorkBudget, HistoricalKvDecisionBuffer &) override;
     void on_result(const HistoricalKvCommitResult &) noexcept override;

@@ -43,6 +43,19 @@ public:
     bool permits(const HistoricalKvBlockMeta & block) const noexcept override {
         return !state_->protected_page(block.logical_id) && inner_->permits(block);
     }
+    HistoricalKvPrepareCode prepare_commit(const HistoricalKvBlockMeta & block,
+                        HistoricalKvCommitConditions & conditions) const noexcept override {
+        if (block.logical_id >= state_->logical_pages) return HistoricalKvPrepareCode::Reevaluate;
+        const auto prepared = inner_->prepare_commit(block, conditions);
+        if (prepared != HistoricalKvPrepareCode::Ready) return prepared;
+        // The state is owned by this wrapper until the manager is destroyed.
+        // Do not silently overwrite a custom policy's different protection.
+        const auto * protection = &state_->protected_pages[block.logical_id];
+        if (conditions.protected_page && conditions.protected_page != protection)
+            return HistoricalKvPrepareCode::Unsupported;
+        conditions.protected_page = protection;
+        return HistoricalKvPrepareCode::Ready;
+    }
     HistoricalKvStepResult step(const HistoricalKvSnapshot & snapshot,
                                 const HistoricalKvPressure & pressure,
                                 HistoricalKvWorkBudget budget,

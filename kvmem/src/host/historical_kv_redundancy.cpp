@@ -25,10 +25,12 @@ auto age(const HistoricalKvBlockMeta & m) {
 
 void HistoricalKvThinkingRanges::arm() noexcept {
     std::lock_guard<std::mutex> lock(mu_);
+    if (!armed_) advance(classification_revision_);
     armed_ = true;
 }
 void HistoricalKvThinkingRanges::disarm() noexcept {
     std::lock_guard<std::mutex> lock(mu_);
+    if (armed_) advance(classification_revision_);
     armed_ = false;
 }
 bool HistoricalKvThinkingRanges::armed() const noexcept {
@@ -37,11 +39,16 @@ bool HistoricalKvThinkingRanges::armed() const noexcept {
 }
 void HistoricalKvThinkingRanges::clear_spans() noexcept {
     std::lock_guard<std::mutex> lock(mu_);
+    advance(classification_revision_);
+    advance(growth_revision_);
     spans_.clear();
     completed_replies_.clear();
+    thinking_frontier_ = 0;
 }
 void HistoricalKvThinkingRanges::truncate(uint64_t end) noexcept {
     std::lock_guard<std::mutex> lock(mu_);
+    advance(classification_revision_);
+    advance(growth_revision_);
     const auto trim = [end](std::vector<Span> & spans) {
         for (auto & span : spans) span.end = std::min(span.end, end);
         spans.erase(std::remove_if(spans.begin(), spans.end(),
@@ -49,12 +56,15 @@ void HistoricalKvThinkingRanges::truncate(uint64_t end) noexcept {
     };
     trim(spans_);
     trim(completed_replies_);
+    thinking_frontier_ = 0;
+    for (const auto & span : spans_) thinking_frontier_ = std::max(thinking_frontier_, span.end);
     // A restored prefix with no proven thinking must not remain restricted to
     // an empty thinking tier: pressure would have no legal victim.
     if (spans_.empty()) armed_ = false;
 }
 void HistoricalKvThinkingRanges::enable_completed_replies(bool enabled) noexcept {
     std::lock_guard<std::mutex> lock(mu_);
+    if (tiered_ != enabled) advance(classification_revision_);
     tiered_ = enabled;
 }
 bool HistoricalKvThinkingRanges::tiered() const noexcept {
@@ -67,12 +77,17 @@ void HistoricalKvThinkingRanges::note_completed_reply(uint64_t begin, uint64_t e
     // Exact continuation only. Duplicate/overlapping completion must not turn
     // the latest reply into an older one, nor authorize a user-message gap.
     if (!completed_replies_.empty() && begin < completed_replies_.back().end) return;
+    advance(classification_revision_);
     completed_replies_.push_back({begin, end});
 }
 unsigned HistoricalKvThinkingRanges::priority(uint64_t begin, uint32_t tokens) const noexcept {
     if (!tokens || begin > UINT64_MAX - tokens) return 2;
     const uint64_t end = begin + tokens;
     std::lock_guard<std::mutex> lock(mu_);
+    return priority_locked(begin, end);
+}
+
+unsigned HistoricalKvThinkingRanges::priority_locked(uint64_t begin, uint64_t end) const noexcept {
     for (const auto & span : spans_)
         if (begin >= span.begin && end <= span.end) return 0;
     if (tiered_ && completed_replies_.size() > 1)
@@ -80,16 +95,44 @@ unsigned HistoricalKvThinkingRanges::priority(uint64_t begin, uint32_t tokens) c
             if (begin >= completed_replies_[i].begin && end <= completed_replies_[i].end) return 1;
     return 2;
 }
+
+void HistoricalKvThinkingRanges::advance(std::atomic<uint64_t> & revision) noexcept {
+    // Writers already hold mu_; saturation fails future certificates closed.
+    const uint64_t value = revision.load(std::memory_order_relaxed);
+    if (value != UINT64_MAX) revision.store(value + 1, std::memory_order_release);
+}
+
+bool HistoricalKvThinkingRanges::prepare_commit(uint64_t begin, uint32_t tokens,
+    unsigned allowed_tiers, HistoricalKvCommitConditions & conditions) const noexcept {
+    if (!tokens || begin > UINT64_MAX - tokens) return false;
+    const uint64_t end = begin + tokens;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!(allowed_tiers & (1u << priority_locked(begin, end)))) return false;
+    if (!conditions.add_epoch({&classification_revision_,
+                              classification_revision_.load(std::memory_order_relaxed)})) return false;
+    // A future monotone span cannot change any classification wholly before
+    // the captured frontier. A span ahead of it needs the extra growth guard.
+    return end <= thinking_frontier_ || conditions.add_epoch(
+        {&growth_revision_, growth_revision_.load(std::memory_order_relaxed)});
+}
 void HistoricalKvThinkingRanges::note(uint64_t begin, uint64_t end) {
     if (end <= begin) return;
     std::lock_guard<std::mutex> lock(mu_);
     for (auto & span : spans_) {
         if (span.begin == begin) {
-            if (end > span.end) span.end = end;
+            if (end > span.end) {
+                if (span.end < thinking_frontier_) advance(classification_revision_);
+                advance(growth_revision_);
+                span.end = end;
+                thinking_frontier_ = std::max(thinking_frontier_, end);
+            }
             return;
         }
     }
+    if (begin < thinking_frontier_) advance(classification_revision_);
+    advance(growth_revision_);
     spans_.push_back({begin, end});
+    thinking_frontier_ = std::max(thinking_frontier_, end);
 }
 bool HistoricalKvThinkingRanges::contains(uint64_t position) const noexcept {
     std::lock_guard<std::mutex> lock(mu_);
@@ -137,6 +180,21 @@ bool HistoricalKvRedundancyPolicy::permits(const HistoricalKvBlockMeta & meta) c
     return meta.life == HistoricalKvLife::Live && meta.sealed && !meta.mandatory &&
         source_->question_epoch() == question_epoch_ &&
         (!thinking_mode_ || tier == content_tier_ || (fallback_commit_enabled_ && tier == 2));
+}
+
+HistoricalKvPrepareCode HistoricalKvRedundancyPolicy::prepare_commit(const HistoricalKvBlockMeta & meta,
+    HistoricalKvCommitConditions & conditions) const noexcept {
+    conditions = {};
+    conditions.live_only = conditions.sealed_only = conditions.reject_mandatory = true;
+    const auto query = source_->commit_epoch_guard(question_epoch_);
+    if (!query) return HistoricalKvPrepareCode::Unsupported;
+    if (!conditions.add_epoch(*query)) return HistoricalKvPrepareCode::Reevaluate;
+    if (!config_.thinking) return HistoricalKvPrepareCode::Ready;
+    const unsigned tiers = thinking_mode_
+        ? (1u << content_tier_) | (fallback_commit_enabled_ ? 1u << 2 : 0u)
+        : 7u;
+    return config_.thinking->prepare_commit(meta.original_begin, meta.valid_tokens, tiers, conditions)
+        ? HistoricalKvPrepareCode::Ready : HistoricalKvPrepareCode::Reevaluate;
 }
 
 bool HistoricalKvRedundancyPolicy::carries_retired_substitute(

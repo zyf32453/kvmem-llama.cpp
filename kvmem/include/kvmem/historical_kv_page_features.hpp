@@ -23,6 +23,9 @@ public:
     uint64_t question_epoch() const noexcept override {
         return question_epoch_.load(std::memory_order_acquire);
     }
+    std::optional<HistoricalKvEpochGuard> commit_epoch_guard(uint64_t expected) const noexcept override {
+        return HistoricalKvEpochGuard{&question_epoch_, expected};
+    }
 
     bool has_page(uint32_t page) const;
     // A sealed page is published once. Rewriting an ID requires truncate_to()
@@ -38,6 +41,7 @@ public:
     void truncate_to(uint64_t token_frontier, uint32_t page_tokens);
 
 private:
+    void advance_question_epoch() noexcept;
     const size_t dimensions_;
     mutable std::mutex mu_;
     std::vector<std::vector<float>> pages_;

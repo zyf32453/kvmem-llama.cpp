@@ -24,10 +24,14 @@ HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repositor
         throw std::invalid_argument("invalid historical KV GC configuration");
     }
     retry_.reserve(repository_->capacity());
+    retry_conditions_.reserve(repository_->capacity());
     prepared_.reserve(config_.batch_blocks);
+    prepared_conditions_.reserve(config_.batch_blocks);
     pending_intents_.reserve(config_.batch_blocks);
+    pending_conditions_.reserve(config_.batch_blocks);
     pending_codes_.reserve(config_.batch_blocks);
     acknowledged_intents_.reserve(config_.batch_blocks);
+    acknowledged_conditions_.reserve(config_.batch_blocks);
     acknowledged_codes_.reserve(config_.batch_blocks);
     audit_ = historical_kv_audit_enabled();
     if (audit_) audit_committed_.resize(repository_->capacity());
@@ -77,11 +81,18 @@ void HistoricalKvGc::run() noexcept {
     worker_finished_.store(true, std::memory_order_release);
 }
 
-HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & intent) {
-    switch (repository_->retire(intent.victim, intent.expected_content_version,
+HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & intent,
+                                             const HistoricalKvCommitConditions * conditions) {
+    const auto code = conditions
+        ? repository_->retire(intent.victim, intent.expected_content_version,
+            [](const HistoricalKvBlockMeta & meta, const void * prepared) noexcept {
+                return static_cast<const HistoricalKvCommitConditions *>(prepared)->matches(meta);
+            }, conditions)
+        : repository_->retire(intent.victim, intent.expected_content_version,
             [](const HistoricalKvBlockMeta & meta, const void * policy) noexcept {
                 return static_cast<const HistoricalKvPolicy *>(policy)->permits(meta);
-            }, policy_.get())) {
+            }, policy_.get());
+    switch (code) {
     case HistoricalKvRepository::RetireResult::Committed:
         return HistoricalKvCommitCode::Committed;
     case HistoricalKvRepository::RetireResult::AlreadyRetired:
@@ -172,7 +183,7 @@ HistoricalKvGc::BoundaryResult HistoricalKvGc::commit_at_decode_boundary() noexc
     result.started_ns = ns();
     result.prepared = static_cast<uint32_t>(pending_intents_.size());
     for (size_t i = 0; i < pending_intents_.size(); ++i) {
-        const auto code = commit(pending_intents_[i]);
+        const auto code = commit(pending_intents_[i], &pending_conditions_[i]);
         pending_codes_[i] = code;
         if (code == HistoricalKvCommitCode::Committed) {
             ++result.committed;
@@ -195,6 +206,7 @@ void HistoricalKvGc::manual_tick() {
     if (config_.retire_at_decode_boundary) {
         if (pending_state_.load(std::memory_order_acquire) == PendingState::Committed) {
             acknowledged_intents_.swap(pending_intents_);
+            acknowledged_conditions_.swap(pending_conditions_);
             acknowledged_codes_.swap(pending_codes_);
             pending_state_.store(PendingState::Idle, std::memory_order_release);
         }
@@ -202,10 +214,13 @@ void HistoricalKvGc::manual_tick() {
         // Slow policy callbacks/audit output cannot hold a foreground lock.
         for (size_t i = 0; i < acknowledged_intents_.size(); ++i) {
             acknowledge(acknowledged_intents_[i], acknowledged_codes_[i]);
-            if (acknowledged_codes_[i] == HistoricalKvCommitCode::Retry)
+            if (acknowledged_codes_[i] == HistoricalKvCommitCode::Retry) {
                 retry_.push_back(acknowledged_intents_[i]);
+                retry_conditions_.push_back(acknowledged_conditions_[i]);
+            }
         }
         acknowledged_intents_.clear();
+        acknowledged_conditions_.clear();
         acknowledged_codes_.clear();
     }
     // Progress previous retirements even when policy has no candidate, the
@@ -240,6 +255,7 @@ void HistoricalKvGc::manual_tick() {
     if (!retry_.empty()) {
         if (config_.retire_at_decode_boundary) {
             pending_intents_.swap(retry_);
+            pending_conditions_.swap(retry_conditions_);
             pending_codes_.resize(pending_intents_.size());
             pending_state_.store(PendingState::Prepared, std::memory_order_release);
             return;
@@ -369,7 +385,22 @@ void HistoricalKvGc::manual_tick() {
             continue;
         }
         if (config_.retire_at_decode_boundary) {
+            HistoricalKvCommitConditions conditions;
+            const auto prepared = policy_->prepare_commit(*observed_slot, conditions);
+            if (prepared != HistoricalKvPrepareCode::Ready) {
+                if (prepared == HistoricalKvPrepareCode::Unsupported) {
+                    ++unsupported_conditions_;
+                    if (!policy_failed_) {
+                        ++policy_failures_;
+                        policy_failed_ = true;
+                        std::fprintf(stderr, "[historical-kv-gc] boundary conditions unsupported; policy disabled\n");
+                    }
+                }
+                acknowledge(intent, HistoricalKvCommitCode::Reevaluate);
+                continue;
+            }
             prepared_.push_back(intent);
+            prepared_conditions_.push_back(conditions);
         } else {
             const auto code = commit(intent);
             acknowledge(intent, code);
@@ -386,6 +417,7 @@ void HistoricalKvGc::manual_tick() {
     }
     if (!prepared_.empty()) {
         pending_intents_.swap(prepared_);
+        pending_conditions_.swap(prepared_conditions_);
         pending_codes_.resize(pending_intents_.size());
         pending_state_.store(PendingState::Prepared, std::memory_order_release);
     }
@@ -402,7 +434,7 @@ HistoricalKvGc::Stats HistoricalKvGc::stats() const {
             reclaimed_.load(), deferred_.load(), stale_.load(),
             reevaluate_.load(), retry_count_.load(), policy_failures_.load(),
             worker_failures_.load(), host_released_early_.load(), partial_resource_releases_.load(),
-            boundary_batches_.load(), boundary_committed_.load()};
+            boundary_batches_.load(), boundary_committed_.load(), unsupported_conditions_.load()};
 }
 
 } // namespace kvmem

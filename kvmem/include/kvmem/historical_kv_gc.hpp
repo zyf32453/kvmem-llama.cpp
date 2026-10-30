@@ -56,6 +56,7 @@ public:
         uint64_t partial_resource_releases = 0; // Progress before the complete Host bundle is gone.
         uint64_t boundary_batches = 0;
         uint64_t boundary_committed = 0;
+        uint64_t unsupported_conditions = 0;
     };
     struct BoundaryResult {
         uint64_t started_ns = 0;
@@ -88,7 +89,8 @@ public:
 
 private:
     friend struct HistoricalKvGcAuditTestAccess;
-    HistoricalKvCommitCode commit(const HistoricalKvDeleteIntent & intent);
+    HistoricalKvCommitCode commit(const HistoricalKvDeleteIntent & intent,
+                                  const HistoricalKvCommitConditions * conditions = nullptr);
     void acknowledge(const HistoricalKvDeleteIntent & intent,
                      HistoricalKvCommitCode code);
     void audit_acknowledgement(const HistoricalKvDeleteIntent & intent, const char * outcome) const noexcept;
@@ -109,12 +111,15 @@ private:
                   "historical GC boundary requires lock-free mailbox state");
     std::atomic<PendingState> pending_state_{PendingState::Idle};
     std::vector<HistoricalKvDeleteIntent> prepared_;
+    std::vector<HistoricalKvCommitConditions> prepared_conditions_;
     std::vector<HistoricalKvDeleteIntent> pending_intents_;
+    std::vector<HistoricalKvCommitConditions> pending_conditions_;
     std::vector<HistoricalKvCommitCode> pending_codes_;
     // Worker-owned acknowledgement buffers. The worker takes the completed
     // batch before returning the mailbox to Idle; callbacks and diagnostic IO
     // cannot delay the boundary or access a buffer owned by the foreground.
     std::vector<HistoricalKvDeleteIntent> acknowledged_intents_;
+    std::vector<HistoricalKvCommitConditions> acknowledged_conditions_;
     std::vector<HistoricalKvCommitCode> acknowledged_codes_;
     bool audit_ = false;
     // Allocated only for opt-in auditing. Exact generations prevent associating
@@ -126,6 +131,7 @@ private:
     HistoricalKvDecisionBuffer decisions_;
     HistoricalKvPressure pressure_{};
     std::vector<HistoricalKvDeleteIntent> retry_;
+    std::vector<HistoricalKvCommitConditions> retry_conditions_;
     // One generation per physical slot is enough to suppress duplicate
     // commands across all yielded batches of the same policy round.
     std::vector<uint64_t> seen_generation_;
@@ -146,6 +152,7 @@ private:
     std::atomic<uint64_t> host_released_early_{0};
     std::atomic<uint64_t> partial_resource_releases_{0};
     std::atomic<uint64_t> boundary_batches_{0}, boundary_committed_{0};
+    std::atomic<uint64_t> unsupported_conditions_{0};
     std::atomic<uint32_t> requested_ready_{0};
     bool policy_failed_ = false;
 };

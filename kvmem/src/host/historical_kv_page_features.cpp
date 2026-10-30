@@ -12,6 +12,12 @@ HistoricalKvPageFeatures::HistoricalKvPageFeatures(uint32_t logical_pages, size_
     if (!logical_pages || !dimensions) throw std::invalid_argument("historical page feature geometry");
 }
 
+void HistoricalKvPageFeatures::advance_question_epoch() noexcept {
+    // Called under mu_. Saturation revokes typed certificates permanently.
+    const auto current = question_epoch_.load(std::memory_order_relaxed);
+    if (current != UINT64_MAX) question_epoch_.store(current + 1, std::memory_order_release);
+}
+
 bool HistoricalKvPageFeatures::has_page(uint32_t page) const {
     std::lock_guard<std::mutex> lock(mu_);
     return page < pages_.size() && pages_[page].size() == dimensions_;
@@ -34,7 +40,7 @@ void HistoricalKvPageFeatures::publish_question_scores(const std::vector<double>
     question_scores_ = scores;
     if (new_question) {
         std::fill(output_peaks_.begin(), output_peaks_.end(), -std::numeric_limits<double>::infinity());
-        question_epoch_.fetch_add(1, std::memory_order_release);
+        advance_question_epoch();
     }
 }
 
@@ -49,7 +55,7 @@ void HistoricalKvPageFeatures::clear_question() {
     std::lock_guard<std::mutex> lock(mu_);
     question_scores_.clear();
     std::fill(output_peaks_.begin(), output_peaks_.end(), -std::numeric_limits<double>::infinity());
-    question_epoch_.fetch_add(1, std::memory_order_release);
+    advance_question_epoch();
 }
 
 void HistoricalKvPageFeatures::truncate_to(uint64_t token_frontier, uint32_t page_tokens) {
@@ -62,7 +68,7 @@ void HistoricalKvPageFeatures::truncate_to(uint64_t token_frontier, uint32_t pag
         output_peaks_[id] = -std::numeric_limits<double>::infinity();
     }
     if (question_scores_.size() > page) question_scores_.resize(page);
-    question_epoch_.fetch_add(1, std::memory_order_release);
+    advance_question_epoch();
 }
 
 bool HistoricalKvPageFeatures::begin_round(uint64_t) {
