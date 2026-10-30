@@ -15,7 +15,8 @@ namespace kvmem {
 // scores; the policy worker never calls into mutable backend or CUDA state.
 class HistoricalKvPageFeatures final : public HistoricalKvRedundancySource {
 public:
-    HistoricalKvPageFeatures(uint32_t logical_pages, size_t dimensions);
+    HistoricalKvPageFeatures(uint32_t logical_pages, size_t dimensions,
+        std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {});
     size_t dimensions() const noexcept override { return dimensions_; }
     bool begin_round(uint64_t incarnation) override;
     bool read(const HistoricalKvBlockMeta & meta, float * descriptor, double & importance) override;
@@ -48,12 +49,12 @@ private:
     void advance_question_epoch() noexcept;
     const size_t dimensions_;
     mutable std::mutex mu_;
-    std::vector<std::vector<float>> pages_;
-    std::vector<double> question_scores_;
-    std::vector<double> output_peaks_;
+    HistoricalKvAuxVector<HistoricalKvAuxVector<float>> pages_;
+    HistoricalKvAuxVector<double> question_scores_;
+    HistoricalKvAuxVector<double> output_peaks_;
     // Only the policy worker calls begin_round/read. Foreground updates never
     // mutate this frozen view, even during a multi-tick comparison round.
-    std::vector<double> frozen_importance_;
+    HistoricalKvAuxVector<double> frozen_importance_;
     std::atomic<uint64_t> question_epoch_{1};
     std::atomic<uint64_t> score_epoch_{0};
 };

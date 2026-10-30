@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kvmem/historical_kv_policy.hpp"
+#include "kvmem/historical_kv_auxiliary.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -17,6 +18,9 @@ namespace kvmem {
 // The optional reply tier extends eligibility using proven generated spans.
 class HistoricalKvThinkingRanges {
 public:
+    explicit HistoricalKvThinkingRanges(std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {})
+        : spans_(HistoricalKvAuxAllocator<Span>(auxiliary, HistoricalKvAuxKind::Ranges)),
+          completed_replies_(spans_.get_allocator()) {}
     void arm() noexcept;
     void disarm() noexcept;
     bool armed() const noexcept;
@@ -44,10 +48,10 @@ private:
     static void advance(std::atomic<uint64_t> &) noexcept;
     struct Span { uint64_t begin = 0; uint64_t end = 0; };
     mutable std::mutex mu_;
-    std::vector<Span> spans_;
+    HistoricalKvAuxVector<Span> spans_;
     bool armed_ = false;
     bool tiered_ = false;
-    std::vector<Span> completed_replies_;
+    HistoricalKvAuxVector<Span> completed_replies_;
     uint64_t thinking_frontier_ = 0;
     std::atomic<uint64_t> classification_revision_{1};
     std::atomic<uint64_t> growth_revision_{1};
@@ -116,6 +120,9 @@ public:
         // capacity request, fill the remainder with cold unclassified blocks.
         // Disabled by default to preserve existing backend policy semantics.
         bool lru_fallback_unclassified = false;
+        // Share across domains/components; null preserves unbudgeted legacy
+        // callers and is not a claim that their total memory is bounded.
+        std::shared_ptr<HistoricalKvAuxBudget> auxiliary;
     };
     HistoricalKvRedundancyPolicy(size_t capacity,
         std::shared_ptr<HistoricalKvRedundancySource> source, Config config);
@@ -159,9 +166,9 @@ private:
     size_t snapshot_index(const HistoricalKvSnapshot & snapshot, uint32_t slot,
         uint64_t generation, uint64_t version) const noexcept;
     bool better_representative(size_t a, size_t b) const noexcept;
-    size_t emit_ranked(std::vector<size_t> & group, size_t take, HistoricalKvDeleteReason reason,
+    size_t emit_ranked(HistoricalKvAuxVector<size_t> & group, size_t take, HistoricalKvDeleteReason reason,
         const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out);
-    size_t emit_unclassified_lru(std::vector<size_t> & indices, size_t take,
+    size_t emit_unclassified_lru(HistoricalKvAuxVector<size_t> & indices, size_t take,
         const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out);
     HistoricalKvScoreEvidence evidence(uint64_t round, bool scored) const noexcept;
     size_t capacity_, dimensions_;
@@ -178,17 +185,17 @@ private:
     bool fallback_commit_enabled_ = false;
     unsigned content_tier_ = 0;
     bool audit_ = false;
-    std::vector<Row> rows_;
-    std::vector<float> descriptors_;
+    HistoricalKvAuxVector<Row> rows_;
+    HistoricalKvAuxVector<float> descriptors_;
     struct DirectEdge { size_t index; double similarity; };
     // Sparse direct-similarity edges from the comparisons already budgeted
     // for this round; unlike connected components, each edge is a proof of
     // an actual retained substitute when a victim is proposed.
-    std::vector<std::vector<DirectEdge>> neighbors_;
-    std::vector<size_t> references_, ranked_, candidate_indices_, candidate_scratch_;
-    std::vector<size_t> unclassified_indices_;
-    std::vector<size_t> protected_indices_;
-    std::vector<Seen> seen_;
+    HistoricalKvAuxVector<HistoricalKvAuxVector<DirectEdge>> neighbors_;
+    HistoricalKvAuxVector<size_t> references_, ranked_, candidate_indices_, candidate_scratch_;
+    HistoricalKvAuxVector<size_t> unclassified_indices_;
+    HistoricalKvAuxVector<size_t> protected_indices_;
+    HistoricalKvAuxVector<Seen> seen_;
     std::atomic<uint64_t> feature_blocks_{0}, missing_{0}, comparisons_{0}, max_round_features_{0};
     std::atomic<uint64_t> scored_{0}, representatives_{0}, no_query_{0}, lossy_{0};
 };

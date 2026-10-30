@@ -1,4 +1,5 @@
 add_library(kvmem
+    src/host/historical_kv_auxiliary.cpp
     src/host/historical_kv_gc.cpp
     src/host/historical_kv_page_gc.cpp
     src/host/historical_kv_page_features.cpp
@@ -99,6 +100,8 @@ kvmem_add_test(historical_kv_commit_conditions_test)
 kvmem_add_test(historical_kv_range_lock_test)
 kvmem_add_test(historical_kv_witness_lifecycle_test)
 kvmem_add_test(historical_kv_score_evidence_test)
+kvmem_add_test(historical_kv_auxiliary_budget_test)
+set_tests_properties(historical_kv_auxiliary_budget_test PROPERTIES TIMEOUT 60)
 set_tests_properties(historical_kv_witness_lifecycle_test historical_kv_score_evidence_test PROPERTIES TIMEOUT 60)
 set_tests_properties(historical_kv_commit_conditions_test historical_kv_range_lock_test PROPERTIES TIMEOUT 30)
 kvmem_add_test(kvmem_store_test)

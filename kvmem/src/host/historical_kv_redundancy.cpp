@@ -49,7 +49,7 @@ void HistoricalKvThinkingRanges::truncate(uint64_t end) noexcept {
     std::lock_guard<std::mutex> lock(mu_);
     advance(classification_revision_);
     advance(growth_revision_);
-    const auto trim = [end](std::vector<Span> & spans) {
+    const auto trim = [end](HistoricalKvAuxVector<Span> & spans) {
         for (auto & span : spans) span.end = std::min(span.end, end);
         spans.erase(std::remove_if(spans.begin(), spans.end(),
             [](const Span & span) { return span.begin >= span.end; }), spans.end());
@@ -77,8 +77,8 @@ void HistoricalKvThinkingRanges::note_completed_reply(uint64_t begin, uint64_t e
     // Exact continuation only. Duplicate/overlapping completion must not turn
     // the latest reply into an older one, nor authorize a user-message gap.
     if (!completed_replies_.empty() && begin < completed_replies_.back().end) return;
-    advance(classification_revision_);
     completed_replies_.push_back({begin, end});
+    advance(classification_revision_);
 }
 unsigned HistoricalKvThinkingRanges::priority(uint64_t begin, uint32_t tokens) const noexcept {
     if (!tokens || begin > UINT64_MAX - tokens) return 2;
@@ -129,9 +129,9 @@ void HistoricalKvThinkingRanges::note(uint64_t begin, uint64_t end) {
             return;
         }
     }
+    spans_.push_back({begin, end});
     if (begin < thinking_frontier_) advance(classification_revision_);
     advance(growth_revision_);
-    spans_.push_back({begin, end});
     thinking_frontier_ = std::max(thinking_frontier_, end);
 }
 bool HistoricalKvThinkingRanges::contains(uint64_t position) const noexcept {
@@ -152,7 +152,15 @@ bool HistoricalKvThinkingRanges::covers(uint64_t begin, uint32_t tokens) const n
 HistoricalKvRedundancyPolicy::HistoricalKvRedundancyPolicy(size_t capacity,
     std::shared_ptr<HistoricalKvRedundancySource> source, Config config)
     : capacity_(capacity), dimensions_(source ? source->dimensions() : 0),
-      source_(std::move(source)), config_(config) {
+      source_(std::move(source)), config_(config),
+      rows_(HistoricalKvAuxAllocator<Row>(config.auxiliary, HistoricalKvAuxKind::Policy)),
+      descriptors_(HistoricalKvAuxAllocator<float>(config.auxiliary, HistoricalKvAuxKind::Policy)),
+      neighbors_(HistoricalKvAuxAllocator<HistoricalKvAuxVector<DirectEdge>>(config.auxiliary, HistoricalKvAuxKind::Policy)),
+      references_(HistoricalKvAuxAllocator<size_t>(config.auxiliary, HistoricalKvAuxKind::Policy)),
+      ranked_(references_.get_allocator()), candidate_indices_(references_.get_allocator()),
+      candidate_scratch_(references_.get_allocator()), unclassified_indices_(references_.get_allocator()),
+      protected_indices_(references_.get_allocator()),
+      seen_(HistoricalKvAuxAllocator<Seen>(config.auxiliary, HistoricalKvAuxKind::Policy)) {
     audit_ = historical_kv_audit_enabled();
     if (config_.pool_blocks > capacity_) config_.pool_blocks = capacity_;
     if (!config_.segment_blocks) config_.segment_blocks = 1;
@@ -368,7 +376,7 @@ void HistoricalKvRedundancyPolicy::select_references() {
     }
     const size_t newest = std::max<size_t>(config_.reference_blocks / 2, 1);
     const size_t older_limit = config_.reference_blocks - newest;
-    std::vector<size_t> older(references_.begin() + newest, references_.end());
+    HistoricalKvAuxVector<size_t> older(references_.begin() + newest, references_.end(), references_.get_allocator());
     std::reverse(older.begin(), older.end());
     candidate_scratch_.assign(references_.begin(), references_.begin() + newest);
     if (older_limit && !older.empty()) {
@@ -441,7 +449,7 @@ void HistoricalKvRedundancyPolicy::remember_scored() {
     }
 }
 
-size_t HistoricalKvRedundancyPolicy::emit_unclassified_lru(std::vector<size_t> & indices,
+size_t HistoricalKvRedundancyPolicy::emit_unclassified_lru(HistoricalKvAuxVector<size_t> & indices,
     size_t take, const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out) {
     if (!take || !out.remaining()) return 0;
     // The thinking spans may have advanced while features were being scored.
@@ -668,7 +676,9 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
                 examined, fallback};
         }
         select_references();
-        neighbors_.assign(rows_.size(), {});
+        neighbors_.clear();
+        for (size_t i = 0; i < rows_.size(); ++i)
+            neighbors_.emplace_back(HistoricalKvAuxAllocator<DirectEdge>(config_.auxiliary, HistoricalKvAuxKind::Policy));
         return {HistoricalKvStepStatus::Yielded, examined, 0};
     }
     // Default mode compares against newest plus age-banded older references,
@@ -746,15 +756,16 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
     // require a direct, retained witness for every redundancy intent. Reuse
     // only edges proven by the budgeted comparison pass, including reverse
     // edges when a non-reference row compared against a retained reference.
-    std::vector<size_t> by_preference(rows_.size());
+    HistoricalKvAuxVector<size_t> by_preference(rows_.size(), 0, references_.get_allocator());
     std::iota(by_preference.begin(), by_preference.end(), 0);
     std::sort(by_preference.begin(), by_preference.end(), [&](size_t a, size_t b) {
         if (better_representative(a, b)) return true;
         if (better_representative(b, a)) return false;
         return a < b;
     });
-    std::vector<uint8_t> supports(rows_.size(), 0);
-    std::vector<size_t> prior_witness_fallback;
+    HistoricalKvAuxVector<uint8_t> supports(rows_.size(), 0,
+        HistoricalKvAuxAllocator<uint8_t>(config_.auxiliary, HistoricalKvAuxKind::Policy));
+    HistoricalKvAuxVector<size_t> prior_witness_fallback(references_.get_allocator());
     ranked_.clear();
     candidate_scratch_.clear();
     for (size_t i : by_preference) {
@@ -830,7 +841,7 @@ HistoricalKvScoreEvidence HistoricalKvRedundancyPolicy::evidence(uint64_t round,
     return result;
 }
 
-size_t HistoricalKvRedundancyPolicy::emit_ranked(std::vector<size_t> & group, size_t take,
+size_t HistoricalKvRedundancyPolicy::emit_ranked(HistoricalKvAuxVector<size_t> & group, size_t take,
     HistoricalKvDeleteReason reason, const HistoricalKvSnapshot & snapshot,
     HistoricalKvDecisionBuffer & out) {
     if (!take || group.empty()) return 0;
@@ -842,7 +853,8 @@ size_t HistoricalKvRedundancyPolicy::emit_ranked(std::vector<size_t> & group, si
             max_importance = std::max(max_importance, rows_[i].importance);
             max_redundancy = std::max(max_redundancy, rows_[i].redundancy);
         }
-        std::vector<double> importance(group.size()), redundancy(group.size());
+        const HistoricalKvAuxAllocator<double> allocator(config_.auxiliary, HistoricalKvAuxKind::Policy);
+        HistoricalKvAuxVector<double> importance(group.size(), 0, allocator), redundancy(group.size(), 0, allocator);
         double importance_sum = 0, redundancy_sum = 0;
         for (size_t k = 0; k < group.size(); ++k) {
             importance[k] = std::exp(rows_[group[k]].importance - max_importance);

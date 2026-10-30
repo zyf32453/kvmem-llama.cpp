@@ -7,9 +7,17 @@
 
 namespace kvmem {
 
-HistoricalKvPageFeatures::HistoricalKvPageFeatures(uint32_t logical_pages, size_t dimensions)
-    : dimensions_(dimensions), pages_(logical_pages), output_peaks_(logical_pages, -std::numeric_limits<double>::infinity()) {
+HistoricalKvPageFeatures::HistoricalKvPageFeatures(uint32_t logical_pages, size_t dimensions,
+    std::shared_ptr<HistoricalKvAuxBudget> auxiliary)
+    : dimensions_(dimensions),
+      pages_(HistoricalKvAuxAllocator<HistoricalKvAuxVector<float>>(auxiliary, HistoricalKvAuxKind::Features)),
+      question_scores_(HistoricalKvAuxAllocator<double>(auxiliary, HistoricalKvAuxKind::Features)),
+      output_peaks_(question_scores_.get_allocator()), frozen_importance_(question_scores_.get_allocator()) {
     if (!logical_pages || !dimensions) throw std::invalid_argument("historical page feature geometry");
+    pages_.reserve(logical_pages);
+    for (uint32_t page = 0; page < logical_pages; ++page)
+        pages_.emplace_back(HistoricalKvAuxAllocator<float>(auxiliary, HistoricalKvAuxKind::Features));
+    output_peaks_.assign(logical_pages, -std::numeric_limits<double>::infinity());
 }
 
 void HistoricalKvPageFeatures::advance_question_epoch() noexcept {
@@ -30,14 +38,15 @@ void HistoricalKvPageFeatures::publish_page(uint32_t page, const std::vector<flo
         if (!std::isfinite(value)) throw std::invalid_argument("nonfinite historical page descriptor");
     std::lock_guard<std::mutex> lock(mu_);
     if (!pages_[page].empty()) throw std::logic_error("historical page descriptor republished");
-    pages_[page] = descriptor;
+    pages_[page].assign(descriptor.begin(), descriptor.end());
 }
 
 void HistoricalKvPageFeatures::publish_question_scores(const std::vector<double> & scores, bool new_question) {
+    if (scores.size() > pages_.size()) throw std::invalid_argument("historical Query score geometry");
     for (double value : scores)
         if (!std::isfinite(value)) throw std::invalid_argument("nonfinite historical Query score");
     std::lock_guard<std::mutex> lock(mu_);
-    question_scores_ = scores;
+    question_scores_.assign(scores.begin(), scores.end());
     if (new_question) {
         std::fill(output_peaks_.begin(), output_peaks_.end(), -std::numeric_limits<double>::infinity());
         advance_question_epoch();
@@ -75,10 +84,10 @@ bool HistoricalKvPageFeatures::begin_round(uint64_t) {
     std::lock_guard<std::mutex> lock(mu_);
     const auto current = score_epoch_.load(std::memory_order_relaxed);
     if (current == UINT64_MAX) return false;
-    score_epoch_.store(current + 1, std::memory_order_release);
     frozen_importance_ = output_peaks_;
     for (size_t id = 0; id < std::min(question_scores_.size(), frozen_importance_.size()); ++id)
         frozen_importance_[id] = std::max(frozen_importance_[id], question_scores_[id]);
+    score_epoch_.store(current + 1, std::memory_order_release);
     return true;
 }
 
