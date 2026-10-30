@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "41783d8017949fe4683ed49832a8f01ef4040a84",
+    "patched_tree": "d2f18aedb638225d14326e24a840dd4dfc316f34",
     "patches": [
       {
         "id": "kvmem",
@@ -260,6 +260,16 @@
         ],
         "after_tree": "41783d8017949fe4683ed49832a8f01ef4040a84",
         "source": "Wait for a prepared GC batch before allocating a prefill Host burst; release detached owners promptly at prefill boundaries while preserving reader leases and asynchronous decode release"
+      },
+      {
+        "id": "historical-gc-protection-lifecycle",
+        "path": "backends/patches/ninfer-historical-gc-protection-lifecycle.patch",
+        "sha256": "d0c63203db0137e165c7129d9d2dea97e7a76da924b54668782e33e14a84ba03",
+        "requires": [
+          "historical-gc-prefill-admission"
+        ],
+        "after_tree": "d2f18aedb638225d14326e24a840dd4dfc316f34",
+        "source": "Expire Query pins at prefill completion; invalidate optional checkpoint aliases when Host GC retires required pages while keeping active Query replay dependencies pinned"
       }
     ]
   },

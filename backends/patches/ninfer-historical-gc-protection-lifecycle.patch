@@ -1,0 +1,147 @@
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -1848,6 +1848,11 @@
+     RequestControl::Prefill& staged   = *request.prefill;
+     const std::uint32_t prompt_tokens = staged.prompt_tokens;
+     sequence.window.query_replay_active = false;
++    // The Query view is a prefill lease. Decode can replace that view; keeping
++    // these old IDs would pin a second working set for the whole generation.
++    sequence.window.query_capture = false;
++    sequence.window.query_selected.clear();
++    sequence.window.query_required.clear();
+ 
+     validate_licensed_tokens(std::span<const TokenId>(host_tokens, 1));
+     if (sequence.ledger.size() != prompt_tokens) {
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -699,27 +699,33 @@
+     if (window.retired_pages.size() < count) window.retired_pages.resize(count);
+     if (window.gc_protected.size() < count) window.gc_protected.resize(count);
+     std::fill(window.gc_protected.begin(), window.gc_protected.end(), 0);
+-    const auto protect = [&](std::uint32_t id) {
+-        if (id < count) window.gc_protected[id] = 1;
++    constexpr uint8_t sink_pin = 1, recent_pin = 2, active_pin = 4,
++        query_pin = 8, replay_pin = 16, media_pin = 32, io_pin = 64;
++    const auto protect = [&](std::uint32_t id, uint8_t reason) {
++        if (id < count) window.gc_protected[id] |= reason;
+     };
+-    for (std::uint32_t id = 0; id < std::min(count, kvmem_options.sink_blocks()); ++id) protect(id);
++    for (std::uint32_t id = 0; id < std::min(count, kvmem_options.sink_blocks()); ++id) protect(id, sink_pin);
+     // The archive can contain preallocated lookahead pages. Recent protection
+     // follows the accepted KV frontier, not the last allocated archive slot.
+     const auto valid_pages = std::min(count, kv_pages_for_tokens(sequence.text_kv_valid));
+     const auto recent = std::min(valid_pages, kvmem_options.recent_blocks());
+-    for (std::uint32_t id = valid_pages - recent; id < valid_pages; ++id) protect(id);
+-    for (const auto id : window.media_pages) protect(id);
+-    for (const auto id : window.pages) protect(id);
+-    for (const auto id : window.query_selected) protect(id);
+-    for (const auto id : window.query_required) protect(id);
+-    for (const auto kind : checkpoint_kinds(window)) {
+-        if (const auto* checkpoint = memory_checkpoint(window, kind))
+-            for (const auto id : checkpoint->resident_pages) protect(id);
++    for (std::uint32_t id = valid_pages - recent; id < valid_pages; ++id) protect(id, recent_pin);
++    for (const auto id : window.media_pages) protect(id, media_pin);
++    for (const auto id : window.pages) protect(id, active_pin);
++    if (requests[sequence.lane].prefill) {
++        for (const auto id : window.query_selected) protect(id, query_pin);
++        for (const auto id : window.query_required) protect(id, query_pin);
++        // This checkpoint is an execution dependency only until Query replay
++        // finishes. Other checkpoints are optional reuse opportunities: their
++        // metadata is revoked below if GC retires a required Host page.
++        if (window.query_capture && (!window.query_replayed || window.query_replay_active))
++            if (const auto* checkpoint = memory_checkpoint(window, KvmemCheckpointKind::Base))
++                for (const auto id : checkpoint->resident_pages) protect(id, replay_pin);
+     }
+     if (window.pending_window)
+-        std::fill(window.gc_protected.begin(), window.gc_protected.end(), 1);
++        std::fill(window.gc_protected.begin(), window.gc_protected.end(), io_pin);
+     if (window.pending_append && window.pending_append->work)
+-        for (const auto id : window.pending_append->work->ids) protect(id);
++        for (const auto id : window.pending_append->work->ids) protect(id, io_pin);
+     for (std::uint32_t id = 0; id < count; ++id) {
+         if (!memory_page_selectable(window, id)) continue;
+         if (id < valid_pages && id < window.host_versions.size() &&
+@@ -743,9 +749,14 @@
+     }
+     if (kvmem_options.verify_transfers) {
+         uint32_t native = 0, sealed = 0, registered = 0, eligible = 0;
++        uint32_t active = 0, query = 0, replay = 0, io = 0;
+         for (uint32_t id = 0; id < count; ++id) {
+             const bool record = bool(window.archive[id]);
+             native += record;
++            active += record && (window.gc_protected[id] & active_pin);
++            query += record && (window.gc_protected[id] & query_pin);
++            replay += record && (window.gc_protected[id] & replay_pin);
++            io += record && (window.gc_protected[id] & io_pin);
+             sealed += record && id < window.host_versions.size() &&
+                 window.host_versions[id] == page_tokens &&
+                 (!kvmem_options.disk_bytes || !window.archive[id].mutable_resident());
+@@ -755,13 +766,13 @@
+             }
+         }
+         const auto metrics = gc.stats();
+-        std::fprintf(stderr, "KVMEM_NATIVE_GC_STATE frontier=%u archive=%u native=%u sealed=%u registered=%u eligible=%u pending_window=%d pending_append=%d ticks=%llu proposed=%llu committed=%llu reclaimed=%llu\n",
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_STATE frontier=%u archive=%u native=%u sealed=%u registered=%u eligible=%u pending_window=%d pending_append=%d ticks=%llu proposed=%llu committed=%llu reclaimed=%llu active_pins=%u query_pins=%u replay_pins=%u io_pins=%u\n",
+             sequence.text_kv_valid, count, native, sealed, registered, eligible,
+             int(bool(window.pending_window)), int(bool(window.pending_append)),
+             static_cast<unsigned long long>(metrics.ticks),
+             static_cast<unsigned long long>(metrics.proposed),
+             static_cast<unsigned long long>(metrics.committed),
+-            static_cast<unsigned long long>(metrics.reclaimed));
++            static_cast<unsigned long long>(metrics.reclaimed), active, query, replay, io);
+     }
+     const auto& retired = gc.commit_boundary();
+     std::uint64_t released_bytes = 0;
+@@ -780,12 +791,30 @@
+         gc.acknowledge_host_release(page, std::move(detached_record), release_for_prefill);
+     }
+     if (!retired.empty()) {
++        // A checkpoint requires every page in its captured view. Revoking all
++        // aliases before the next selection preserves exact restore validation
++        // while allowing optional old views to yield capacity to execution.
++        const auto valid_checkpoint = [&](const KvmemCheckpointRecord& record) {
++            if (!record.data) return false;
++            for (const auto id : record.data->resident_pages)
++                if (!memory_page_selectable(window, static_cast<uint32_t>(id))) return false;
++            return true;
++        };
++        size_t invalidated = 0;
++        for (auto& record : window.checkpoints)
++            if (record.data && !valid_checkpoint(record)) {
++                record.data.reset();
++                ++invalidated;
++            }
++        const auto coverage_before = window.coverage.size();
++        window.coverage.erase_invalid(valid_checkpoint);
++        invalidated += coverage_before - window.coverage.size();
+         ++window.stamp.history_revision;
+         if (kvmem_options.verify_transfers)
+-            std::fprintf(stderr, "KVMEM_NATIVE_GC policy=%s frontier=%u retired=%zu host_bytes=%llu\n",
++            std::fprintf(stderr, "KVMEM_NATIVE_GC policy=%s frontier=%u retired=%zu host_bytes=%llu invalidated_checkpoints=%zu\n",
+                 kvmem_options.historical_gc_redundancy ? "redundancy" : "lru",
+                 sequence.text_kv_valid, retired.size(),
+-                static_cast<unsigned long long>(released_bytes));
++                static_cast<unsigned long long>(released_bytes), invalidated);
+     }
+ }
+ 
+@@ -2013,6 +2042,17 @@
+         !window.archive.front()) return;
+     // All slots share one archive through the latest complete checkpoint.
+     // Uncommitted/cancelled rows past that frontier are never retained.
++    if (window.historical_gc) {
++        const auto stats = window.historical_gc->stats();
++        const auto policy = window.historical_gc->policy_metrics();
++        // One terminal observation keeps production timing runs auditable
++        // without per-token transfer tracing or per-victim diagnostic IO.
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_SUMMARY policy=%s frontier=%u proposed=%llu committed=%llu reclaimed=%llu boundary_committed=%llu comparisons=%llu lossy=%llu\n",
++            kvmem_options.historical_gc_redundancy ? "redundancy" : "lru", sequence.text_kv_valid,
++            (unsigned long long)stats.proposed, (unsigned long long)stats.committed,
++            (unsigned long long)stats.reclaimed, (unsigned long long)stats.boundary_committed,
++            (unsigned long long)policy.comparisons, (unsigned long long)policy.lossy_intents);
++    }
+     window.historical_gc.reset();
+     if (window.historical_features) window.historical_features->clear_from(pages);
+     if (window.historical_thinking) window.historical_thinking->truncate(frontier);
