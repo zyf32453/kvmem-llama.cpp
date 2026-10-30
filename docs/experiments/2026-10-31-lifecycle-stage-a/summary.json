@@ -1,0 +1,184 @@
+{
+  "stage": "A",
+  "date": "2026-10-31",
+  "status": "baseline_and_host_contracts_complete",
+  "primary_source": "a50789573e4ba43b137076c15b552d0e3a98e9ca",
+  "secondary_source": "be21a18e6141dbd4a6ff26d214e01903ffb947c3",
+  "manifest_sha256": "c9d6cd292c0db3c67a5e462ca2e83e6822332a5de151c1623856f8ebc7dc9c0a",
+  "pinned_files": 78,
+  "native_patches": 24,
+  "native_tree_replayed_this_run": false,
+  "host_tests": [
+    {
+      "name": "checkpoint_policy_test",
+      "seconds": 0.483587
+    },
+    {
+      "name": "checkpoint_image_test",
+      "seconds": 0.630067
+    },
+    {
+      "name": "historical_gc_ninfer_core_test",
+      "seconds": 0.944325
+    },
+    {
+      "name": "memory_contract_test",
+      "seconds": 1.02907
+    },
+    {
+      "name": "native_kv_payload_test",
+      "seconds": 0.866165
+    },
+    {
+      "name": "host_kv_storage_test",
+      "seconds": 0.636308
+    },
+    {
+      "name": "spill_io_test",
+      "seconds": 0.692244
+    },
+    {
+      "name": "tiered_kv_storage_test",
+      "seconds": 0.779295
+    },
+    {
+      "name": "native_residency_test",
+      "seconds": 0.706643
+    },
+    {
+      "name": "kv_content_test",
+      "seconds": 0.662987
+    },
+    {
+      "name": "prefix_checkpoint_test",
+      "seconds": 0.474489
+    }
+  ],
+  "gate_unit_tests": 9,
+  "cli_rejection_controls": [
+    {
+      "name": "unsupported-profile",
+      "exit_code": 1,
+      "error": "Unsupported profile 'ssd-concurrent'; choose one of ['agent-pressure', 'agent-teacher', 'native-round-mtp4', 'native-token-micro']"
+    },
+    {
+      "name": "wrong-source-pin",
+      "exit_code": 1,
+      "error": "Frozen source differs or is missing: kvmem/include/kvmem/historical_kv_gc.hpp"
+    },
+    {
+      "name": "wrong-model-bytes",
+      "exit_code": 1,
+      "error": "Model bytes differ from frozen baseline"
+    }
+  ],
+  "compatibility_probes": [
+    {
+      "backend": "ninfer",
+      "exit_code": 0,
+      "stdout": "PASS C01-C03 retirement, held reader, generation reuse and exactly-once release\nPASS C04 CPU early release, preserved GPU permission and delayed Ready\n",
+      "library_sha256": "1b4a8669bb72c60f213e55973726445fd55bfb56d4eee2a9a088b58fad745bdf",
+      "binary_sha256": "9563d372cb1409f953dd58246a6c28805370ba5df5abace1e525890e397174c1",
+      "probe_sha256": "26ff6a4073f87127439244683f704872a152cc85e5d332a24308ef5208538855",
+      "build_type": "Debug/-O0",
+      "compile_recipe": [
+        "c++",
+        "-std=c++17",
+        "-O0",
+        "-g",
+        "-pthread",
+        "-I",
+        "C:\\Users\\25468\\.codex\\worktrees\\kv-lifecycle-baseline\\kvmem-llama.cpp\\kvmem\\include",
+        "C:\\Users\\25468\\.codex\\worktrees\\kv-lifecycle-baseline\\kvmem-llama.cpp\\tests\\kv-lifecycle-compatibility-probe.cpp",
+        "C:\\Users\\25468\\.codex\\worktrees\\kv-lifecycle-baseline\\kvmem-llama.cpp\\build-lifecycle-host\\kvmem\\libkvmem.a",
+        "-o",
+        "C:\\Users\\25468\\.codex\\worktrees\\d87d\\kvmem-llama.cpp\\artifacts\\lifecycle-stage-a\\ninfer-compatibility.exe"
+      ]
+    },
+    {
+      "backend": "llamacpp",
+      "exit_code": 0,
+      "stdout": "PASS C01-C03 retirement, held reader, generation reuse and exactly-once release\nPASS C04 CPU early release, preserved GPU permission and delayed Ready\n",
+      "library_sha256": "22c3b7915fe5ff593fec48cc42736992d5bc92df44377ffbbe875ecc9825f58b",
+      "binary_sha256": "de7d322996b8aef8ee0c9e43d2fbbe0220555e7df26d47ae577d94c5adf9cb68",
+      "probe_sha256": "26ff6a4073f87127439244683f704872a152cc85e5d332a24308ef5208538855",
+      "build_type": "Debug/-O0",
+      "compile_recipe": [
+        "c++",
+        "-std=c++17",
+        "-O0",
+        "-g",
+        "-pthread",
+        "-I",
+        "C:\\Users\\25468\\.codex\\worktrees\\d87d\\kvmem-llama.cpp\\kvmem\\include",
+        "C:\\Users\\25468\\.codex\\worktrees\\kv-lifecycle-baseline\\kvmem-llama.cpp\\tests\\kv-lifecycle-compatibility-probe.cpp",
+        "C:\\Users\\25468\\.codex\\worktrees\\d87d\\kvmem-llama.cpp\\artifacts\\lifecycle-stage-a\\llama-host-build\\kvmem\\libkvmem.a",
+        "-o",
+        "C:\\Users\\25468\\.codex\\worktrees\\d87d\\kvmem-llama.cpp\\artifacts\\lifecycle-stage-a\\llama-compatibility.exe"
+      ]
+    }
+  ],
+  "secondary_source_fingerprints": {
+    "kvmem/include/kvmem/attention_pressure.hpp": "b9c0f41f2cc77e995a32c703a7007000314f17d8815b915e6aa72f604cde91d9",
+    "kvmem/include/kvmem/fixed_byte_arena.hpp": "2044caf325c194ae9f091283e43a481dfb131206c584040411d7907da3a532fc",
+    "kvmem/include/kvmem/historical_kv_active_set.hpp": "c4e4f2ad5d231bb9faffc9bcc9de61334eed0b20f1ef84406cc4aa8d6a08cc76",
+    "kvmem/include/kvmem/historical_kv_audit.hpp": "639f833debfa296b9bf8b241957afba109090bc83a3c0eb1e61ecdbde244a251",
+    "kvmem/include/kvmem/historical_kv_capture_session.hpp": "4b62e3c9314c1820328da8e2527d7675cf981feed3788c23d2fec3cdcd308a91",
+    "kvmem/include/kvmem/historical_kv_cleanup.hpp": "38ca1cd6112684821c02d6e2486caf9944a0ff091f915e2b5cafc1d6bdf3202e",
+    "kvmem/include/kvmem/historical_kv_gc.hpp": "a15a7d994477849e5c30f96c9ec0914373d913d20e4a1af04d8b8044589e59f8",
+    "kvmem/include/kvmem/historical_kv_payload_budget.hpp": "1c1c02d6b2faeb93dc36920aab81ef5c6a52b599f4dedc26a7f8b37d082b2767",
+    "kvmem/include/kvmem/historical_kv_policy.hpp": "850e3db2384a6095a00a765c560596118d93c6ed14ed98f5dab99562daa1dd57",
+    "kvmem/include/kvmem/historical_kv_ram_reservation.hpp": "e46393b80ccde4bd3c57d6d1ae0343e2ca5b22415757e6e7efc0e74c760f7d8d",
+    "kvmem/include/kvmem/historical_kv_raw_store.hpp": "d934c3bd52c2e4553e3b92e6ecaf1ad2ee7e41b3e2a94fa4c127601b10f966fa",
+    "kvmem/include/kvmem/historical_kv_redundancy.hpp": "2c75fd71806bb88a4a874609b3d662877397740ad99feac2523b8553bcc8525e",
+    "kvmem/include/kvmem/historical_kv_repository.hpp": "2b2a2410098f489ec73601a866599d06d93d8f8228618777259e2bf563b49ac0",
+    "kvmem/include/kvmem/historical_kv_shadow_directory.hpp": "500fad953ec417e83b464658f671652cb9e28d8e1490f34695c3fa29a851d2e4",
+    "kvmem/include/kvmem/kvmem_backend.hpp": "226a34e8b74b14d427699a0005dfcccee6e241a18e899d7fac5dfc65f3821649",
+    "kvmem/include/kvmem/kvmem_gc.hpp": "b0cb92b41b6925345e21f5d8b18f5303f4f56790aeb3f996a0241ed2891494af",
+    "kvmem/include/kvmem/kvmem_runtime.hpp": "292c90046cd6ad8eca3d2fa924638aa78ae2af85b7b917ae9cb20f589ad8f8d0",
+    "kvmem/include/kvmem/kvmem_store.hpp": "fc6c3a39661b0d617e626304654e971824774fb18cef3b781b932eaeb867f23b",
+    "kvmem/include/kvmem/nvme_kv_allocation.hpp": "f2156cd256cbbdc2f9ec622667135d56094fdc6f57915512079eb863378f9205",
+    "kvmem/include/kvmem/nvme_kv_tier.hpp": "9852faa823e48ae630c6f3c42426cfc4e9c13352e09f0878f0c037bbc6e051fd",
+    "kvmem/include/kvmem/nvme_kv_tier_win.hpp": "5f89fb851ad23d827bd9a3b513938e86412f458f5df2f92726186a0b356d6635",
+    "kvmem/include/kvmem/pinned_kv_tier.hpp": "d693cdddaa7bf3672a16b34ef621e65a84fe0326392426723e13ecddb34a9eac",
+    "kvmem/include/kvmem/raw_kv_store.hpp": "e772fb213546ca82248c90b978cb34d95c019435a302a91924ba8dd10799dbbb",
+    "kvmem/include/kvmem/reserved_node_set.hpp": "330be01b931a7f99006505e65dd3a22c74576b30967dcd8c4645034308452457",
+    "kvmem/include/kvmem/resource_allocation.hpp": "f77f42797344189ea191f9a536e540288d6d8f5effc027c9f4381dd0a9021345",
+    "kvmem/include/kvmem/rope.hpp": "53f6e8d082c0770d273eaccf528b03ba29ff0918af50e4b3dfd8a5055405d12c",
+    "kvmem/include/kvmem/session_memory.hpp": "f29199e0ddb24a7a5b56f922725e2f6b35ced24398abe788beb6931e5c42a2d0",
+    "kvmem/include/kvmem/snapshot.hpp": "91713cab014a87fd469c3a8d9483169ec914a1cbd1bda9d25539abdd1c5599c0",
+    "kvmem/include/kvmem/snapshot_buffer.hpp": "5a40b2072a8be3a4c8d8cbafc0fe24d71eb7f5cab0dd645c66e44f96c29100c1",
+    "kvmem/include/kvmem/thinking_span_tracker.hpp": "5fa5a4652edc987732ec01effb8365bb186b89c0c0eef8ca5548e8de919a9fe1",
+    "kvmem/src/host/attention_pressure.cpp": "792c2f9a126c0c27f706035bb9af4cc3977516b87afe64f79f2942d82f658c19",
+    "kvmem/src/host/historical_kv_active_set.cpp": "2a67d3630899f08fb7e3454804d68550b26bd2b3c6730d607cbc957e613ccb2d",
+    "kvmem/src/host/historical_kv_capture_session.cpp": "0cd7d56ce3a7f2c2be2587f8c0f8214cbe7c548ee190d8e82f661f8b23e1aae6",
+    "kvmem/src/host/historical_kv_cleanup.cpp": "be9e6a54a5927a2df5e9c912b9cc84812c33929e23a508b7dae30f72dc35d727",
+    "kvmem/src/host/historical_kv_gc.cpp": "302d29f48bdf59d5d8fcd9421b47ecba1ba4ee62840691bcfe2b3d59ab4c5c70",
+    "kvmem/src/host/historical_kv_policy_lru.cpp": "2ac6854d2962846c43782621db7243a4e79b89be4d7c9ca4f41a3fbfdff0b915",
+    "kvmem/src/host/historical_kv_ram_reservation.cpp": "60c2bf485cad0ae0da2cfca5dc75c20048e2b8822d46ec88690649435f314ef6",
+    "kvmem/src/host/historical_kv_raw_store.cpp": "24bfe319cd6da4df9063e9b847bdc6f34812f9bd1726c0eb1947def2a6f8a7a5",
+    "kvmem/src/host/historical_kv_redundancy.cpp": "56eb55521ebb5cf267848d7532aaee8a3c6d37a79c46524f45be73b79299b072",
+    "kvmem/src/host/historical_kv_repository.cpp": "72130390ded4e1f9d79ced2c10c21856d4d8ed1c415dc167dfc74fbfd91bbbc4",
+    "kvmem/src/host/historical_kv_shadow_directory.cpp": "17023d89ddc48657ced978f6602aea4c00895593075f1066661f220e129834de",
+    "kvmem/src/host/kvmem_gc.cpp": "5694cce35c9ed0bcffbe7154920e14c714e844691755f070a021614d454f06ae",
+    "kvmem/src/host/kvmem_runtime.cpp": "e4bf93b43e46611ab2818ad2e8f575f4c18a6a4fcf9743729f7e2332eac6369d",
+    "kvmem/src/host/kvmem_store.cpp": "c0a35859cf25904dac64aceb6915bbf4526afd95cf6bc18bb60d16c8ce980760",
+    "kvmem/src/host/raw_kv_store.cpp": "9af3921d6edfd14fdd2ec656c035e75b9e56d527c34f00d6d77678f16435563b",
+    "kvmem/src/host/rope.cpp": "668afdd921c3c3dee770cc1e1840a028171e590975f1f991e0be9b0b663bfa16",
+    "kvmem/src/host/session_memory.cpp": "637be310d20103f13b8e8db82480c6528817cf0f629efa2e5cfd6eadfc6f9912"
+  },
+  "model": {
+    "name": "Qwen3.8-27B-GSQ-RCO-IQ3_S NInfer v3",
+    "bytes": 15017456896,
+    "sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+    "remote_path": "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+    "hash_observation": {
+      "date": "2026-10-31",
+      "host": "yifan@100.118.87.22",
+      "file_unchanged_during_hash": true
+    }
+  },
+  "new_gpu_or_agent_runs": false,
+  "production_qualified": false,
+  "next_stage": "B: bounded boundary mailbox without worker mutex or arbitrary policy callbacks"
+}
