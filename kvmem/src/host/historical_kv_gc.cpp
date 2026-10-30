@@ -1,5 +1,6 @@
 #include "kvmem/historical_kv_gc.hpp"
 #include "kvmem/historical_kv_audit.hpp"
+#include "kvmem/memory_contract.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -112,11 +113,31 @@ HistoricalKvGc::~HistoricalKvGc() {
 
 void HistoricalKvGc::start() {
     std::lock_guard<std::mutex> guard(tick_mu_);
+    ensure_healthy();
     if (worker_.joinable()) throw std::logic_error("historical KV GC already started");
     stopping_.store(false, std::memory_order_release);
     worker_finished_.store(false, std::memory_order_release);
     try { worker_ = std::thread([this] { run(); }); }
-    catch (...) { worker_finished_.store(true, std::memory_order_release); throw; }
+    catch (...) {
+        ++worker_failures_;
+        stopping_.store(true, std::memory_order_release);
+        worker_finished_.store(true, std::memory_order_release);
+        throw;
+    }
+}
+
+HistoricalKvGc::Health HistoricalKvGc::health() const noexcept {
+    if (worker_failures_.load(std::memory_order_acquire)) return Health::WorkerFailed;
+    if (policy_failures_.load(std::memory_order_acquire)) return Health::PolicyFailed;
+    return stopping_.load(std::memory_order_acquire) ? Health::Stopped : Health::Healthy;
+}
+
+void HistoricalKvGc::ensure_healthy() const {
+    const auto status = health();
+    if (status != Health::Healthy)
+        throw MemoryError(MemoryErrorCode::ServiceUnavailable,
+            status == Health::WorkerFailed ? "historical GC worker is unavailable" :
+            status == Health::PolicyFailed ? "historical GC policy is disabled" : "historical GC is stopped");
 }
 
 void HistoricalKvGc::stop() noexcept {
@@ -198,6 +219,7 @@ HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & i
 void HistoricalKvGc::request_capacity(uint32_t ready) {
     if (ready > repository_->capacity())
         throw std::invalid_argument("historical GC capacity request exceeds repository");
+    if (ready) ensure_healthy();
     requested_ready_.store(ready, std::memory_order_release);
 }
 
@@ -267,7 +289,7 @@ void HistoricalKvGc::audit_reclaim(const HistoricalKvBlockMeta & block,
 
 HistoricalKvGc::BoundaryResult HistoricalKvGc::commit_at_decode_boundary() noexcept {
     BoundaryResult result;
-    if (!config_.retire_at_decode_boundary || config_.mode != Mode::Delete) return result;
+    if (!config_.retire_at_decode_boundary || config_.mode != Mode::Delete || health() != Health::Healthy) return result;
     auto prepared = PendingState::Prepared;
     // One attempt: skip an unpublished, in-use, or unacknowledged batch. The
     // acquire pairs with the worker's Prepared publication; no spinning or
@@ -343,7 +365,7 @@ void HistoricalKvGc::manual_tick() {
     }
     reclaim_cursor_ = reclaim_scan == capacity - reclaim_cursor_ ? 0 :
                       reclaim_cursor_ + reclaim_scan;
-    if (config_.mode == Mode::Off) return;
+    if (config_.mode == Mode::Off || health() != Health::Healthy) return;
     if (config_.retire_at_decode_boundary) {
         if (pending_state_.load(std::memory_order_acquire) != PendingState::Idle) return;
     }

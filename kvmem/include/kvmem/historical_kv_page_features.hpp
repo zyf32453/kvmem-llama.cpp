@@ -39,9 +39,11 @@ public:
     // A sealed page is published once. Rewriting an ID requires truncate_to()
     // after the old GC owner has stopped and every speculative suffix is gone.
     void publish_page(uint32_t page, const std::vector<float> & descriptor);
+    void publish_page_values(uint32_t page, const float * descriptor, size_t count);
     // Partial accepted Query updates keep the same question epoch so a long
     // prefill cannot repeatedly abort an in-progress GC scoring round.
     void publish_question_scores(const std::vector<double> & scores, bool new_question = true);
+    void publish_question_values(const double * scores, size_t count, bool new_question = true);
     void publish_output_attention(uint32_t page, double mass);
     void clear_question();
     // Only complete pages before this token frontier remain immutable.

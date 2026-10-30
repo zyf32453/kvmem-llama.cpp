@@ -32,21 +32,30 @@ bool HistoricalKvPageFeatures::has_page(uint32_t page) const {
 }
 
 void HistoricalKvPageFeatures::publish_page(uint32_t page, const std::vector<float> & descriptor) {
-    if (page >= pages_.size() || descriptor.size() != dimensions_)
+    publish_page_values(page, descriptor.data(), descriptor.size());
+}
+
+void HistoricalKvPageFeatures::publish_page_values(uint32_t page, const float * descriptor, size_t count) {
+    if (!descriptor || page >= pages_.size() || count != dimensions_)
         throw std::invalid_argument("historical page descriptor dimensions");
-    for (float value : descriptor)
-        if (!std::isfinite(value)) throw std::invalid_argument("nonfinite historical page descriptor");
+    for (size_t i = 0; i < count; ++i)
+        if (!std::isfinite(descriptor[i])) throw std::invalid_argument("nonfinite historical page descriptor");
     std::lock_guard<std::mutex> lock(mu_);
     if (!pages_[page].empty()) throw std::logic_error("historical page descriptor republished");
-    pages_[page].assign(descriptor.begin(), descriptor.end());
+    pages_[page].assign(descriptor, descriptor + count);
 }
 
 void HistoricalKvPageFeatures::publish_question_scores(const std::vector<double> & scores, bool new_question) {
-    if (scores.size() > pages_.size()) throw std::invalid_argument("historical Query score geometry");
-    for (double value : scores)
-        if (!std::isfinite(value)) throw std::invalid_argument("nonfinite historical Query score");
+    publish_question_values(scores.data(), scores.size(), new_question);
+}
+
+void HistoricalKvPageFeatures::publish_question_values(const double * scores, size_t count, bool new_question) {
+    if (count > pages_.size() || (count && !scores)) throw std::invalid_argument("historical Query score geometry");
+    for (size_t i = 0; i < count; ++i)
+        if (!std::isfinite(scores[i])) throw std::invalid_argument("nonfinite historical Query score");
     std::lock_guard<std::mutex> lock(mu_);
-    question_scores_.assign(scores.begin(), scores.end());
+    if (count) question_scores_.assign(scores, scores + count);
+    else question_scores_.clear();
     if (new_question) {
         std::fill(output_peaks_.begin(), output_peaks_.end(), -std::numeric_limits<double>::infinity());
         advance_question_epoch();

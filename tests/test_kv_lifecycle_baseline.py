@@ -62,6 +62,16 @@ class BaselineGateTests(unittest.TestCase):
         with self.assertRaises(gate.BaselineError):
             gate.validate_profile(value, value["profiles"][0]["id"])
 
+    def test_required_auxiliary_budget_is_explicit_positive_and_bounded(self):
+        for auxiliary in (None, 0, -1, True, 1.5, 1 << 44):
+            value = copy.deepcopy(self.manifest)
+            value["auxiliary_budget_required"] = True
+            if auxiliary is not None: value["profiles"][0]["gc_aux_mib"] = auxiliary
+            with self.subTest(auxiliary=auxiliary), self.assertRaises(gate.BaselineError):
+                gate.validate_profile(value, value["profiles"][0]["id"])
+        value["profiles"][0]["gc_aux_mib"] = 1024
+        gate.validate_profile(value, value["profiles"][0]["id"])
+
     def test_junit_must_execute_exactly_required_tests(self):
         path = self.root / "ctest.xml"
         for body in ("", '<testcase name="other"/>',

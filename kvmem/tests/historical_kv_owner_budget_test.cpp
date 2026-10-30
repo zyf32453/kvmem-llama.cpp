@@ -294,6 +294,23 @@ static void reservation_and_failed_owner_claim() {
     check(budget->stats().charged == 0, "repository owner leak");
 }
 
+static void worker_start_failure_is_sticky() {
+    auto repository = std::make_shared<Repo>(4);
+    HistoricalKvGc::Config cfg;
+    cfg.mode = HistoricalKvGc::Mode::Delete; cfg.batch_blocks = 1; cfg.retire_at_decode_boundary = true;
+    HistoricalKvGc gc(repository, std::make_unique<HistoricalKvLruPolicy>(4), cfg);
+    bool failed = false;
+    try { RejectNew guard; gc.start(); } catch (const std::bad_alloc &) { failed = true; }
+    if (!failed) gc.stop();
+    check(failed && gc.worker_finished() && gc.health() == HistoricalKvGc::Health::WorkerFailed &&
+          gc.stats().worker_failures == 1, "thread startup failure not published");
+    try { gc.ensure_healthy(); throw std::runtime_error("failed worker healthy"); }
+    catch (const MemoryError & error) { check(error.code() == MemoryErrorCode::ServiceUnavailable, "failed worker error code"); }
+    try { gc.start(); throw std::runtime_error("failed worker restarted silently"); }
+    catch (const MemoryError &) {}
+    check(gc.stats().worker_failures == 1, "restart hid or duplicated worker failure");
+}
+
 int main() {
     const char * original = std::getenv("KVMEM_GC_AUDIT");
     const bool had_original = original != nullptr;
@@ -306,6 +323,7 @@ int main() {
         old_repository_lease_holds_real_account();
         reservation_and_failed_owner_claim();
         retry_batches_do_not_grow();
+        worker_start_failure_is_sticky();
         std::cout << "PASS owner budget: native fixed allocation path, full constructor faults, old domains, reservation atomicity, owner-claim rollback and account identity\n";
     } catch (const std::exception & error) { std::cerr << "FAIL owner budget: " << error.what() << '\n'; code = 1; }
 #if defined(_WIN32)

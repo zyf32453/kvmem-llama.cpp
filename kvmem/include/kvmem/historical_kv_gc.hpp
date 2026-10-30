@@ -21,6 +21,7 @@ namespace kvmem {
 class HistoricalKvGc {
 public:
     enum class Mode { Off, Shadow, Delete };
+    enum class Health { Healthy, PolicyFailed, WorkerFailed, Stopped };
     struct Config {
         Mode mode = Mode::Off;
         // 0/0 is valid for a strategy that does not use capacity pressure.
@@ -85,6 +86,8 @@ public:
     void request_stop() noexcept { stopping_.store(true, std::memory_order_release); }
     bool worker_finished() const noexcept { return worker_finished_.load(std::memory_order_acquire); }
     void stop() noexcept;
+    Health health() const noexcept;
+    void ensure_healthy() const;
     void manual_tick();
     // Called after the public decode's host work returns, or immediately
     // before a new active selection. The GPU may still be in flight; existing

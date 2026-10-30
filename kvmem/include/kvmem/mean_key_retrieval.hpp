@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <vector>
+#include "kvmem/historical_kv_auxiliary.hpp"
 
 namespace kvmem {
 class RawKvStore;
@@ -28,4 +29,6 @@ struct MeanKeyQueryView {
 // This is selection math only: it mutates no payload, frontier or residency.
 std::vector<double> mean_key_retrieval_scores(const RawKvStore& keys, uint32_t blocks,
                                                MeanKeyQueryView query);
+HistoricalKvAuxVector<double> mean_key_retrieval_scores(const RawKvStore& keys, uint32_t blocks,
+    MeanKeyQueryView query, std::shared_ptr<HistoricalKvAuxBudget> auxiliary);
 } // namespace kvmem

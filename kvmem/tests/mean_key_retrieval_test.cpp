@@ -1,6 +1,7 @@
 #include "kvmem/mean_key_retrieval.hpp"
 #include "kvmem/raw_kv_store.hpp"
 #include "kvmem/kvmem_store.hpp"
+#include "kvmem/memory_contract.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -39,6 +40,25 @@ int main() {
                 {queries.data(), counts.data(), layers, dim, q_heads, kv_heads});
             const auto max_actual = kvmem::mean_key_retrieval_scores(keys, 6,
                 {queries.data(), counts.data(), layers, dim, q_heads, kv_heads, kvmem::GqaScoreAggregation::Max});
+            auto auxiliary = std::make_shared<kvmem::HistoricalKvAuxBudget>(1 << 20);
+            {
+                const auto budgeted = kvmem::mean_key_retrieval_scores(keys, 6,
+                    {queries.data(), counts.data(), layers, dim, q_heads, kv_heads}, auxiliary);
+                const auto budgeted_max = kvmem::mean_key_retrieval_scores(keys, 6,
+                    {queries.data(), counts.data(), layers, dim, q_heads, kv_heads, kvmem::GqaScoreAggregation::Max}, auxiliary);
+                require(std::equal(actual.begin(), actual.end(), budgeted.begin()) &&
+                        std::equal(max_actual.begin(), max_actual.end(), budgeted_max.begin()), "budgeted selection changed numerical values");
+                require(auxiliary->stats().charged == 12 * sizeof(double), "score scratch remained charged after return");
+            }
+            require(auxiliary->stats().charged == 0, "score output lifetime leaked");
+            try {
+                auto small = std::make_shared<kvmem::HistoricalKvAuxBudget>(1);
+                (void)kvmem::mean_key_retrieval_scores(keys, 6,
+                    {queries.data(), counts.data(), layers, dim, q_heads, kv_heads}, small);
+                throw std::runtime_error("score scratch exceeded auxiliary cap");
+            } catch (const kvmem::MemoryError & error) {
+                require(error.code() == kvmem::MemoryErrorCode::BudgetExceeded, "score cap error code");
+            }
             for (uint32_t b = 0; b < 5; ++b) {
                 double expected = 0;
                 for (uint32_t l : {0U, 2U}) {

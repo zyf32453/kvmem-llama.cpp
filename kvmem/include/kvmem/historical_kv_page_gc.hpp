@@ -61,6 +61,8 @@ public:
     void request_capacity(uint32_t ready);
     void start();
     void manual_tick();
+    HistoricalKvGc::Health health() const noexcept { return manager_->health(); }
+    void ensure_healthy() const { manager_->ensure_healthy(); }
     // Returned pages are stable until the next commit_boundary() call. The
     // caller must mark each page unavailable before another working-set choice.
     const HistoricalKvAuxVector<RetiredPage> & commit_boundary() noexcept;

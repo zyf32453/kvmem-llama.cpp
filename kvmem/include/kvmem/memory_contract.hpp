@@ -13,7 +13,7 @@ class KvMemStore;
 
 enum class MemoryErrorCode {
     InvalidPlan, Unsupported, BudgetExceeded, Stale, Pending,
-    TransferFailed, Disconnected, InvalidSession
+    TransferFailed, Disconnected, InvalidSession, ServiceUnavailable
 };
 class MemoryError : public std::runtime_error {
 public:

@@ -69,6 +69,10 @@ def validate_profile(manifest, name):
         raise BaselineError("Only ordinary decode and MTP4 are in scope")
     if profile.get("policy_modes") != ["off", "lru", "redundancy"]:
         raise BaselineError("Native NInfer exposes off/LRU/redundancy, not shadow")
+    if manifest.get("auxiliary_budget_required") or "gc_aux_mib" in profile:
+        auxiliary = profile.get("gc_aux_mib")
+        if type(auxiliary) is not int or not 0 < auxiliary <= ((1 << 64) - 1) >> 20:
+            raise BaselineError(f"Profile {name}: gc_aux_mib must be positive and fit uint64 bytes")
     for key in ("active_tokens", "reserve_tokens", "host_mib", "context_tokens", "output_tokens"):
         if not isinstance(profile.get(key), int) or profile[key] <= 0:
             raise BaselineError(f"Profile {name}: {key} must be positive")
