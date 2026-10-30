@@ -9,7 +9,52 @@ This branch gives the pinned NInfer backend opt-in `--kvmem-gc-lru` and `--kvmem
 - Redundancy mode requires `--kvmem-query-scorer meanq-cosine`. NInfer's normal prefill accumulates accepted Mean-Q for the whole input Query. The foreground publishes updated page scores at most every 1,024 accepted tokens and at Query completion. This also covers long requests for which native working-set retrieval skips Query replay. The GC worker refreshes importance before ranking without repeating Query dot products. Sampled generated-output attention can raise a page's importance; successfully accepted thinking tokens mark the thinking-priority tier.
 - Redundancy comparisons use at most 56 pages per round, with age-stratified older candidates and a recent segment. The policy distinguishes direct descriptor witnesses above cosine 0.9 from capacity fallback victims; a feature-space witness is not proof of interchangeable KV outputs or text semantics. An audit log records reason, importance, similarity and retained witness for each proposal. This is a bounded approximation, not an all-history pairwise proof.
 - Native Host admission uses physical capacity. Low/high free-page watermarks include headroom for the next prefill burst. The prefill lookahead now skips an allocation when there is insufficient physical room; the next prefill boundary waits up to two seconds for a prepared GC batch and can release detached Host owners immediately. Reader leases retain their charge until readers finish. Decode boundaries continue to defer physical destruction to the worker. The adapter currently allows one active request because independent sequence directories do not coordinate one shared Host budget. Rollback truncates discarded descriptors and thinking ranges; when no proven thinking span remains it disarms thinking-only selection.
-- The backend is pinned to `63428ac249da` plus 24 ordered patches. `backends/versions.json` records the SHA-256 of the redundancy, thinking-fallback, prefill-admission and protection-lifecycle patches and the exact prepared source tree.
+- The backend is pinned to `63428ac249da` plus 25 ordered patches. `backends/versions.json` records the SHA-256 of the redundancy, thinking-fallback, prefill-admission and protection-lifecycle patches and the exact prepared source tree.
+
+## Watermark correction and matched Agent rerun, 2026-10-30
+
+Patch 25 corrects automatic free-page watermarks only. The previous bridge used
+`max(prefill_chunk, generation_reserve)` as one Host allocation burst and multiplied
+it by five/six. In the 8K-active / 64K-Host / 16K-reserve profile this produced
+low/high = 1,021/1,022 free pages out of 1,024. Reaching high would leave just two
+occupied pages, while the protected sink alone needs 16. Cold pages were therefore
+reclaimed aggressively even when most physical Host RAM was free. This is a
+configuration derivation defect, not evidence that those pages were redundant.
+
+The bridge now uses the actual append/lookahead chunk
+`ceil(min(prefill_chunk, generation_reserve) / 64)`, retains five/six-chunk headroom
+with the existing capacity-fraction floors, and caps high at total pages minus the
+protected native device window. A page covers an unaligned append and another
+separates the watermarks. A Host layout too small for that protected view plus an
+append fails explicitly. Transient Query/IO pins and reader leases can still delay
+reclamation; the physical-capacity admission and protection checks remain in force.
+For the unchanged diagnostic profile the effective free low/high are **42/64 pages
+(2,688/4,096 token positions)**. This is not a change to active budget, output reserve,
+Host capacity, candidate count, redundancy threshold or scoring.
+
+The prepared native tree is `da9b40270159e0ee792d7d738aff47545f8336a9`; worker
+SHA-256 is `184604df5e4895f4880b22b4d205704c9d92f6e01542a8cb08cd24a55c37c64d`.
+The exact 25-patch check and Windows 25/25 Host tests pass. The Linux CUDA service
+rebuild and native core test also pass. The new physical-pressure regression keeps
+384 protected pages, initially has enough free RAM to avoid GC, adds unregistered
+append buffers to cross low, releases exactly enough cold pages to reach high, and
+checks that further ticks do not delete more pages. Tight-capacity and arithmetic
+boundary cases are covered. An initial test expectation overlooked the existing
+1/16 capacity floor; it was corrected before qualification, with no algorithm change.
+The export check also caught a patch generated against an untracked-file working
+directory; regenerating it between exact prepared trees made the full chain pass.
+Neither preparation error entered the GPU experiments.
+
+The unchanged `scripts/ninfer_gc_harbor.py` pressure profile reruns
+`cobol-modernization` once per mode, in off/LRU/redundancy order, in
+`qualification-watermarks-pressure-agent-20261030`. Every mode starts a fresh model
+and Host KV. The previous 24-patch trials and binary are preserved. All model,
+server, Agent, task/verifier, sampling and timeout settings are reused; literal
+terminal hostnames and later stochastic trajectories still differ between attempts.
+Results are pending. A missing reward will be reported separately from reward 0;
+no deletion means the fallback percentage is undefined, rather than a measured 0%.
+
+The following 24/23/21-patch observations are retained as versioned earlier evidence.
 
 ## Current acceptance scope, 2026-10-30
 

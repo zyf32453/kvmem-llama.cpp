@@ -85,6 +85,21 @@ private:
     uint64_t round_ = 0, incarnation_ = 0;
 };
 
+HistoricalKvPageGc::Watermarks HistoricalKvPageGc::derive_watermarks(
+        uint32_t slots, uint32_t protected_pages, uint32_t append_pages) {
+    // One extra page covers an unaligned chunk; a second separates low/high.
+    // Five/six chunks give the asynchronous worker time to score and release.
+    // Use wide arithmetic before capping: reserve_tokens is NOT a Host burst.
+    const uint64_t minimum_high = uint64_t(append_pages) + 2;
+    if (slots < 4 || !append_pages || protected_pages >= slots ||
+        minimum_high > uint64_t(slots) - protected_pages)
+        throw std::invalid_argument("NInfer Host GC needs room for its protected view and an append chunk");
+    const uint64_t ceiling = uint64_t(slots) - protected_pages;
+    const auto high = std::min(ceiling, std::max<uint64_t>(slots / 16, 6ULL * append_pages + 2));
+    const auto low = std::min(high - 1, std::max<uint64_t>(slots / 32, 5ULL * append_pages + 2));
+    return {static_cast<uint32_t>(low), static_cast<uint32_t>(high)};
+}
+
 HistoricalKvPageGc::HistoricalKvPageGc(Config config)
     : HistoricalKvPageGc(config, std::make_unique<HistoricalKvLruPolicy>(config.slots)) {}
 

@@ -34,6 +34,16 @@ public:
         std::optional<HostKvStorage> physical_storage;
         uint64_t physical_page_bytes = 0;
     };
+    struct Watermarks {
+        uint32_t low_ready = 0;
+        uint32_t high_ready = 0;
+    };
+    // Size free-page headroom from an actual append chunk, not a whole output
+    // reservation. protected_pages bounds the native active view (sink/recent
+    // included); temporary Query pins/readers still obey normal admission.
+    static Watermarks derive_watermarks(uint32_t slots, uint32_t protected_pages,
+                                       uint32_t append_pages);
+
     struct RetiredPage {
         uint32_t page = 0;
         HistoricalKvHandle handle{};

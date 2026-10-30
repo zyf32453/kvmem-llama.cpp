@@ -33,6 +33,66 @@ public:
 
 } // namespace
 
+static void attainable_watermark_hysteresis() {
+    using Gc = kvmem::HistoricalKvPageGc;
+    // 64K Host, 8K selected + 16K reserve, 512-token append, 64 tokens/page.
+    // Sink alone needs 16 pages: the former high=1022 was unreachable.
+    const auto marks = Gc::derive_watermarks(1024, 384, 8);
+    require(marks.low_ready == 42 && marks.high_ready == 64);
+    require(marks.high_ready + 384 <= 1024);
+    const auto large = Gc::derive_watermarks(4096, 1792, 8);
+    require(large.low_ready == 128 && large.high_ready == 256);
+    const auto tight = Gc::derive_watermarks(64, 50, 8);
+    require(tight.low_ready < tight.high_ready && tight.high_ready + 50 <= 64);
+    // Reject a layout that cannot retain its view plus an aligned append.
+    bool rejected = false;
+    try { (void)Gc::derive_watermarks(64, 55, 8); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected);
+    rejected = false;
+    try { (void)Gc::derive_watermarks(UINT32_MAX, 0, UINT32_MAX); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected);
+
+    // Physical allocation, not just sealed repository slots, drives pressure.
+    kvmem::HostKvStorage storage(1024 * 64);
+    Gc::Config config;
+    config.slots = config.logical_pages = 1024;
+    config.sink_tokens = 1024;
+    config.recent_tokens = 64;
+    config.low_ready = marks.low_ready;
+    config.high_ready = marks.high_ready;
+    config.physical_storage = storage;
+    config.physical_page_bytes = 64;
+    Gc bridge(config);
+    std::vector<kvmem::HostKvRecord> records(981);
+    for (uint32_t id = 0; id < records.size(); ++id) {
+        records[id] = storage.allocate(64);
+        records[id].seal();
+        require(bridge.register_page(id, 64, id + 1));
+        bridge.protect_page(id, id < 384);
+    }
+    for (int i = 0; i < 40; ++i) bridge.manual_tick();
+    require(bridge.stats().proposed == 0); // 43 free >= low: no cleanup.
+    auto append = storage.allocate(5 * 64); // Unsealed lookahead leaves 38 free.
+    for (int i = 0; i < 400; ++i) {
+        bridge.manual_tick();
+        for (const auto& page : bridge.commit_boundary()) {
+            require(page.page >= 384);
+            bridge.acknowledge_host_release(page, std::move(records[page.page]), true);
+        }
+        if (bridge.stats().reclaimed == 26) break;
+    }
+    require(bridge.stats().committed == 26 && bridge.stats().reclaimed == 26);
+    require((storage.capacity_bytes() - storage.charged_bytes()) / 64 == 64);
+    for (int i = 0; i < 100; ++i) {
+        bridge.manual_tick();
+        require(bridge.commit_boundary().empty());
+    }
+    require(bridge.stats().proposed == 26); // High reached: no more deletions.
+    for (uint32_t id = 0; id < 384; ++id) require(bridge.is_live(id));
+}
+
 static void native_page_feature_snapshot() {
     kvmem::HistoricalKvPageFeatures features(3, 3);
     features.publish_page(0, {0.0f, 1.0f, 0.0f});
@@ -342,6 +402,7 @@ static void native_unsealed_pages_drive_pressure() {
 }
 
 int main() {
+    attainable_watermark_hysteresis();
     native_unsealed_pages_drive_pressure();
     native_page_feature_snapshot();
     truncated_thinking_reopens_candidates();

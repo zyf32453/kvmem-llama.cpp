@@ -1,0 +1,37 @@
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 1f12da2..dc3bce0 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -657,11 +657,15 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         const auto slots = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+             logical_pages, memory_retained_budget / stride));
+         if (slots < 4) throw std::logic_error("NInfer historical GC needs at least four Host pages");
+-        // The Host allocator reserves the next prefill chunk before GC can commit.
+-        // Start the worker with five chunks of headroom and refill to six.
+-        const auto burst_pages = kv_pages_for_tokens(std::max(prefill_chunk, kvmem_options.reserve_tokens));
+-        const auto high = std::min<uint32_t>(slots - 2, std::max<uint32_t>(slots / 16, 6 * burst_pages + 2));
+-        const auto low = std::min<uint32_t>(high - 1, std::max<uint32_t>(slots / 32, 5 * burst_pages + 2));
++        // Host append lookahead prepares one prefill chunk, not the entire
++        // generation reserve. Keep hysteresis attainable after the active view
++        // (including sink/recent) is retained; transient Query/IO pins still
++        // rely on the existing physical-capacity admission checks.
++        const auto burst_pages = kv_pages_for_tokens(std::min(prefill_chunk, kvmem_options.reserve_tokens));
++        const auto protected_pages = kv_pages_for_tokens(kvmem_window_tokens);
++        const auto watermarks = kvmem::HistoricalKvPageGc::derive_watermarks(
++            slots, protected_pages, burst_pages);
++        const auto low = watermarks.low_ready, high = watermarks.high_ready;
+         kvmem::HistoricalKvPageGc::Config config;
+         config.slots = slots;
+         config.logical_pages = logical_pages;
+@@ -672,8 +676,9 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         config.high_ready = high;
+         config.physical_storage = memory_payload_storage;
+         config.physical_page_bytes = stride;
+-        std::fprintf(stderr, "KVMEM_NATIVE_GC_CONFIG capacity=%u slots=%u logical_pages=%u page_bytes=%llu low=%u high=%u poll_ms=%u\n",
+-            capacity, slots, logical_pages, (unsigned long long)stride, low, high, config.poll_ms);
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_CONFIG capacity=%u slots=%u logical_pages=%u page_bytes=%llu low=%u high=%u poll_ms=%u append_pages=%u protected_pages=%u\n",
++            capacity, slots, logical_pages, (unsigned long long)stride, low, high, config.poll_ms,
++            burst_pages, protected_pages);
+         if (kvmem_options.historical_gc_redundancy) {
+             const auto& model = parameters.model.config().text;
+             const auto dimensions = std::size_t(model.full_attention_layers) *
