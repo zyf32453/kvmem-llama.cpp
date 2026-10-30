@@ -124,6 +124,7 @@ HistoricalKvRedundancyPolicy::HistoricalKvRedundancyPolicy(size_t capacity,
         throw std::invalid_argument("invalid historical redundancy configuration");
     rows_.reserve(capacity_); references_.reserve(capacity_); ranked_.reserve(capacity_);
     candidate_indices_.reserve(capacity_); candidate_scratch_.reserve(capacity_);
+    unclassified_indices_.reserve(capacity_);
     protected_indices_.reserve(capacity_);
     neighbors_.reserve(capacity_);
     seen_.assign(capacity_, {});
@@ -131,9 +132,11 @@ HistoricalKvRedundancyPolicy::HistoricalKvRedundancyPolicy(size_t capacity,
 }
 
 bool HistoricalKvRedundancyPolicy::permits(const HistoricalKvBlockMeta & meta) const noexcept {
+    const unsigned tier = thinking_mode_ ?
+        config_.thinking->priority(meta.original_begin, meta.valid_tokens) : content_tier_;
     return meta.life == HistoricalKvLife::Live && meta.sealed && !meta.mandatory &&
         source_->question_epoch() == question_epoch_ &&
-        (!thinking_mode_ || config_.thinking->priority(meta.original_begin, meta.valid_tokens) == content_tier_);
+        (!thinking_mode_ || tier == content_tier_ || (fallback_commit_enabled_ && tier == 2));
 }
 
 bool HistoricalKvRedundancyPolicy::carries_retired_substitute(
@@ -372,6 +375,41 @@ void HistoricalKvRedundancyPolicy::remember_scored() {
     }
 }
 
+size_t HistoricalKvRedundancyPolicy::emit_unclassified_lru(std::vector<size_t> & indices,
+    size_t take, const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out) {
+    if (!take || !out.remaining()) return 0;
+    // The thinking spans may have advanced while features were being scored.
+    // Only the current unclassified tier is allowed into the fallback.
+    indices.erase(std::remove_if(indices.begin(), indices.end(), [&](size_t index) {
+        const auto & meta = snapshot.blocks[index];
+        return meta.mandatory || !historical_kv_can_request_delete(meta, snapshot.incarnation) ||
+            (thinking_mode_ && config_.thinking->priority(meta.original_begin, meta.valid_tokens) != 2);
+    }), indices.end());
+    take = std::min({take, out.remaining(), indices.size()});
+    const auto colder = [&](size_t a, size_t b) {
+        const auto & x = snapshot.blocks[a];
+        const auto & y = snapshot.blocks[b];
+        return std::make_tuple(x.last_use_seq, x.birth_seq, age(x)) <
+               std::make_tuple(y.last_use_seq, y.birth_seq, age(y));
+    };
+    std::partial_sort(indices.begin(), indices.begin() + take, indices.end(), colder);
+    if (take) fallback_commit_enabled_ = true;
+    for (size_t i = 0; i < take; ++i) {
+        const auto & meta = snapshot.blocks[indices[i]];
+        if (!out.push({meta.handle, snapshot.round_id, HistoricalKvDeleteReason::Lru,
+                       meta.content_version}))
+            throw std::logic_error("historical LRU fallback output capacity changed");
+        if (audit_)
+            std::fprintf(stderr, "KVMEM_GC_AUDIT event=proposed incarnation=%llu slot=%u generation=%llu content_version=%llu round=%llu original_begin=%llu valid_tokens=%u reason=lru_fallback intent_reason=lru content_tier=2 witness=0\n",
+                (unsigned long long)meta.handle.incarnation, meta.handle.slot,
+                (unsigned long long)meta.handle.generation, (unsigned long long)meta.content_version,
+                (unsigned long long)snapshot.round_id, (unsigned long long)meta.original_begin,
+                meta.valid_tokens);
+    }
+    lossy_.fetch_add(take, std::memory_order_relaxed);
+    return take;
+}
+
 HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnapshot & snapshot,
     const HistoricalKvPressure & pressure, HistoricalKvWorkBudget budget, HistoricalKvDecisionBuffer & out) {
     if (snapshot.blocks.size() > capacity_ || !budget.scan || !budget.intents ||
@@ -389,6 +427,7 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
         thinking_mode_ = config_.thinking && (config_.thinking->armed() || config_.thinking->tiered());
         content_tier_ = 0;
         lru_fallback_mode_ = false;
+        fallback_commit_enabled_ = false;
         if (thinking_mode_ && config_.thinking->tiered()) {
             // Exhaust eligible thinking before considering older replies.
             // One tier per round retains the existing bounded comparison N.
@@ -421,6 +460,7 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
         refresh_started_ = false;
         rows_.clear(); references_.clear(); ranked_.clear();
         candidate_indices_.clear(); protected_indices_.clear();
+        unclassified_indices_.clear();
     }
     if (done_) return {HistoricalKvStepStatus::Complete, 0, 0};
     if (source_->question_epoch() != question_epoch_) {
@@ -452,29 +492,8 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
             done_ = true;
             return {HistoricalKvStepStatus::NoCandidate, examined, 0};
         }
-        const size_t take = std::min({static_cast<size_t>(target - supply), budget.intents,
-                                      out.remaining(), candidate_indices_.size()});
-        const auto colder = [&](size_t a, size_t b) {
-            const auto & x = snapshot.blocks[a];
-            const auto & y = snapshot.blocks[b];
-            return std::make_tuple(x.last_use_seq, x.birth_seq, age(x)) <
-                   std::make_tuple(y.last_use_seq, y.birth_seq, age(y));
-        };
-        std::partial_sort(candidate_indices_.begin(), candidate_indices_.begin() + take,
-                          candidate_indices_.end(), colder);
-        for (size_t i = 0; i < take; ++i) {
-            const auto & meta = snapshot.blocks[candidate_indices_[i]];
-            if (!out.push({meta.handle, snapshot.round_id, HistoricalKvDeleteReason::Lru,
-                           meta.content_version}))
-                throw std::logic_error("historical LRU fallback output capacity changed");
-            if (audit_)
-                std::fprintf(stderr, "KVMEM_GC_AUDIT event=proposed incarnation=%llu slot=%u generation=%llu content_version=%llu round=%llu original_begin=%llu valid_tokens=%u reason=lru_fallback intent_reason=lru content_tier=2 witness=0\n",
-                    (unsigned long long)meta.handle.incarnation, meta.handle.slot,
-                    (unsigned long long)meta.handle.generation, (unsigned long long)meta.content_version,
-                    (unsigned long long)snapshot.round_id, (unsigned long long)meta.original_begin,
-                    meta.valid_tokens);
-        }
-        lossy_.fetch_add(take, std::memory_order_relaxed);
+        const size_t take = emit_unclassified_lru(candidate_indices_,
+            std::min<size_t>(target - supply, budget.intents), snapshot, out);
         done_ = true;
         return {HistoricalKvStepStatus::Complete, examined, take};
     }
@@ -498,6 +517,12 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
         candidate_indices_.clear();
         protected_indices_.clear();
         for (size_t i = 0; i < snapshot.blocks.size(); ++i) {
+            if (thinking_mode_ && config_.lru_fallback_unclassified &&
+                !snapshot.blocks[i].mandatory &&
+                historical_kv_can_request_delete(snapshot.blocks[i], snapshot.incarnation) &&
+                config_.thinking->priority(snapshot.blocks[i].original_begin,
+                    snapshot.blocks[i].valid_tokens) == 2)
+                unclassified_indices_.push_back(i);
             if (!eligible_candidate(snapshot.blocks[i])) continue;
             if (snapshot.blocks[i].mandatory) protected_indices_.push_back(i);
             else candidate_indices_.push_back(i);
@@ -566,7 +591,14 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
         collected_ = true;
         uint64_t peak = max_round_features_.load();
         while (rows_.size() > peak && !max_round_features_.compare_exchange_weak(peak, rows_.size())) {}
-        if (rows_.empty()) { done_ = true; return {HistoricalKvStepStatus::NoCandidate, examined, 0}; }
+        if (rows_.empty()) {
+            const size_t fallback = thinking_mode_ && config_.lru_fallback_unclassified ?
+                emit_unclassified_lru(unclassified_indices_,
+                    std::min<size_t>(target - supply, budget.intents), snapshot, out) : 0;
+            done_ = true;
+            return {fallback ? HistoricalKvStepStatus::Complete : HistoricalKvStepStatus::NoCandidate,
+                examined, fallback};
+        }
         select_references();
         neighbors_.assign(rows_.size(), {});
         return {HistoricalKvStepStatus::Yielded, examined, 0};
@@ -713,6 +745,8 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
             lossy_ += dependent;
         }
     }
+    if (emitted < need && thinking_mode_ && config_.lru_fallback_unclassified)
+        emitted += emit_unclassified_lru(unclassified_indices_, need - emitted, snapshot, out);
     done_ = true;
     return {emitted ? HistoricalKvStepStatus::Complete : HistoricalKvStepStatus::NoCandidate, pairs, emitted};
 }

@@ -1,0 +1,124 @@
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -2132,12 +2132,12 @@
+     void bind_sequence_kv(SequenceState& sequence);
+     void unbind_sequence_kv(SequenceState& sequence) noexcept;
+     bool prepare_memory_append(SequenceState& sequence, std::uint32_t begin, std::uint32_t end,
+-                               bool allow_pending);
++                               bool allow_pending, bool allow_gc_wait, bool prefetch_only = false);
+     bool prepare_window(SequenceState& sequence, std::uint32_t begin, std::uint32_t end,
+                         bool force_selection = false, bool allow_pending = false,
+                         kvmem::SelectionReason reason = kvmem::SelectionReason::PrefillPressure);
+     void archive_memory_window(SequenceState& sequence);
+-    void progress_historical_gc(SequenceState& sequence);
++    void progress_historical_gc(SequenceState& sequence, bool release_for_prefill);
+     qwen3_5::TokenSpan memory_query_span(const PreparedPromptData& prompt) const {
+         return bounded_memory_query(prompt,kvmem_options.query_max_tokens);
+     }
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -1388,7 +1388,7 @@
+                 // Current records are ready. Overlap next-chunk first touch with this
+                 // GPU forward; prepare_window joins and publishes before later use.
+                 (void)prepare_memory_append(sequence, chunk_end,
+-                    std::min(staged.prompt_tokens, chunk_end + prefill_chunk), true);
++                    std::min(staged.prompt_tokens, chunk_end + prefill_chunk), true, false, true);
+             }
+         }
+         bind_sequence_kv(sequence);
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -6,6 +6,7 @@
+ #include <atomic>
+ #include <cstdio>
+ #include <cstring>
++#include <thread>
+ 
+ namespace ninfer::models::qwen3_5::detail {
+ namespace {
+@@ -565,7 +566,8 @@
+ }
+ 
+ bool ProgramImpl::prepare_memory_append(SequenceState& sequence, std::uint32_t begin,
+-                                       std::uint32_t end, bool allow_pending) {
++                                       std::uint32_t end, bool allow_pending, bool allow_gc_wait,
++                                       bool prefetch_only) {
+     if (!memory_io || begin == end) return true;
+     // A legal short/non-reusable request may have no Host payload reservation.
+     if (!kvmem_options.disk_bytes && !requests.at(sequence.lane).memory_payload_reservation) return true;
+@@ -605,6 +607,29 @@
+         work->sources.push_back(record ? record.source() : kvmem::HostKvSource{});
+     }
+     if (!work) return true;
++    if ((allow_gc_wait || prefetch_only) && window.historical_gc) {
++        // Do not submit an asynchronous allocation that is already certain to
++        // exceed physical Host capacity. The GC worker may be scoring a batch;
++        // retire it at this prefill boundary and wait only here, never in the
++        // token-by-token decode path. A reader lease still retains its charge.
++        const auto bytes = std::uint64_t(work->ids.size()) * stride;
++        const auto limit = memory_payload_storage.capacity_bytes();
++        if (prefetch_only && (bytes > limit ||
++            memory_payload_storage.charged_bytes() > limit - bytes))
++            return false; // The next prefill boundary will wait for GC safely.
++        if (bytes > limit)
++            throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,
++                "NInfer Host append exceeds physical capacity");
++        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
++        while (memory_payload_storage.charged_bytes() > limit - bytes) {
++            progress_historical_gc(sequence, true);
++            if (memory_payload_storage.charged_bytes() <= limit - bytes) break;
++            if (std::chrono::steady_clock::now() >= deadline)
++                throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,
++                    "NInfer historical GC cannot free enough Host capacity for prefill append");
++            std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++    }
+     work->records.resize(work->ids.size());
+     auto preparation = std::make_unique<KvmemAppendPreparation>();
+     preparation->work = work;
+@@ -619,10 +644,10 @@
+         });
+     window.pending_append = std::move(preparation);
+     if (allow_pending) return false;
+-    return prepare_memory_append(sequence, begin, end, false);
+-}
+-
+-void ProgramImpl::progress_historical_gc(SequenceState& sequence) {
++    return prepare_memory_append(sequence, begin, end, false, allow_gc_wait, prefetch_only);
++}
++
++void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_for_prefill) {
+     if (!kvmem_options.historical_gc_enabled()) return;
+     auto& window = sequence.window;
+     const auto stride = text_host_kv_page_stride + backend_host_kv_page_stride;
+@@ -752,7 +777,7 @@
+         window.host_versions[id] = 0;
+         window.payload_bytes -= bytes;
+         released_bytes += bytes;
+-        gc.acknowledge_host_release(page, std::move(detached_record));
++        gc.acknowledge_host_release(page, std::move(detached_record), release_for_prefill);
+     }
+     if (!retired.empty()) {
+         ++window.stamp.history_revision;
+@@ -771,7 +796,8 @@
+         end - begin > kvmem_options.reserve_tokens) {
+         throw std::logic_error("KVMem append exceeds logical frontier or reserve");
+     }
+-    progress_historical_gc(sequence);
++    const bool prefill_boundary = reason != kvmem::SelectionReason::DecodePressure;
++    progress_historical_gc(sequence, prefill_boundary);
+     auto& pending = sequence.window.pending_window;
+     if (pending) {
+         if (sequence.window.pending_window_begin != begin ||
+@@ -875,7 +901,7 @@
+     }
+     // Any host allocation/promotion that might spill belongs to the I/O job.
+     // Checkpoint capture after this chunk only writes already-resident buffers.
+-    if (!prepare_memory_append(sequence, begin, end, allow_pending)) return false;
++    if (!prepare_memory_append(sequence, begin, end, allow_pending, prefill_boundary)) return false;
+     ensure_sequence_kv_mapped(sequence, end, backend_kv_pages ? end : 0);
+     const auto mapped = kv_pages_for_tokens(compact_position(sequence, end));
+     while (sequence.window.pages.size() < mapped) {

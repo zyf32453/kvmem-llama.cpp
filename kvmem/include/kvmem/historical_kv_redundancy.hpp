@@ -88,8 +88,8 @@ public:
         size_t segment_blocks = 4;
         size_t pool_blocks = 0;
         std::shared_ptr<HistoricalKvThinkingRanges> thinking;
-        // When the preferred thinking/reply tier has no evictable block,
-        // capacity pressure may retire cold unclassified blocks by LRU.
+        // When the preferred thinking/reply tier cannot satisfy the whole
+        // capacity request, fill the remainder with cold unclassified blocks.
         // Disabled by default to preserve existing backend policy semantics.
         bool lru_fallback_unclassified = false;
     };
@@ -135,6 +135,8 @@ private:
     bool better_representative(size_t a, size_t b) const noexcept;
     size_t emit_ranked(std::vector<size_t> & group, size_t take, HistoricalKvDeleteReason reason,
         const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out);
+    size_t emit_unclassified_lru(std::vector<size_t> & indices, size_t take,
+        const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out);
     size_t capacity_, dimensions_;
     std::shared_ptr<HistoricalKvRedundancySource> source_;
     Config config_;
@@ -145,6 +147,7 @@ private:
     bool refresh_started_ = false;
     bool thinking_mode_ = false;
     bool lru_fallback_mode_ = false;
+    bool fallback_commit_enabled_ = false;
     unsigned content_tier_ = 0;
     bool audit_ = false;
     std::vector<Row> rows_;
@@ -155,6 +158,7 @@ private:
     // an actual retained substitute when a victim is proposed.
     std::vector<std::vector<DirectEdge>> neighbors_;
     std::vector<size_t> references_, ranked_, candidate_indices_, candidate_scratch_;
+    std::vector<size_t> unclassified_indices_;
     std::vector<size_t> protected_indices_;
     std::vector<Seen> seen_;
     std::atomic<uint64_t> feature_blocks_{0}, missing_{0}, comparisons_{0}, max_round_features_{0};

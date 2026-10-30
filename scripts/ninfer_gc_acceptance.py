@@ -23,9 +23,9 @@ def percentile(values, fraction):
     return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)]
 
 
-def request_prompt(kind, stress_decode=False):
+def request_prompt(kind, stress_decode=False, record_count=280):
     records = []
-    for index in range(280):
+    for index in range(record_count):
         if kind == "needle" and index == 127:
             records.append(f"Record {index:04d}: The only hidden code is AMBER-4729. Remember this exact code.\n")
         else:
@@ -43,10 +43,10 @@ def request_prompt(kind, stress_decode=False):
     return "".join(records) + ending
 
 
-def run_request(port, kind, stress_decode=False, stress_tokens=4096):
+def run_request(port, kind, stress_decode=False, stress_tokens=4096, records=280):
     payload = {
         "model": "qwen3.8-27b",
-        "messages": [{"role": "user", "content": request_prompt(kind, stress_decode)}],
+        "messages": [{"role": "user", "content": request_prompt(kind, stress_decode, records)}],
         "max_tokens": stress_tokens if stress_decode else (384 if kind == "sequence" else 160),
         "thinking_budget": 128,
         "temperature": 0,
@@ -100,10 +100,12 @@ def run_request(port, kind, stress_decode=False, stress_tokens=4096):
     round_ms = [elapsed for _, elapsed in intervals]
     output = "".join(answer).strip()
     numbers = [int(x) for x in re.findall(r"\b\d+\b", output)] if kind == "sequence" else []
+    minimum_numbers = min(1000, max(100, (stress_tokens - 128) // 4))
+    prefix_numbers = min(100, minimum_numbers)
     expected = {
         "math": output == "599",
         "needle": output == "AMBER-4729",
-        "sequence": (numbers[:100] == list(range(1, 101)) and len(numbers) >= 1000)
+        "sequence": (numbers[:prefix_numbers] == list(range(1, prefix_numbers + 1)) and len(numbers) >= minimum_numbers)
                     if stress_decode else numbers == list(range(1, 81)),
     }[kind]
     expected = expected and stream_error is None and finish_reason is not None
@@ -116,7 +118,7 @@ def run_request(port, kind, stress_decode=False, stress_tokens=4096):
         "answer": output,
         "reasoning_characters": len("".join(reasoning)),
         "exact_task_check": expected,
-        "check_scope": ("first 100 numbers in order and at least 1000 numbers emitted"
+        "check_scope": (f"first {prefix_numbers} numbers in order and at least {minimum_numbers} numbers emitted"
                         if stress_decode else "full expected answer"),
         "timing_observations": observations,
         "timing_intervals": len(intervals),
@@ -146,7 +148,11 @@ def main():
                         help="request long output with a 16K context to stress GC during decode")
     parser.add_argument("--stress-output-tokens", type=int, default=4096)
     parser.add_argument("--stress-host-mib", type=int, default=160)
+    parser.add_argument("--records", type=int, default=280)
+    parser.add_argument("--spec", choices=("none", "mtp"), default="mtp")
     args = parser.parse_args()
+    if args.records < 1 or args.stress_output_tokens < 1:
+        parser.error("records and stress-output-tokens must be positive")
     args.out.mkdir(parents=True, exist_ok=True)
     binary = args.root / "build-native/apps/ninfer-serve"
     model_file = args.model_dir / "Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer"
@@ -176,13 +182,16 @@ def main():
                 "--kv-dtype", "rk4v4", "--max-concurrency", "1",
                 "--prefill-chunk", "512", "--default-max-tokens",
                 str(args.stress_output_tokens) if args.stress_decode else "384",
-                "--default-thinking-budget", "128", "--spec", "mtp", "--draft-tokens", "4",
-                "--lm-head-draft", "--device-profile", "off", "--kvmem-verify-transfers",
+                "--default-thinking-budget", "128",
+                "--device-profile", "off", "--kvmem-verify-transfers",
             ]
+            common.extend(["--spec", args.spec])
+            if args.spec == "mtp":
+                common.extend(["--draft-tokens", "4", "--lm-head-draft"])
             if mode != "off":
                 common.append(f"--kvmem-gc-{mode}")
             record = {"mode": mode, "task": kind, "host_mib": host_mib,
-                      "stress_decode": args.stress_decode,
+                      "stress_decode": args.stress_decode, "records": args.records, "spec": args.spec,
                       "stress_output_tokens": args.stress_output_tokens if args.stress_decode else None,
                       "container": name, "started_at_unix": time.time()}
             try:
@@ -197,7 +206,7 @@ def main():
                 else:
                     raise TimeoutError("NInfer service did not become ready")
                 record.update(run_request(port, kind, args.stress_decode,
-                                          args.stress_output_tokens))
+                                          args.stress_output_tokens, args.records))
             except Exception as error:
                 record["error"] = f"{type(error).__name__}: {error}"
             finally:

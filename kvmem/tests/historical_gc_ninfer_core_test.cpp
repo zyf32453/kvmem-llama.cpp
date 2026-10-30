@@ -121,6 +121,34 @@ static void native_page_handoff() {
     require(delayed.is_live(1));
 }
 
+static void native_page_prefill_release() {
+    kvmem::HistoricalKvPageGc::Config config;
+    config.slots = 3;
+    config.logical_pages = 3;
+    config.page_tokens = 64;
+    config.sink_tokens = 64;
+    config.recent_tokens = 64;
+    config.low_ready = 1;
+    config.high_ready = 2;
+    kvmem::HistoricalKvPageGc bridge(config);
+    for (uint32_t page = 0; page < 3; ++page)
+        require(bridge.register_page(page, 128, page + 1));
+    bridge.protect_page(1, false);
+    for (int i = 0; i < 8 && !bridge.stats().proposed; ++i) bridge.manual_tick();
+    const auto & retired = bridge.commit_boundary();
+    require(retired.size() == 1 && retired.front().page == 1);
+    kvmem::HostKvStorage native_host(256);
+    auto record = native_host.allocate(128);
+    record.seal();
+    auto reader = record.lease();
+    bridge.acknowledge_host_release(retired.front(), std::move(record), true);
+    require(native_host.charged_bytes() == 128); // Reader still owns the payload.
+    reader = {};
+    require(native_host.charged_bytes() == 0); // Prefill can allocate immediately.
+    for (int i = 0; i < 8 && !bridge.stats().reclaimed; ++i) bridge.manual_tick();
+    require(bridge.stats().reclaimed == 1);
+}
+
 static void native_page_redundancy_handoff() {
     kvmem::HistoricalKvPageGc::Config config;
     config.slots = 5;
@@ -207,12 +235,64 @@ static void native_thinking_lru_fallback() {
     require(second.values().front().victim.slot == 2);
 }
 
+static void native_thinking_partial_lru_fallback() {
+    auto thinking = std::make_shared<kvmem::HistoricalKvThinkingRanges>();
+    thinking->note(64, 192);
+    thinking->arm();
+    kvmem::HistoricalKvRedundancyPolicy::Config config;
+    config.thinking = thinking;
+    config.lru_fallback_unclassified = true;
+    auto source = std::make_shared<PageFeatures>();
+    kvmem::HistoricalKvRedundancyPolicy policy(6, source, config);
+    kvmem::HistoricalKvSnapshot snapshot;
+    snapshot.incarnation = 8;
+    snapshot.round_id = 1;
+    for (uint32_t id = 0; id < 6; ++id) {
+        kvmem::HistoricalKvBlockMeta meta;
+        meta.handle = {8, id, 1};
+        meta.logical_id = id;
+        meta.original_begin = uint64_t(id) * 64;
+        meta.valid_tokens = 64;
+        meta.content_version = 1;
+        meta.life = kvmem::HistoricalKvLife::Live;
+        meta.sealed = true;
+        meta.mandatory = id == 0 || id == 5;
+        meta.last_use_seq = id == 4 ? 1 : 10;
+        snapshot.blocks.push_back(meta);
+    }
+    kvmem::HistoricalKvPressure pressure;
+    pressure.ready = 0;
+    pressure.low = 1;
+    pressure.high = 4;
+    kvmem::HistoricalKvDecisionBuffer out(4);
+    kvmem::HistoricalKvStepResult result;
+    for (int i = 0; i < 20; ++i) {
+        result = policy.step(snapshot, pressure, {6, 4}, out);
+        if (result.status != kvmem::HistoricalKvStepStatus::Yielded) break;
+    }
+    require(result.status == kvmem::HistoricalKvStepStatus::Complete);
+    require(result.emitted == 3 && out.values().size() == 3);
+    size_t preferred = 0, fallback = 0;
+    for (const auto & intent : out.values()) {
+        require(policy.permits(snapshot.blocks[intent.victim.slot]));
+        if (intent.victim.slot == 1 || intent.victim.slot == 2) ++preferred;
+        if (intent.victim.slot == 3 || intent.victim.slot == 4) {
+            require(intent.reason == kvmem::HistoricalKvDeleteReason::Lru);
+            ++fallback;
+        }
+        require(intent.victim.slot != 0 && intent.victim.slot != 5);
+    }
+    require(preferred == 1 && fallback == 2);
+}
+
 int main() {
     native_page_feature_snapshot();
     truncated_thinking_reopens_candidates();
     native_page_handoff();
+    native_page_prefill_release();
     native_page_redundancy_handoff();
     native_thinking_lru_fallback();
+    native_thinking_partial_lru_fallback();
     constexpr uint32_t page_tokens = 64;
     auto repository = std::make_shared<kvmem::HistoricalKvRepository>(3, 0, page_tokens, page_tokens);
     std::atomic<unsigned> releases{0};

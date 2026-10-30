@@ -55,10 +55,11 @@ public:
     // caller must mark each page unavailable before another working-set choice.
     const std::vector<RetiredPage> & commit_boundary() noexcept;
     // Move the exact native owner out of the selectable archive at the boundary.
-    // The worker destroys it later, then waits for any in-flight Host readers
-    // before this repository slot can be reused. No payload free occurs here.
+    // The worker normally destroys it later. An urgent prefill admission may
+    // drop the owner now; any in-flight Host reader still holds its lease and
+    // the worker waits for the release ticket before reusing this slot.
     void acknowledge_host_release(const RetiredPage & page,
-                                  HostKvRecord record) noexcept;
+                                  HostKvRecord record, bool release_immediately = false) noexcept;
     bool contains(uint32_t page) const noexcept;
     bool is_live(uint32_t page) const noexcept;
     HistoricalKvGc::Stats stats() const;

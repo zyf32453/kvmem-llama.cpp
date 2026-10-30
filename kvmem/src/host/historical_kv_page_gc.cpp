@@ -165,12 +165,14 @@ HistoricalKvPageGc::commit_boundary() noexcept {
 }
 
 void HistoricalKvPageGc::acknowledge_host_release(const RetiredPage & page,
-                                                 HostKvRecord record) noexcept {
+                                                 HostKvRecord record,
+                                                 bool release_immediately) noexcept {
     if (page.page >= handles_.size() || page.handle.slot >= config_.slots) return;
     const auto current = handles_[page.page];
     if (current.incarnation != page.handle.incarnation ||
         current.slot != page.handle.slot || current.generation != page.handle.generation) return;
     releases_->release_tickets[page.handle.slot] = record.release_ticket();
+    if (release_immediately) record.reset();
     releases_->detached_records[page.handle.slot] = std::move(record);
     releases_->released_generation[page.handle.slot].store(page.handle.generation,
         std::memory_order_release);
