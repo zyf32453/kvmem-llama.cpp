@@ -9,11 +9,11 @@
 namespace kvmem {
 
 struct HistoricalKvPageGc::ReleaseState {
-    ReleaseState(uint32_t pages, uint32_t slots)
-        : protected_pages(new std::atomic<uint8_t>[pages]),
-          released_generation(new std::atomic<uint64_t>[slots]),
-          release_tickets(new HostKvReleaseTicket[slots]),
-          detached_records(new HostKvRecord[slots]),
+    ReleaseState(uint32_t pages, uint32_t slots, std::shared_ptr<HistoricalKvAuxBudget> auxiliary)
+        : protected_pages(pages, auxiliary, HistoricalKvAuxKind::NativeBridge),
+          released_generation(slots, auxiliary, HistoricalKvAuxKind::NativeBridge),
+          release_tickets(slots, auxiliary, HistoricalKvAuxKind::NativeBridge),
+          detached_records(slots, auxiliary, HistoricalKvAuxKind::NativeBridge),
           logical_pages(pages) {
         for (uint32_t i = 0; i < pages; ++i)
             protected_pages[i].store(1, std::memory_order_relaxed);
@@ -24,20 +24,22 @@ struct HistoricalKvPageGc::ReleaseState {
         return page >= logical_pages ||
             protected_pages[page].load(std::memory_order_acquire) != 0;
     }
-    std::unique_ptr<std::atomic<uint8_t>[]> protected_pages;
-    std::unique_ptr<std::atomic<uint64_t>[]> released_generation;
-    std::unique_ptr<HostKvReleaseTicket[]> release_tickets;
-    std::unique_ptr<HostKvRecord[]> detached_records;
+    HistoricalKvAuxArray<std::atomic<uint8_t>> protected_pages;
+    HistoricalKvAuxArray<std::atomic<uint64_t>> released_generation;
+    HistoricalKvAuxArray<HostKvReleaseTicket> release_tickets;
+    HistoricalKvAuxArray<HostKvRecord> detached_records;
     uint32_t logical_pages;
 };
 
 class HistoricalKvPageGc::ProtectedPolicy final : public HistoricalKvPolicy {
 public:
-    ProtectedPolicy(std::unique_ptr<HistoricalKvPolicy> inner,
+    ProtectedPolicy(HistoricalKvAuxOwner<HistoricalKvPolicy> inner,
                     std::shared_ptr<ReleaseState> state, uint32_t capacity,
                     std::optional<HostKvStorage> storage, uint64_t page_bytes)
         : inner_(std::move(inner)), state_(std::move(state)), capacity_(capacity),
           physical_storage_(std::move(storage)), physical_page_bytes_(page_bytes) {
+        filtered_.blocks = HistoricalKvAuxVector<HistoricalKvBlockMeta>(
+            HistoricalKvAuxAllocator<HistoricalKvBlockMeta>(inner_->auxiliary_budget(), HistoricalKvAuxKind::NativeBridge));
         filtered_.blocks.reserve(capacity);
     }
     bool permits(const HistoricalKvBlockMeta & block) const noexcept override {
@@ -88,8 +90,9 @@ public:
         inner_->on_result(result);
     }
     Metrics metrics() const noexcept override { return inner_->metrics(); }
+    std::shared_ptr<HistoricalKvAuxBudget> auxiliary_budget() const noexcept override { return inner_->auxiliary_budget(); }
 private:
-    std::unique_ptr<HistoricalKvPolicy> inner_;
+    HistoricalKvAuxOwner<HistoricalKvPolicy> inner_;
     std::shared_ptr<ReleaseState> state_;
     HistoricalKvSnapshot filtered_;
     uint32_t capacity_;
@@ -99,21 +102,32 @@ private:
 };
 
 HistoricalKvPageGc::HistoricalKvPageGc(Config config)
-    : HistoricalKvPageGc(config, std::make_unique<HistoricalKvLruPolicy>(config.slots)) {}
+    : HistoricalKvPageGc(config, historical_kv_aux_make<HistoricalKvPolicy, HistoricalKvLruPolicy>(
+        config.auxiliary, HistoricalKvAuxKind::Policy, config.slots, true,
+        std::shared_ptr<HistoricalKvThinkingRanges>{}, config.auxiliary)) {}
 
 HistoricalKvPageGc::HistoricalKvPageGc(Config config, std::unique_ptr<HistoricalKvPolicy> inner)
+    : HistoricalKvPageGc(config, historical_kv_aux_adopt(std::move(inner))) {}
+
+HistoricalKvPageGc::HistoricalKvPageGc(Config config, HistoricalKvAuxOwner<HistoricalKvPolicy> inner)
     : config_(config),
-      releases_(std::make_shared<ReleaseState>(config.logical_pages, config.slots)),
-      repository_(std::make_shared<HistoricalKvRepository>(
-          config.slots, 0, config.sink_tokens, config.recent_tokens)),
-      handles_(config.logical_pages),
-      slot_to_page_(config.slots, UINT32_MAX) {
+      releases_(std::allocate_shared<ReleaseState>(HistoricalKvAuxAllocator<ReleaseState>(config.auxiliary, HistoricalKvAuxKind::NativeBridge),
+          config.logical_pages, config.slots, config.auxiliary)),
+      repository_(std::allocate_shared<HistoricalKvRepository>(
+          HistoricalKvAuxAllocator<HistoricalKvRepository>(config.auxiliary, HistoricalKvAuxKind::Metadata),
+          config.slots, 0, config.sink_tokens, config.recent_tokens, config.auxiliary)),
+      handles_(config.logical_pages, HistoricalKvAuxAllocator<HistoricalKvHandle>(config.auxiliary, HistoricalKvAuxKind::NativeBridge)),
+      slot_to_page_(config.slots, UINT32_MAX, HistoricalKvAuxAllocator<uint32_t>(config.auxiliary, HistoricalKvAuxKind::NativeBridge)),
+      committed_(HistoricalKvAuxAllocator<RetiredPage>(config.auxiliary, HistoricalKvAuxKind::NativeBridge)) {
     if (!inner || !config.slots || !config.logical_pages || !config.batch_blocks ||
         !config.page_tokens || !config.low_ready || config.low_ready >= config.high_ready ||
         config.high_ready > config.slots || !config.poll_ms ||
         (config.physical_storage && !config.physical_page_bytes))
         throw std::invalid_argument("NInfer historical GC page capacity/watermarks");
-    committed_.reserve(config.batch_blocks);
+    if (config.auxiliary && (inner->auxiliary_budget() != config.auxiliary ||
+        inner.get_deleter().budget != config.auxiliary))
+        throw std::invalid_argument("native historical GC policy budget mismatch");
+    committed_.reserve(std::min(config.batch_blocks, config.slots));
     HistoricalKvGc::Config gc;
     gc.mode = HistoricalKvGc::Mode::Delete;
     gc.ready_low = config.low_ready;
@@ -125,9 +139,12 @@ HistoricalKvPageGc::HistoricalKvPageGc(Config config, std::unique_ptr<Historical
     gc.retire_at_decode_boundary = true;
     gc.on_boundary_retired = &HistoricalKvPageGc::on_retired;
     gc.boundary_context = this;
-    auto policy = std::make_unique<ProtectedPolicy>(std::move(inner), releases_, config.slots,
+    gc.auxiliary = config.auxiliary;
+    auto policy = historical_kv_aux_make<HistoricalKvPolicy, ProtectedPolicy>(config.auxiliary, HistoricalKvAuxKind::NativeBridge,
+        std::move(inner), releases_, config.slots,
         config.physical_storage, config.physical_page_bytes);
-    manager_ = std::make_unique<HistoricalKvGc>(repository_, std::move(policy), gc);
+    manager_ = historical_kv_aux_make<HistoricalKvGc>(config.auxiliary, HistoricalKvAuxKind::Decisions,
+        repository_, std::move(policy), gc);
 }
 
 HistoricalKvPageGc::~HistoricalKvPageGc() {
@@ -138,19 +155,21 @@ HistoricalKvPageGc::~HistoricalKvPageGc() {
 bool HistoricalKvPageGc::register_page(uint32_t page, uint64_t payload_bytes, uint64_t birth_seq) {
     if (page >= handles_.size() || !payload_bytes || handles_[page].generation)
         return false;
-    const std::weak_ptr<ReleaseState> weak = releases_;
-    auto writer = repository_->begin_write(page, uint64_t(page) * config_.page_tokens,
-        config_.page_tokens,
-        birth_seq, payload_bytes, [weak](const HistoricalKvHandle & handle) {
-            const auto state = weak.lock();
-            if (!state) return true;
+    HistoricalKvRepository::ResourceRelease release;
+    release.packed_kv_bytes = payload_bytes;
+    release.callback_owner = releases_;
+    release.callback_with_owner = [](const HistoricalKvHandle & handle,
+        HistoricalKvRepository::HostResource resource, void * owner) noexcept {
+            if (resource != HistoricalKvRepository::HostResource::PackedKv) return true;
+            auto * state = static_cast<ReleaseState *>(owner);
             if (state->released_generation[handle.slot].load(
                     std::memory_order_acquire) != handle.generation) return false;
-            // The foreground only moved the record into this preallocated slot.
-            // Destruction and any last-reader wait happen on the GC worker.
             state->detached_records[handle.slot].reset();
             return state->release_tickets[handle.slot].released();
-        });
+        };
+    auto writer = repository_->begin_write(page, uint64_t(page) * config_.page_tokens,
+        config_.page_tokens,
+        birth_seq, payload_bytes, std::move(release));
     if (!writer) return false;
     const auto handle = writer->handle();
     slot_to_page_[handle.slot] = page;
@@ -185,7 +204,7 @@ void HistoricalKvPageGc::on_retired(void * context, HistoricalKvHandle handle) n
     self.committed_.push_back({page, handle});
 }
 
-const std::vector<HistoricalKvPageGc::RetiredPage> &
+const HistoricalKvAuxVector<HistoricalKvPageGc::RetiredPage> &
 HistoricalKvPageGc::commit_boundary() noexcept {
     committed_.clear();
     manager_->commit_at_decode_boundary();

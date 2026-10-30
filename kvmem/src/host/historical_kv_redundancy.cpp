@@ -173,6 +173,9 @@ HistoricalKvRedundancyPolicy::HistoricalKvRedundancyPolicy(size_t capacity,
         !std::isfinite(config_.representative_similarity) || config_.representative_similarity < 0 ||
         config_.representative_similarity > 1)
         throw std::invalid_argument("invalid historical redundancy configuration");
+    if (config_.auxiliary && (source_->auxiliary_budget() != config_.auxiliary ||
+        (config_.thinking && config_.thinking->auxiliary_budget() != config_.auxiliary)))
+        throw std::invalid_argument("historical redundancy source/range budget mismatch");
     rows_.reserve(capacity_); references_.reserve(capacity_); ranked_.reserve(capacity_);
     candidate_indices_.reserve(capacity_); candidate_scratch_.reserve(capacity_);
     unclassified_indices_.reserve(capacity_);

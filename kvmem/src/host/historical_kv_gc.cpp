@@ -10,6 +10,14 @@
 
 namespace kvmem {
 namespace {
+HistoricalKvGc::Config effective_config(const std::shared_ptr<HistoricalKvRepository> & repository,
+                                       HistoricalKvGc::Config config) {
+    const auto account = repository ? repository->auxiliary_budget() : nullptr;
+    if (account && config.auxiliary && account != config.auxiliary)
+        throw std::invalid_argument("historical GC repository budget mismatch");
+    if (!config.auxiliary) config.auxiliary = account;
+    return config;
+}
 bool same(HistoricalKvHandle a, HistoricalKvHandle b) noexcept {
     return a.incarnation == b.incarnation && a.slot == b.slot && a.generation == b.generation;
 }
@@ -45,8 +53,22 @@ bool valid_evidence(const HistoricalKvDeleteIntent & intent,
 HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
                                std::unique_ptr<HistoricalKvPolicy> policy,
                                Config config)
-    : repository_(std::move(repository)), policy_(std::move(policy)), config_(config),
-      decisions_(repository_ ? std::min(config.batch_blocks, repository_->capacity()) : 0) {
+    : HistoricalKvGc(std::move(repository), historical_kv_aux_adopt(std::move(policy)), config) {}
+
+HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
+                               HistoricalKvAuxOwner<HistoricalKvPolicy> policy,
+                               Config config)
+    : repository_(std::move(repository)), policy_(std::move(policy)), config_(effective_config(repository_, config)),
+      prepared_(HistoricalKvAuxAllocator<HistoricalKvDeleteIntent>(config_.auxiliary, HistoricalKvAuxKind::Decisions)),
+      prepared_conditions_(HistoricalKvAuxAllocator<HistoricalKvCommitConditions>(config_.auxiliary, HistoricalKvAuxKind::Decisions)),
+      pending_intents_(prepared_.get_allocator()), pending_conditions_(prepared_conditions_.get_allocator()),
+      pending_codes_(HistoricalKvAuxAllocator<HistoricalKvCommitCode>(config_.auxiliary, HistoricalKvAuxKind::Decisions)),
+      acknowledged_intents_(prepared_.get_allocator()), acknowledged_conditions_(prepared_conditions_.get_allocator()),
+      acknowledged_codes_(pending_codes_.get_allocator()), audit_committed_(prepared_.get_allocator()),
+      decisions_(repository_ ? std::min(config.batch_blocks, repository_->capacity()) : 0, config_.auxiliary),
+      retry_(prepared_.get_allocator()), retry_conditions_(prepared_conditions_.get_allocator()),
+      seen_generation_(HistoricalKvAuxAllocator<uint64_t>(config_.auxiliary, HistoricalKvAuxKind::Metadata)),
+      shadow_generation_(seen_generation_.get_allocator()) {
     if (!repository_ || !policy_ || !repository_->capacity() ||
         ((config_.ready_low || config_.ready_high) &&
          (!config_.ready_low || !(config_.ready_low < config_.ready_high) ||
@@ -56,8 +78,12 @@ HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repositor
         !config_.reclaim_blocks || !config_.poll_ms) {
         throw std::invalid_argument("invalid historical KV GC configuration");
     }
-    retry_.reserve(repository_->capacity());
-    retry_conditions_.reserve(repository_->capacity());
+    if (config_.auxiliary && (policy_->auxiliary_budget() != config_.auxiliary ||
+        policy_.get_deleter().budget != config_.auxiliary))
+        throw std::invalid_argument("historical GC policy budget mismatch");
+    // A retry blocks new proposals; at most one configured batch is retained.
+    retry_.reserve(config_.batch_blocks);
+    retry_conditions_.reserve(config_.batch_blocks);
     prepared_.reserve(config_.batch_blocks);
     prepared_conditions_.reserve(config_.batch_blocks);
     pending_intents_.reserve(config_.batch_blocks);
@@ -68,6 +94,9 @@ HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repositor
     acknowledged_codes_.reserve(config_.batch_blocks);
     audit_ = historical_kv_audit_enabled();
     if (audit_) audit_committed_.resize(repository_->capacity());
+    round_.blocks = HistoricalKvAuxVector<HistoricalKvBlockMeta>(
+        HistoricalKvAuxAllocator<HistoricalKvBlockMeta>(config_.auxiliary, HistoricalKvAuxKind::Metadata));
+    observation_.blocks = HistoricalKvAuxVector<HistoricalKvBlockMeta>(round_.blocks.get_allocator());
     round_.blocks.reserve(repository_->capacity());
     observation_.blocks.reserve(repository_->capacity());
     seen_generation_.resize(repository_->capacity());

@@ -43,11 +43,20 @@ public:
         // leases drain before physical memory is returned; it is not a Host
         // packed-KV reference and cannot delay release of the RAM copy.
         uint64_t pinned_bytes = 0;
+        // Allocation-free callback binding. The explicit owner remains alive
+        // until Metadata completes; caller-owned payload accounts stay separate.
+        bool (*callback_with_owner)(const HistoricalKvHandle &, HostResource, void *) = nullptr;
+        std::shared_ptr<void> callback_owner;
+        bool has_callback() const noexcept { return bool(callback) != bool(callback_with_owner); }
+        bool invoke(const HistoricalKvHandle & handle, HostResource resource) const {
+            return callback_with_owner ? callback_with_owner(handle, resource, callback_owner.get()) : callback(handle, resource);
+        }
+        void clear_callback() noexcept { callback = {}; callback_with_owner = nullptr; callback_owner.reset(); }
     };
 
     struct RangeObservation {
         // At most `count` entries, in ascending physical slot order.
-        std::vector<HistoricalKvBlockMeta> blocks;
+        HistoricalKvAuxVector<HistoricalKvBlockMeta> blocks;
         uint32_t ready = 0;
         uint32_t reserved = 0; // Request-private; never pending reclaim credits.
         uint32_t pending = 0; // Retired or Releasing full-slot credits.
@@ -121,7 +130,7 @@ public:
     private:
         friend class HistoricalKvRepository;
         std::shared_ptr<Shared> shared_;
-        std::vector<HistoricalKvHandle> handles_;
+        HistoricalKvAuxVector<HistoricalKvHandle> handles_;
         uint32_t consumed_ = 0;
     };
 
@@ -130,7 +139,9 @@ public:
     // Immutable policy windows, measured in original token positions. They
     // only annotate observations; explicit/custom retirement ignores them.
     explicit HistoricalKvRepository(uint32_t capacity, uint64_t incarnation = 0,
-                                    uint64_t sink_tokens = 0, uint64_t recent_tokens = 0);
+                                    uint64_t sink_tokens = 0, uint64_t recent_tokens = 0,
+                                    std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {});
+    std::shared_ptr<HistoricalKvAuxBudget> auxiliary_budget() const noexcept;
     ~HistoricalKvRepository();
     HistoricalKvRepository(const HistoricalKvRepository &) = delete;
     HistoricalKvRepository & operator=(const HistoricalKvRepository &) = delete;
@@ -287,8 +298,8 @@ public:
     // insufficient capacity is rejected before any observation is changed.
     void observe_range_into(uint32_t first, uint32_t count,
                             RangeObservation & out) const;
-    std::vector<HistoricalKvBlockMeta> snapshot() const;
-    std::vector<HistoricalKvBlockMeta> snapshot_range(uint32_t first, uint32_t count) const;
+    HistoricalKvAuxVector<HistoricalKvBlockMeta> snapshot() const;
+    HistoricalKvAuxVector<HistoricalKvBlockMeta> snapshot_range(uint32_t first, uint32_t count) const;
     uint32_t ready_count() const;
     struct CapacityObservation { uint32_t ready = 0, pending = 0; };
     // Atomic counters sampled over the fixed slot table; never admission credit.

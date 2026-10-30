@@ -1,0 +1,269 @@
+{
+  "date": "2026-10-31",
+  "stage": "B4_owner_budget",
+  "status": "host_candidate_verified_stage_B_incomplete",
+  "parent_commit": "5a79f8de48e063d16def88beb5d6c884f8200903",
+  "manifest_sha256": "12af94c05ccd7196cd11f69de663e1af7a2da2f1fddd6269ffc2f2410ac6b7d0",
+  "source_pins": 87,
+  "product_and_test_changes": [
+    "kvmem/CMakeLists.txt",
+    "kvmem/include/kvmem/historical_kv_auxiliary.hpp",
+    "kvmem/include/kvmem/historical_kv_gc.hpp",
+    "kvmem/include/kvmem/historical_kv_page_features.hpp",
+    "kvmem/include/kvmem/historical_kv_page_gc.hpp",
+    "kvmem/include/kvmem/historical_kv_policy.hpp",
+    "kvmem/include/kvmem/historical_kv_redundancy.hpp",
+    "kvmem/include/kvmem/historical_kv_repository.hpp",
+    "kvmem/src/host/historical_kv_gc.cpp",
+    "kvmem/src/host/historical_kv_page_gc.cpp",
+    "kvmem/src/host/historical_kv_policy_lru.cpp",
+    "kvmem/src/host/historical_kv_redundancy.cpp",
+    "kvmem/src/host/historical_kv_repository.cpp",
+    "kvmem/tests/historical_kv_owner_budget_test.cpp"
+  ],
+  "native_patch_hashes": 24,
+  "host_contracts": {
+    "results": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.399647
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.629871
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 0.0762605
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 16.1309
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 0.806144
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.677245
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.771322
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.740082
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.088247
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.908031
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.912992
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.801588
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.584737
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.589106
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.648577
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.616022
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.547442
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.495716
+      }
+    ],
+    "binary_sha256": {
+      "historical_gc_ninfer_core_test": "2b84c73dd6d9b589e3061747c8bbb9ac6efe67d43b70d8bc212f5bb590f4e41e",
+      "memory_contract_test": "7e471aeb36bfe7ad4866cebea67f51b7ad2907918c1cf24e69fdb29ecffb0afb",
+      "native_kv_payload_test": "00858e85a80533231f383e49c1c7ca5fa95c3db295a64e51b6b08a466a77735b",
+      "host_kv_storage_test": "eabb18c21277ed34b453c79af3441f49f3524fa2da858957273da3a8fc912d7b",
+      "spill_io_test": "e59c177e405181ed33dd38b598b89662d0acb6785f012277097490dea6add1c2",
+      "tiered_kv_storage_test": "4c2e7e2af3439b8e4510be27d4e598d5ddbb44adaf7dddcd4080bbded251ef15",
+      "native_residency_test": "66c0a826837daf7bcf8e50d8c5b55b485a518d077b5b8af9b124549659a2991c",
+      "kv_content_test": "4397e028d216ccb8fcdbfffb9a7f2703a0815bf6f00939f5efef5ae2abb2d0c8",
+      "prefix_checkpoint_test": "c640e274588745874d9360dfd947f28ffe5f967983cd46d4567b6c34c20b64a1",
+      "checkpoint_policy_test": "c072ca01e1fdc6ae37572e48ea26a58300bc65e8d79afe8387da4c81fea98561",
+      "checkpoint_image_test": "dfe499b47ad2cb61f86f337fbf040f907cd65eb560fa815f58aefadc74206689",
+      "historical_kv_boundary_mailbox_test": "1b569f88e78f91ae1ab76ea027f51bede16f37314969ebeb99574ffeab94d26b",
+      "historical_kv_commit_conditions_test": "d6a09d6262da9d4e3527320d12438d8cfc3533643e6a575f1cc174a5edd98f14",
+      "historical_kv_range_lock_test": "e8317312112a56dfa4a19bfb7aa35e26f8faa1ebbf14977f104d7e3ed99e9193",
+      "historical_kv_witness_lifecycle_test": "3f4be075dd576cd7fab8014bb9662fa4c96507978e28c27448402cf3c0f95edf",
+      "historical_kv_score_evidence_test": "06588abb35aa19131f7ea6ac585b2d83cce3738d2999ad8fdb79b5d5bca27c2e",
+      "historical_kv_auxiliary_budget_test": "fd2c4d5515aee7b0d22144c3d93cec2b602877976907a32f47f53e70d0ea47e6",
+      "historical_kv_owner_budget_test": "27e3873508c4df47bae0a0391f45dfc907c31d7f4e402c279e02283c54bb06b7"
+    },
+    "compiler": "C:/mingw/mingw64/bin/c++.exe",
+    "build_type": "Debug"
+  },
+  "shared_probe": {
+    "source": "tests/kv-lifecycle-compatibility-probe.cpp",
+    "source_sha256": "26ff6a4073f87127439244683f704872a152cc85e5d332a24308ef5208538855",
+    "binary_sha256": "9394f65f74b3f0f13f5e8a19c8568345e09d01e4ee49a8eb05118d480bfb39e6",
+    "output": "PASS C01-C03 retirement, held reader, generation reuse and exactly-once release\r\nPASS C04 CPU early release, preserved GPU permission and delayed Ready"
+  },
+  "owner_budget": {
+    "native_constructor_points_by_audit": {
+      "0": 32,
+      "1": 33
+    },
+    "failure_modes": [
+      "upstream bad_alloc at every point",
+      "budget below each request threshold"
+    ],
+    "constructor_failure_cases": 130,
+    "native_hot_path": "C++ new/new[]/aligned-new denied during registration, boundary, ACK, reclaim and reuse",
+    "retry_rounds": 5,
+    "retry_commands": 10,
+    "eventual_exact_commits": 2,
+    "inherited_repository_account": true,
+    "old_lease_keeps_directory_charged": true,
+    "failed_reservation_preserves_ready_and_generation": true,
+    "native_callbacks": "fixed function pointer plus explicit shared owner; capturing std::function rejected with budget",
+    "total_process_RSS_bound": false,
+    "native_CLI_account_propagated": false
+  },
+  "remote": {
+    "directory": "/tmp/kvmem-lifecycle-owner-20261031-nm3rg_om",
+    "archive_sha256": "dd643d849885d7f9c034c1f1a8ed6a5ff599b4efe45287b2c18949e764ff70b2",
+    "source_sha256": {
+      "kvmem/CMakeLists.txt": "fe9f0f6b187df9b1519802820e5363628a668b666f7bf41fc7202d620f3ae497",
+      "kvmem/include/kvmem/checkpoint_image.hpp": "78120cc8dbf2e8e6269b2d2e6c94aef10d619e1673c038becabfe785999add8a",
+      "kvmem/include/kvmem/checkpoint_policy.hpp": "e79b694bc6a72ecb021c3e52d32a36783f4207312269775c568af6c2ff03d43c",
+      "kvmem/include/kvmem/cli_options.h": "761ec131aec4a7b0cb518580b9fe0fc0f9a3498ea3cc1dee9f904b4be232cc62",
+      "kvmem/include/kvmem/graph_recall.hpp": "a3749e12187e20aec78bb57eb1d577cb0c3416c4b952d0c76a20ca6ae32e05bb",
+      "kvmem/include/kvmem/historical_kv_audit.hpp": "639f833debfa296b9bf8b241957afba109090bc83a3c0eb1e61ecdbde244a251",
+      "kvmem/include/kvmem/historical_kv_auxiliary.hpp": "e402a51205b50132937f365838d0c525d09a3778ac6aaa29f743160d16a6e442",
+      "kvmem/include/kvmem/historical_kv_gc.hpp": "5fde427b38fe29be4d7583aeb7bb6c79ebdb560a00471d8737185f6b0a800268",
+      "kvmem/include/kvmem/historical_kv_page_features.hpp": "1db257038d84f11da09bfacded2ddd6833af33dfe59be0eec0c697eeee0a7898",
+      "kvmem/include/kvmem/historical_kv_page_gc.hpp": "3a0089567b57f273544967b3555b55d49247cbca741925468fc3a41c5046e13b",
+      "kvmem/include/kvmem/historical_kv_policy.hpp": "4c2e5d5d7d23492e7bd40b2ecd6e23e071fc223c4fe35f1a5c6c620c47fdab5e",
+      "kvmem/include/kvmem/historical_kv_redundancy.hpp": "b01b5ec15d611dbeaa11e856391235ed1fb81129f9702760c9ab5e85a4a104e1",
+      "kvmem/include/kvmem/historical_kv_repository.hpp": "655d561a4932c2531a1237fdc5705bceaa4d0ea37e4ca300025dec11e99067db",
+      "kvmem/include/kvmem/host_kv_storage.hpp": "ba4aaa1e26038e610e813bd63df5a7a27430d7efbb43b0b8bb0b495788df9f78",
+      "kvmem/include/kvmem/kv_content.hpp": "9964eb11d3e8d654e833e49d5a0f0e14f6e9328e949964d18e751d4cab880080",
+      "kvmem/include/kvmem/kvmem_backend.hpp": "af9ed7c8162976db2804c1d6627ab61120248d7101dd7d46212af1a13fecc1e4",
+      "kvmem/include/kvmem/kvmem_runtime.hpp": "61fd8379f735cfa254998cb25c2427a9287b9b000d69b0f93bb92cf9a1f0d8ad",
+      "kvmem/include/kvmem/kvmem_store.hpp": "66df297b45383a0cc61ea99f58cab497f72ba86cb06c1ac46f1520f715c205fe",
+      "kvmem/include/kvmem/launch_contract.hpp": "15043a404169185fb63338deb4a8c77b1e568619399a84dcd9c762db3c685d78",
+      "kvmem/include/kvmem/lrfu.hpp": "dbc0ba8938053e78ca0572117198bbf1412fb954f0def04dad620d829f888e28",
+      "kvmem/include/kvmem/mean_key_retrieval.hpp": "83fee1e631e342968e150a3783f1fce759a89f479dd396bb31cc6baf2c0d76a4",
+      "kvmem/include/kvmem/memory_contract.hpp": "38edf0cd9a0641273dc38794770d09b182ded1b5064d46dc4e8606324cbd3e5b",
+      "kvmem/include/kvmem/monitor.hpp": "cc17b4318ad5890e5f1d707e35b4440ece4d1c40bf32e3d748274b9885120fab",
+      "kvmem/include/kvmem/monitor_hardware.hpp": "3c228f060c3324223a0b25cc8837314a13ba350b878cc765400f3b4d8c205e41",
+      "kvmem/include/kvmem/monitor_rate.hpp": "6897df05da6cf6761542e077b5d97dd2db22e4a92427d011d69f510fb0ae67db",
+      "kvmem/include/kvmem/native_kv_payload.hpp": "3d62791520c0dcf24ecb2dd9786074a3088a65400b442dfd571fd414a5e39b09",
+      "kvmem/include/kvmem/page_softmax_cuda.hpp": "87b359cea062ee29ad2b85efdb15099d8bc0491bdf18f7cd8978c0f2f3875978",
+      "kvmem/include/kvmem/pinned_kv_tier.hpp": "be26285a94c133b1684f888c2af4bcf355a1895781e1efa2889145e924228302",
+      "kvmem/include/kvmem/prefix_checkpoint.hpp": "caa276c1361709d10dda3091c20c710dc8dffc94e6dcd17bfe2f91e3ed2ef5cd",
+      "kvmem/include/kvmem/query_policy.hpp": "d3526d3777365b988006daeab1bf90324b0e47a7278faced47d7325e8b35b088",
+      "kvmem/include/kvmem/raw_kv_store.hpp": "595d83de4a0b6e9818b9946cd0515e4f46aae8221c1eeb9a8e9669e5a3cf0409",
+      "kvmem/include/kvmem/request_control.hpp": "6a84aa52673f7444f24a577b1e07417b7e859cb215290baec0da73638091b566",
+      "kvmem/include/kvmem/retrieval_options.hpp": "67760a81a237708ab64c9e9acd48f7fca500d3f2a31026f12790a01ebab49a77",
+      "kvmem/include/kvmem/rope.hpp": "53f6e8d082c0770d273eaccf528b03ba29ff0918af50e4b3dfd8a5055405d12c",
+      "kvmem/include/kvmem/session_memory.hpp": "f29199e0ddb24a7a5b56f922725e2f6b35ced24398abe788beb6931e5c42a2d0",
+      "kvmem/include/kvmem/snapshot.hpp": "91713cab014a87fd469c3a8d9483169ec914a1cbd1bda9d25539abdd1c5599c0",
+      "kvmem/include/kvmem/snapshot_buffer.hpp": "56617192a10d1f348b5798b9c8d3ef592d47648add0f9d42fd216402ee0fcce3",
+      "kvmem/include/kvmem/speculative.hpp": "eeafecda631a96c783485c9b0d98a81f9a2151d71cd7f59521a93821f96b2a2c",
+      "kvmem/include/kvmem/spill_io.hpp": "34719b2a0f48cfa01e9a8dcadd68850b89f16bd39caaec3ce9eb4151d409181f",
+      "kvmem/include/kvmem/token_options.hpp": "fbfb7ed3b2adb57713e02f2e160b95e764534c90e16ddaa228ba4ba078aee812",
+      "kvmem/src/cuda/page_softmax.cu": "b6ba6441aba48245290e8d7a418a3aa6c01370c935dc09b21c01ce8d47dd82d2",
+      "kvmem/src/host/checkpoint_policy.cpp": "cab66e988ad26c73ba48246ff10bcfabd642ed7a09ce91d80e02fd379ece0c5e",
+      "kvmem/src/host/graph_recall.cpp": "cd4b44e9b2900ad40240a2dbf32c8cf5b739c3d5f13470ab0622098e3b1053bb",
+      "kvmem/src/host/historical_kv_auxiliary.cpp": "ede6e597a0c07eae9d8e1be6472b4d190872916bb8e8b1e7d4da81fbfd635b9e",
+      "kvmem/src/host/historical_kv_gc.cpp": "a24191cd1c3a17a4e56f2b37379e58f9a2dc6326462fefb0f07310be70ed92be",
+      "kvmem/src/host/historical_kv_page_features.cpp": "b713e5a6cc2ed0b50eb9097979a07cf220ed58b1d5631974c16d4d1f09571d03",
+      "kvmem/src/host/historical_kv_page_gc.cpp": "6e3c72291b0bf31078d4e8187515e1410017531aeadc776d844958aff4b9dcf8",
+      "kvmem/src/host/historical_kv_policy_lru.cpp": "beb8fb7613f0c08daea2ea4e9765e882874dc50993b60d4bbf183ce38672a36c",
+      "kvmem/src/host/historical_kv_redundancy.cpp": "d0f2157ee148514ba413a831a07788d5e699716c69946f76814e9070af7f68b1",
+      "kvmem/src/host/historical_kv_repository.cpp": "0ef60275a79e5755a8b12849c0755c7dc349104ad07aee73b36e4fa83d40ef16",
+      "kvmem/src/host/host_kv_storage.cpp": "6e13ba1bfdad998c6a6ce4817ffb197329ade27dc85b07092351fe5f472a12ad",
+      "kvmem/src/host/kv_content.cpp": "71de48c0d6df92d7a2136bb9e83716109df749f188859045c3b7f9e8384dd0c7",
+      "kvmem/src/host/kvmem_runtime.cpp": "5f2c1f6c15ba6b582afdf0f077fc47406800a279d599f448b4945a5c082dd797",
+      "kvmem/src/host/kvmem_store.cpp": "97b0af2dffb246eba254fa17373df3078b16ec4a7d94d5d9c2cb4890052b7160",
+      "kvmem/src/host/mean_key_retrieval.cpp": "51f808ae7e00b75b3e83b8ac8e1e76f38b4f82326359e468dede9caef22d49ef",
+      "kvmem/src/host/memory_contract.cpp": "cc571edda0552118353f5784ac2ccd9ca9754c52a72ed46f3ddd42614d42a45f",
+      "kvmem/src/host/native_kv_payload.cpp": "3ce20cf9c765444c3390c0b0b1f4cd3fd5036d47b857bb19f7fccc1adb32576c",
+      "kvmem/src/host/prefix_checkpoint.cpp": "84aff78773192af5de24c65a8e1de930a289571c68478b8ba8b59115b9161105",
+      "kvmem/src/host/raw_kv_store.cpp": "6e5bde72805eac086e1b6384e6de94a4a3b5fe0d6d21b2cd7b4c1a5044295878",
+      "kvmem/src/host/rope.cpp": "668afdd921c3c3dee770cc1e1840a028171e590975f1f991e0be9b0b663bfa16",
+      "kvmem/src/host/session_memory.cpp": "637be310d20103f13b8e8db82480c6528817cf0f629efa2e5cfd6eadfc6f9912",
+      "kvmem/src/host/spill_io.cpp": "14f6b2bcb9ac21c1fabe025d2a2a28381c4aeaff773de829a08b9d69614b92d6",
+      "kvmem/tests/backend_rebind_test.cpp": "2f88db8d78fc4cd8bc700e7875155769a33e84ba2d7902a2c57a73382d846ba7",
+      "kvmem/tests/checkpoint_image_test.cpp": "c44c805d7375ab531a21c8d5a29f5d18fdfa68f7aa2d661d429364546e55c6f5",
+      "kvmem/tests/checkpoint_policy_test.cpp": "66fd201a894e6815c43002d863ae16f0017e3d4188c0f5c722d8c631ff7fde21",
+      "kvmem/tests/graph_recall_cuda_test.cpp": "33f06fb8d8a0901daa5d5f9a2d95677f2ac6100a75e8e42e3378720601ee8cad",
+      "kvmem/tests/graph_recall_test.cpp": "dd0f7cf15fafbb5ff1175a04e2f07fdf4c6902bbdc02561e9c0a7f713f8e7df4",
+      "kvmem/tests/historical_gc_ninfer_core_test.cpp": "f845700aa438d03c7b3a851c1da1b5e81ec7df2c9cb1a97c531bbf41e1fea36a",
+      "kvmem/tests/historical_kv_auxiliary_budget_test.cpp": "d35bc1e86f9acd7d3dcb17b2f555036c1a4ff986e966d062218d1e1977df79b3",
+      "kvmem/tests/historical_kv_boundary_mailbox_test.cpp": "27544e0bb4f382112fe9af64234653b9daa051690ed2d4d1d835bc0ab8b37502",
+      "kvmem/tests/historical_kv_commit_conditions_test.cpp": "5732d11b98ad81bae1bd3cdaaf174b7949c7fb9e955852bd3a603b1f1dd08a4d",
+      "kvmem/tests/historical_kv_owner_budget_test.cpp": "21a759bdf2e1d7e38761e68f3b5af6e7aaa710d1be91b4fc5ecac1bb8717e6cd",
+      "kvmem/tests/historical_kv_range_lock_test.cpp": "45bbed69c9ca0cebc2d21372e1e8002a862c6bcc1f0604b7c7ba9d300e510820",
+      "kvmem/tests/historical_kv_score_evidence_test.cpp": "71db9acc5b4c59de9832b53d0267591c1eb0f371c4cdd6c3ac994bdf72a11e7f",
+      "kvmem/tests/historical_kv_witness_lifecycle_test.cpp": "dbecff0361e10274e0816880bf80a08a41075dd625d27e864d7e2c5f74ecc008",
+      "kvmem/tests/host_kv_storage_test.cpp": "6bb913838ee20d097df8840cd240461756e2fb1e78dd7748d0aa097054cd7258",
+      "kvmem/tests/kv_content_test.cpp": "d56c09beb0c2327d0b381957562bc17807c042b3335d2ee382606155ea0320ce",
+      "kvmem/tests/kvmem_runtime_test.cpp": "75f529e9e1fb0e0406930bdf08125752afc42be675f5168f4b59e3dea7bb45e0",
+      "kvmem/tests/kvmem_store_test.cpp": "b0137f75e4c3aa9e9b3e602508f22f6839813246ce1ba485bc8aafd52f5a1da0",
+      "kvmem/tests/mean_key_retrieval_test.cpp": "9dcc5828067e3dfa24b22e02d42dfdc9e71420b778ef62a113cef79afafb826b",
+      "kvmem/tests/memory_contract_test.cpp": "2dee409fb853f9bc1cb40e54fc3f9c5f88c6f9cc1fc37fd4e96b425d8dcef2d5",
+      "kvmem/tests/memory_test_support.hpp": "6ab869a5bfe66e4c212a58005a187139387ddc0fdbdb19c4105343ffbc95b6f9",
+      "kvmem/tests/native_kv_payload_test.cpp": "d88e7b392f7c9e53af4333dad33101609c3a0c3ae9d7306ca04428a4f37e4c98",
+      "kvmem/tests/native_residency_test.cpp": "47569ea858de40a2a247bf8b2654caf27823022c3e9df412d6eba553996f9216",
+      "kvmem/tests/pinned_kv_tier_test.cpp": "5f0bf4c544002b07c7e233d251dc777269957dde08739e54b6690c672ec5a2ad",
+      "kvmem/tests/prefix_checkpoint_test.cpp": "7ee3ef40882d9749a7903427fd53c70fd398824643d905ad90b493ee59e26cf7",
+      "kvmem/tests/query_policy_test.cpp": "2a23558d270b134b38111ad74af0d3002d853510d5a7435c8311fbae5929851d",
+      "kvmem/tests/raw_kv_store_test.cpp": "9923c02c892784d0d414f2775d1b47ee5e84fc6caea3ec050dcfaed73b8c4698",
+      "kvmem/tests/spill_io_test.cpp": "7136b8994e8123398cdcc554c29782ed108df26f554321ed7e996a634a36a198",
+      "kvmem/tests/tiered_kv_storage_test.cpp": "8ab3fdabfc5528c02797278a316a90185ed6404e18bcda5b6a95126e9d242ccb",
+      "kvmem/tests/token_options_test.cpp": "0d06bf407737baa850c66152e8a82590f3b556fa3b17f08120b5341616c67b4a"
+    },
+    "asan_ubsan": "passed",
+    "tests": [
+      "historical_gc_ninfer_core_test",
+      "historical_kv_auxiliary_budget_test",
+      "historical_kv_boundary_mailbox_test",
+      "historical_kv_commit_conditions_test",
+      "historical_kv_owner_budget_test",
+      "historical_kv_range_lock_test",
+      "historical_kv_score_evidence_test",
+      "historical_kv_witness_lifecycle_test"
+    ],
+    "tsan": "no_new_conclusion; prior environment unavailable"
+  },
+  "new_gpu_or_agent_runs": false,
+  "production_qualified": false,
+  "stage_B_complete": false,
+  "next": [
+    "native auxiliary-budget configuration/factory/source propagation",
+    "producer staging and domain/request admission",
+    "worker health/failure publication",
+    "native GPU qualification",
+    "remaining stages C-F"
+  ]
+}

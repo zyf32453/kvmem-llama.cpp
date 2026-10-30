@@ -21,6 +21,9 @@ public:
     explicit HistoricalKvThinkingRanges(std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {})
         : spans_(HistoricalKvAuxAllocator<Span>(auxiliary, HistoricalKvAuxKind::Ranges)),
           completed_replies_(spans_.get_allocator()) {}
+    std::shared_ptr<HistoricalKvAuxBudget> auxiliary_budget() const noexcept {
+        return spans_.get_allocator().budget();
+    }
     void arm() noexcept;
     void disarm() noexcept;
     bool armed() const noexcept;
@@ -94,6 +97,7 @@ public:
     virtual std::optional<HistoricalKvEpochGuard> commit_score_guard(uint64_t) const noexcept {
         return std::nullopt;
     }
+    virtual std::shared_ptr<HistoricalKvAuxBudget> auxiliary_budget() const noexcept { return {}; }
 };
 class HistoricalKvRedundancyPolicy final : public HistoricalKvPolicy {
 public:
@@ -133,6 +137,7 @@ public:
         HistoricalKvWorkBudget, HistoricalKvDecisionBuffer &) override;
     void on_result(const HistoricalKvCommitResult &) noexcept override;
     Metrics metrics() const noexcept override;
+    std::shared_ptr<HistoricalKvAuxBudget> auxiliary_budget() const noexcept override { return config_.auxiliary; }
 private:
     struct Row {
         const HistoricalKvBlockMeta * meta;

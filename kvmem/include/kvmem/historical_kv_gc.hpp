@@ -39,6 +39,9 @@ public:
         // it must not release Host resources or block in this callback.
         void (*on_boundary_retired)(void *, HistoricalKvHandle) noexcept = nullptr;
         void * boundary_context = nullptr;
+        // Null inherits the repository account. A configured account requires
+        // its policy and any configured repository to share that identity.
+        std::shared_ptr<HistoricalKvAuxBudget> auxiliary;
     };
     struct Stats {
         uint64_t ticks = 0;
@@ -69,6 +72,10 @@ public:
 
     HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
                    std::unique_ptr<HistoricalKvPolicy> policy, Config config);
+    HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
+                   HistoricalKvAuxOwner<HistoricalKvPolicy> policy, Config config);
+    HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository, std::nullptr_t, Config config)
+        : HistoricalKvGc(std::move(repository), std::unique_ptr<HistoricalKvPolicy>{}, config) {}
     ~HistoricalKvGc();
     HistoricalKvGc(const HistoricalKvGc &) = delete;
     HistoricalKvGc & operator=(const HistoricalKvGc &) = delete;
@@ -101,7 +108,7 @@ private:
     void run() noexcept;
 
     std::shared_ptr<HistoricalKvRepository> repository_;
-    std::unique_ptr<HistoricalKvPolicy> policy_;
+    HistoricalKvAuxOwner<HistoricalKvPolicy> policy_;
     Config config_;
     mutable std::mutex tick_mu_;
     // One outstanding batch, one serialized worker, one serialized decode
@@ -112,34 +119,34 @@ private:
     static_assert(std::atomic<PendingState>::is_always_lock_free,
                   "historical GC boundary requires lock-free mailbox state");
     std::atomic<PendingState> pending_state_{PendingState::Idle};
-    std::vector<HistoricalKvDeleteIntent> prepared_;
-    std::vector<HistoricalKvCommitConditions> prepared_conditions_;
-    std::vector<HistoricalKvDeleteIntent> pending_intents_;
-    std::vector<HistoricalKvCommitConditions> pending_conditions_;
-    std::vector<HistoricalKvCommitCode> pending_codes_;
+    HistoricalKvAuxVector<HistoricalKvDeleteIntent> prepared_;
+    HistoricalKvAuxVector<HistoricalKvCommitConditions> prepared_conditions_;
+    HistoricalKvAuxVector<HistoricalKvDeleteIntent> pending_intents_;
+    HistoricalKvAuxVector<HistoricalKvCommitConditions> pending_conditions_;
+    HistoricalKvAuxVector<HistoricalKvCommitCode> pending_codes_;
     // Worker-owned acknowledgement buffers. The worker takes the completed
     // batch before returning the mailbox to Idle; callbacks and diagnostic IO
     // cannot delay the boundary or access a buffer owned by the foreground.
-    std::vector<HistoricalKvDeleteIntent> acknowledged_intents_;
-    std::vector<HistoricalKvCommitConditions> acknowledged_conditions_;
-    std::vector<HistoricalKvCommitCode> acknowledged_codes_;
+    HistoricalKvAuxVector<HistoricalKvDeleteIntent> acknowledged_intents_;
+    HistoricalKvAuxVector<HistoricalKvCommitConditions> acknowledged_conditions_;
+    HistoricalKvAuxVector<HistoricalKvCommitCode> acknowledged_codes_;
     bool audit_ = false;
     // Allocated only for opt-in auditing. Exact generations prevent associating
     // a reused slot's release with an earlier proposal/round.
-    std::vector<HistoricalKvDeleteIntent> audit_committed_;
+    HistoricalKvAuxVector<HistoricalKvDeleteIntent> audit_committed_;
     HistoricalKvSnapshot round_;
     bool round_active_ = false;
     HistoricalKvRepository::RangeObservation observation_;
     HistoricalKvDecisionBuffer decisions_;
     HistoricalKvPressure pressure_{};
-    std::vector<HistoricalKvDeleteIntent> retry_;
-    std::vector<HistoricalKvCommitConditions> retry_conditions_;
+    HistoricalKvAuxVector<HistoricalKvDeleteIntent> retry_;
+    HistoricalKvAuxVector<HistoricalKvCommitConditions> retry_conditions_;
     // One generation per physical slot is enough to suppress duplicate
     // commands across all yielded batches of the same policy round.
-    std::vector<uint64_t> seen_generation_;
+    HistoricalKvAuxVector<uint64_t> seen_generation_;
     // Shadow mode simulates committed retirements as pending Ready credit so
     // the same generation is not proposed on every polling tick.
-    std::vector<uint64_t> shadow_generation_;
+    HistoricalKvAuxVector<uint64_t> shadow_generation_;
     uint64_t next_round_id_ = 1;
     uint32_t reclaim_cursor_ = 0;
     uint32_t collect_cursor_ = 0;

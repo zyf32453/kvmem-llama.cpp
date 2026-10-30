@@ -33,6 +33,7 @@ public:
         // reads only this allocator's thread-safe byte counters.
         std::optional<HostKvStorage> physical_storage;
         uint64_t physical_page_bytes = 0;
+        std::shared_ptr<HistoricalKvAuxBudget> auxiliary;
     };
     struct RetiredPage {
         uint32_t page = 0;
@@ -43,6 +44,9 @@ public:
     // A native backend may inject a strategy; the bridge still owns protection,
     // boundary retirement and physical Host-record release.
     HistoricalKvPageGc(Config config, std::unique_ptr<HistoricalKvPolicy> policy);
+    HistoricalKvPageGc(Config config, HistoricalKvAuxOwner<HistoricalKvPolicy> policy);
+    HistoricalKvPageGc(Config config, std::nullptr_t)
+        : HistoricalKvPageGc(config, std::unique_ptr<HistoricalKvPolicy>{}) {}
     ~HistoricalKvPageGc();
     HistoricalKvPageGc(const HistoricalKvPageGc &) = delete;
     HistoricalKvPageGc & operator=(const HistoricalKvPageGc &) = delete;
@@ -59,7 +63,7 @@ public:
     void manual_tick();
     // Returned pages are stable until the next commit_boundary() call. The
     // caller must mark each page unavailable before another working-set choice.
-    const std::vector<RetiredPage> & commit_boundary() noexcept;
+    const HistoricalKvAuxVector<RetiredPage> & commit_boundary() noexcept;
     // Move the exact native owner out of the selectable archive at the boundary.
     // The worker normally destroys it later. An urgent prefill admission may
     // drop the owner now; any in-flight Host reader still holds its lease and
@@ -78,10 +82,10 @@ private:
     const Config config_;
     std::shared_ptr<ReleaseState> releases_;
     std::shared_ptr<HistoricalKvRepository> repository_;
-    std::unique_ptr<HistoricalKvGc> manager_;
-    std::vector<HistoricalKvHandle> handles_;
-    std::vector<uint32_t> slot_to_page_;
-    std::vector<RetiredPage> committed_;
+    HistoricalKvAuxOwner<HistoricalKvGc> manager_;
+    HistoricalKvAuxVector<HistoricalKvHandle> handles_;
+    HistoricalKvAuxVector<uint32_t> slot_to_page_;
+    HistoricalKvAuxVector<RetiredPage> committed_;
 };
 
 } // namespace kvmem

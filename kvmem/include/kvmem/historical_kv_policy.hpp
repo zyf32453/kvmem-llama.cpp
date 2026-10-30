@@ -11,6 +11,7 @@
 #include <optional>
 #include <memory>
 #include <vector>
+#include "kvmem/historical_kv_auxiliary.hpp"
 
 namespace kvmem {
 class HistoricalKvThinkingRanges;
@@ -94,7 +95,7 @@ enum class HistoricalKvPrepareCode { Ready, Reevaluate, Unsupported };
 struct HistoricalKvSnapshot {
     uint64_t round_id = 0;
     uint64_t incarnation = 0;
-    std::vector<HistoricalKvBlockMeta> blocks;
+    HistoricalKvAuxVector<HistoricalKvBlockMeta> blocks;
 };
 
 struct HistoricalKvPressure {
@@ -159,16 +160,16 @@ struct HistoricalKvStepResult {
 
 class HistoricalKvDecisionBuffer {
 public:
-    explicit HistoricalKvDecisionBuffer(size_t limit);
+    explicit HistoricalKvDecisionBuffer(size_t limit, std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {});
 
     size_t remaining() const { return limit_ - values_.size(); }
     bool push(const HistoricalKvDeleteIntent & intent);
-    const std::vector<HistoricalKvDeleteIntent> & values() const { return values_; }
+    const HistoricalKvAuxVector<HistoricalKvDeleteIntent> & values() const { return values_; }
     // Call only after the manager has retained or acknowledged every intent.
     void clear_after_ack() { values_.clear(); }
 
 private:
-    std::vector<HistoricalKvDeleteIntent> values_;
+    HistoricalKvAuxVector<HistoricalKvDeleteIntent> values_;
     size_t limit_;
 };
 
@@ -194,6 +195,8 @@ public:
                                         HistoricalKvDecisionBuffer & out) = 0;
     virtual void on_result(const HistoricalKvCommitResult &) noexcept {}
     virtual Metrics metrics() const noexcept { return {}; }
+    // Explicit accounting contract, checked by budgeted native bridges.
+    virtual std::shared_ptr<HistoricalKvAuxBudget> auxiliary_budget() const noexcept { return {}; }
 };
 
 // Deliberately independent of age, hotness, GPU residency, active status,
@@ -206,7 +209,11 @@ bool historical_kv_can_request_delete(const HistoricalKvBlockMeta & block,
 class HistoricalKvLruPolicy final : public HistoricalKvPolicy {
 public:
     explicit HistoricalKvLruPolicy(size_t capacity, bool keep_mandatory = true,
-        std::shared_ptr<HistoricalKvThinkingRanges> content_ranges = {});
+        std::shared_ptr<HistoricalKvThinkingRanges> content_ranges = {},
+        std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {});
+    std::shared_ptr<HistoricalKvAuxBudget> auxiliary_budget() const noexcept override {
+        return candidates_.get_allocator().budget();
+    }
     bool permits(const HistoricalKvBlockMeta & block) const noexcept override;
     HistoricalKvPrepareCode prepare_commit(const HistoricalKvBlockMeta &,
                         HistoricalKvCommitConditions &) const noexcept override;
@@ -227,7 +234,7 @@ private:
     bool done_ = false;
     uint32_t wanted_ = 0;
     HistoricalKvStepStatus terminal_ = HistoricalKvStepStatus::Complete;
-    std::vector<const HistoricalKvBlockMeta *> candidates_;
+    HistoricalKvAuxVector<const HistoricalKvBlockMeta *> candidates_;
 };
 
 // Optional base for future strategies, including redundancy. It owns no

@@ -18,6 +18,9 @@ public:
     HistoricalKvPageFeatures(uint32_t logical_pages, size_t dimensions,
         std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {});
     size_t dimensions() const noexcept override { return dimensions_; }
+    std::shared_ptr<HistoricalKvAuxBudget> auxiliary_budget() const noexcept override {
+        return pages_.get_allocator().budget();
+    }
     bool begin_round(uint64_t incarnation) override;
     bool read(const HistoricalKvBlockMeta & meta, float * descriptor, double & importance) override;
     bool refresh_before_rank() const noexcept override { return true; }

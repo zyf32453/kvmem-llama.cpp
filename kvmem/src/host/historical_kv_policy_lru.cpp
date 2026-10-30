@@ -25,7 +25,8 @@ bool HistoricalKvCommitConditions::matches(const HistoricalKvBlockMeta & block) 
     return true;
 }
 
-HistoricalKvDecisionBuffer::HistoricalKvDecisionBuffer(size_t limit) : limit_(limit) {
+HistoricalKvDecisionBuffer::HistoricalKvDecisionBuffer(size_t limit, std::shared_ptr<HistoricalKvAuxBudget> auxiliary)
+    : limit_(limit), values_(HistoricalKvAuxAllocator<HistoricalKvDeleteIntent>(auxiliary, HistoricalKvAuxKind::Decisions)) {
     values_.reserve(limit);
 }
 
@@ -44,9 +45,12 @@ bool historical_kv_can_request_delete(const HistoricalKvBlockMeta & block,
 }
 
 HistoricalKvLruPolicy::HistoricalKvLruPolicy(size_t capacity, bool keep_mandatory,
-    std::shared_ptr<HistoricalKvThinkingRanges> content_ranges)
-    : capacity_(capacity), keep_mandatory_(keep_mandatory), content_ranges_(std::move(content_ranges)) {
+    std::shared_ptr<HistoricalKvThinkingRanges> content_ranges, std::shared_ptr<HistoricalKvAuxBudget> auxiliary)
+    : capacity_(capacity), keep_mandatory_(keep_mandatory), content_ranges_(std::move(content_ranges)),
+      candidates_(HistoricalKvAuxAllocator<const HistoricalKvBlockMeta *>(auxiliary, HistoricalKvAuxKind::Policy)) {
     if (capacity == 0) throw std::invalid_argument("historical KV policy capacity");
+    if (auxiliary && content_ranges_ && content_ranges_->auxiliary_budget() != auxiliary)
+        throw std::invalid_argument("historical LRU range budget mismatch");
     candidates_.reserve(capacity);
 }
 
