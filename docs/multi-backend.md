@@ -68,6 +68,8 @@ llama.cpp 示例：
 
 ## ninfer 功能与组合
 
+本分支的源码 worker 新增默认关闭的 Host 历史页 GC：`--kvmem-gc-lru` 与 `--kvmem-gc-redundancy` 二选一，后者要求 `--kvmem-query-scorer meanq-cosine`。首轮独立验收使用 Qwen3.8-27B IQ3_S、RK4V4 KV、单路 RAM、原生 64-token 页和至少一页 recent，包含 MTP4；不扩展下文已有的八路、SSD 或发布包验收范围。开启 GC 时服务明确要求 `--max-concurrency 1`。实现、测试结果及限制见 [NInfer 后台 GC 接入记录](ninfer-historical-gc-integration.md)。
+
 当前源码的召回传输保留 64 MiB 目标分批中转，并在批内合并连续物理页；可用默认关闭的
 `KVMEM_TRANSFER_TRACE=1` 查看拷贝规划、字节和分段计时。使用方法、计时边界及验证范围见
 [召回传输合并与诊断](ninfer-recall-transfer-validation-20261019.md)。
