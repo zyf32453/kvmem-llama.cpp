@@ -1,0 +1,165 @@
+{
+  "date": "2026-10-31",
+  "stage": "B1",
+  "status": "host_candidate_verified_stage_B_incomplete",
+  "parent_commit": "ca2bbfefc27ca36fc590ea9a9ec84df265e9a4eb",
+  "manifest_sha256": "67a9e86edc80aaf42ebaf473cd3185d6940230534cbd05651fcbbffb583c745f",
+  "changed_product_or_test_files": [
+    "kvmem/CMakeLists.txt",
+    "kvmem/include/kvmem/historical_kv_gc.hpp",
+    "kvmem/src/host/historical_kv_gc.cpp",
+    "kvmem/tests/historical_kv_boundary_mailbox_test.cpp"
+  ],
+  "frozen_source_pins": 79,
+  "native_patch_hashes": 24,
+  "legacy_control": {
+    "exit_code": 1,
+    "error": "boundary waited for worker mutexes",
+    "library_sha256": "1b4a8669bb72c60f213e55973726445fd55bfb56d4eee2a9a088b58fad745bdf"
+  },
+  "host_contracts": {
+    "results": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.963539
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.687586
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 0.0837863
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 15.7653
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.99472
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.879599
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.591668
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.639868
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.716619
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.701488
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.580617
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.507746
+      }
+    ],
+    "binary_sha256": {
+      "historical_gc_ninfer_core_test": "4d42f7deb39f53bd8c39f60b73660a4acdc8195091708e59a5c720ae7c809c29",
+      "memory_contract_test": "1716d4d9a4ee844dde2b5c631a8cc8f52cda84984dba5b68e323b1ef2d7dad5e",
+      "native_kv_payload_test": "c197e6f60176af26401d72b47999edaa21f37829b6a89fe16e4b1bfb0c3e985c",
+      "host_kv_storage_test": "345ef9f42a4aebd0fcdcf2777905d028dfa5a77eab4dc048fddc353d379f1253",
+      "spill_io_test": "cd54e2b66fe0fe67a346b01e8eec7e44434a67c22b185b19e9d3789212a6a63b",
+      "tiered_kv_storage_test": "02ba09bbe5f15e485a1c9cf4bf5450540c7006394d7569c646058e4e2ff2497f",
+      "native_residency_test": "a568f2ba90325bffece9f063dc9bb146484f570a2eff0164e7a9f8e4f7acb0a7",
+      "kv_content_test": "68eef24be8cd8c22c064098372e08e2d9dd3b754007f473bf68016673ba0fe30",
+      "prefix_checkpoint_test": "a5c5f8af90e94cf105106f98e939d8c017ff32a89b496ebe3a9a45d8157a9181",
+      "checkpoint_policy_test": "e6b0b98333ca1595fe8c587c4425204ddde185455c642c8ab4e9e2d070dd80c5",
+      "checkpoint_image_test": "a51371604e02fe9954190432b9d2b574d3912b49e68b9bfc7106114ebc1fa08f",
+      "historical_kv_boundary_mailbox_test": "2daef7fa5b795ebb5d6308649803666e4462856ea1ddb56f9ae988f05bb3568f"
+    },
+    "compiler": "C:/mingw/mingw64/bin/c++.exe",
+    "build_type": "Debug"
+  },
+  "gate_unit_tests": 9,
+  "windows_stress": {
+    "exchanges": 500,
+    "original_15_second_limit_failed": true,
+    "diagnostic_round_at_timeout": 468,
+    "diagnostic_ticks": 929,
+    "final_test_deadline_seconds": 45,
+    "ctest_timeout_seconds": 60,
+    "exactly_once_assertions_unchanged": true
+  },
+  "remote": {
+    "archive_sha256": "ad458443e5bacf84c27798bfc6bdaa0958725b22457d7f3cb7f746aae11d8dde",
+    "source_files": {
+      "kvmem/include/kvmem/checkpoint_image.hpp": "ed84c74033cc026eb6036c3a23cb2071e6194b0685f487e1694fe5d0e224602d",
+      "kvmem/include/kvmem/checkpoint_policy.hpp": "caec685f74cae158ed2776bd531dc8534dd4530f2f0c5275014f59aa074be161",
+      "kvmem/include/kvmem/cli_options.h": "a362dc0beec031fd71866c93eb8c2fed73389455962d87628372705ab79b80db",
+      "kvmem/include/kvmem/graph_recall.hpp": "a728958cc8ca39c533505c4c716379650140c0161ffe98a270296af4daa29364",
+      "kvmem/include/kvmem/historical_kv_audit.hpp": "40baebdd06d372505aefea38fb4ad51d3982102b46a661224f872afd18fb496e",
+      "kvmem/include/kvmem/historical_kv_gc.hpp": "3e8ff21f2b29a3ba0052d9428b945c836176027d07b8c4f83222ed6c075f3d30",
+      "kvmem/include/kvmem/historical_kv_page_features.hpp": "b77dfac0858f8c17e2015412a02336827f40388f0ffbc45f549a8706d6be149d",
+      "kvmem/include/kvmem/historical_kv_page_gc.hpp": "e4122d868e2dfade48b3ae49023b05c95a67f16a81beb387e1434f8b34db2357",
+      "kvmem/include/kvmem/historical_kv_policy.hpp": "bbc28f1e9984b925f4bab70100d75db0554345de33920ef8a8d2ece6d180a8f5",
+      "kvmem/include/kvmem/historical_kv_redundancy.hpp": "223a14826057e4f8c6ca2a0202d41e01cecee14924a6123ef7c12ec9d07f68fe",
+      "kvmem/include/kvmem/historical_kv_repository.hpp": "2090e67c8a1ed69a36218ea2ab13deae35d26fa53f9c6fe658c2e1cf032315d3",
+      "kvmem/include/kvmem/host_kv_storage.hpp": "20db85ec462769f2e22434a390164531a61625fdf2e80838b8caa65d9c519c3a",
+      "kvmem/include/kvmem/kv_content.hpp": "e5a1507593ca9850e3be41f93e28f8090fafeb1c9a50eef2b848cbf66d1bf82f",
+      "kvmem/include/kvmem/kvmem_backend.hpp": "5b5c86a7057011eb56c20a88c5004ac4123405bc5607dcf535ad5d65571ab9a6",
+      "kvmem/include/kvmem/kvmem_runtime.hpp": "021a7f01117a69cb2484c81873aa5d10b7bd88d212e2117d45d05baaabf6d848",
+      "kvmem/include/kvmem/kvmem_store.hpp": "acc6fdfaeac61006ae98c9ec76dca88192b29302c37ddafacbc45fa15e8592ba",
+      "kvmem/include/kvmem/launch_contract.hpp": "be68d949b48813d52bff36f7229131c6a9d78000dad26018ea2930ab247ef238",
+      "kvmem/include/kvmem/lrfu.hpp": "eed2f47ed474c60d5fc4a4cd32323c2b069582db6a5d20e3a12d8831f36875a3",
+      "kvmem/include/kvmem/mean_key_retrieval.hpp": "69b326a6a93049a1842dfef4e8c90978eaffe3fbe0d99bc8d23aa03713b17e69",
+      "kvmem/include/kvmem/memory_contract.hpp": "bc3774997a1b88daa23e6287845484649fbe36563ef8608c37fd116a16f79f6c",
+      "kvmem/include/kvmem/monitor.hpp": "0d84241d676bc4f5ff7fcfd5396d32fbb1c58e3b6fbd5347cf120c43f33124e7",
+      "kvmem/include/kvmem/monitor_hardware.hpp": "6705bd8e95d34d3a12a7c61e372ad98eef7792dc465f987eee292dea8454a983",
+      "kvmem/include/kvmem/monitor_rate.hpp": "cc993f1220c4eef6ec44f95a53dfd4b3b001e216b15b46999381a841b751d407",
+      "kvmem/include/kvmem/native_kv_payload.hpp": "5271dac77872386eb2377e92ecb803c22e277f101e14b83d34d10c5b162c9316",
+      "kvmem/include/kvmem/page_softmax_cuda.hpp": "5b70c65fe3dc8c3c8242f9f4e268e5464da871426336da83f92a07d31c78da14",
+      "kvmem/include/kvmem/pinned_kv_tier.hpp": "ce420b9c2850cf0248442c06304a86ffca592e4727fa80bccfee50f6088a4e2f",
+      "kvmem/include/kvmem/prefix_checkpoint.hpp": "e375a6c15e6884878654ebfa5dec6d4a16466f9f9e23435c695b1e749fe52631",
+      "kvmem/include/kvmem/query_policy.hpp": "b5788f4f6fe48b674c43f99165462ed5685f421760d47dd634b5494810a6c363",
+      "kvmem/include/kvmem/raw_kv_store.hpp": "31905f8928c6fddb689281e794ffad21b8976febcc87a3246ca5bf1a0bb957c8",
+      "kvmem/include/kvmem/request_control.hpp": "7da6e4cf25d46cca00d5696733407fe15c0d214a96fa89cae845b5a6de33ddf0",
+      "kvmem/include/kvmem/retrieval_options.hpp": "955f6fbd3215cbf645c1ad01a4b299f449458e40d1e4a2f10334e067a1659064",
+      "kvmem/include/kvmem/rope.hpp": "06f40deb5ee002e695cab4af442cfcda690a6d1bf3f0a9379773012927356fb3",
+      "kvmem/include/kvmem/session_memory.hpp": "2a8e3bd0b4860225934043f760045210de4350c4462d82abdd3fcc028ceae3f7",
+      "kvmem/include/kvmem/snapshot.hpp": "312c074bd272481960e2e65c1f4a1685213648dce4c41e8160aa8ba04c7520b0",
+      "kvmem/include/kvmem/snapshot_buffer.hpp": "0423bba5a4b1bdc6be8f59d592c61066b35bdd8c8b0071319500c432b6b03e1f",
+      "kvmem/include/kvmem/speculative.hpp": "e773a4f12a368e7158615edc3e7f327b8432be589807f316c9dfb3aa2e3a8afa",
+      "kvmem/include/kvmem/spill_io.hpp": "4442db50243ae14e534a6913a48508d8cffc84429e0fd9910634d07febe110fc",
+      "kvmem/include/kvmem/token_options.hpp": "5955108583c01b00ac4c56fa190d517217b3b17c4edad5d9732e56bd7f0b4d91",
+      "kvmem/src/host/historical_kv_gc.cpp": "49684d7ca409f83de29b34ba58c82d04dbffcfc9b4e11101bd2748f70b8b9e13",
+      "kvmem/src/host/historical_kv_policy_lru.cpp": "94792908a3d71c80cf39d2e867b53e773ce320b013d541ee1fcadd25562bc0b6",
+      "kvmem/src/host/historical_kv_redundancy.cpp": "35c231c7216115f1a24b7c664f60e29f516c2a1a2f5d38a28b08f7b39e6358de",
+      "kvmem/src/host/historical_kv_repository.cpp": "1c463670e3b666112b1afbaac5b49caeb2155df1b156b73c72ecd8c0fae4099e",
+      "kvmem/tests/historical_kv_boundary_mailbox_test.cpp": "a490d07f9220869e7c9896b1f36d5c67b7040522f4e3cd89ddd164d6e7d7e4a5"
+    },
+    "asan_ubsan": "passed",
+    "asan_exchanges": 500,
+    "tsan": "unavailable_before_test_entry",
+    "tsan_exit_codes": [
+      66,
+      66
+    ],
+    "tsan_diagnostic": "unexpected memory mapping; ordinary and non-PIE variants"
+  },
+  "old_stage_A_gate": "rejects_current_code_as_expected",
+  "new_gpu_or_agent_runs": false,
+  "production_qualified": false,
+  "stage_B_complete": false,
+  "remaining": [
+    "typed foreground conditions instead of arbitrary policy permits callback",
+    "structured witness/version evidence",
+    "auxiliary resource bounds and worker failure paths",
+    "TSan on a compatible environment",
+    "native CUDA integration and complete six-stage delivery"
+  ]
+}

@@ -158,12 +158,13 @@ void HistoricalKvGc::audit_reclaim(const HistoricalKvBlockMeta & block,
 
 HistoricalKvGc::BoundaryResult HistoricalKvGc::commit_at_decode_boundary() noexcept {
     BoundaryResult result;
-    if (!config_.retire_at_decode_boundary || config_.mode != Mode::Delete ||
-        !pending_ready_.load(std::memory_order_acquire)) return result;
-    // The worker never holds this mutex while scoring, observing, or
-    // reclaiming. It publishes only a preallocated, bounded intent batch.
-    std::lock_guard<std::mutex> guard(pending_mu_);
-    if (pending_state_ != PendingState::Prepared) return result;
+    if (!config_.retire_at_decode_boundary || config_.mode != Mode::Delete) return result;
+    auto prepared = PendingState::Prepared;
+    // One attempt: skip an unpublished, in-use, or unacknowledged batch. The
+    // acquire pairs with the worker's Prepared publication; no spinning or
+    // waiting for the worker, and no vector mutation on this path.
+    if (!pending_state_.compare_exchange_strong(prepared, PendingState::Committing,
+            std::memory_order_acquire, std::memory_order_relaxed)) return result;
     const auto ns = [] {
         return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -182,8 +183,9 @@ HistoricalKvGc::BoundaryResult HistoricalKvGc::commit_at_decode_boundary() noexc
     result.finished_ns = ns();
     ++boundary_batches_;
     boundary_committed_.fetch_add(result.committed, std::memory_order_relaxed);
-    pending_state_ = PendingState::Committed;
-    pending_ready_.store(false, std::memory_order_release);
+    // Publish result codes only after every adapter tombstone notification.
+    // The worker cannot reuse these buffers while the boundary is in flight.
+    pending_state_.store(PendingState::Committed, std::memory_order_release);
     return result;
 }
 
@@ -191,16 +193,13 @@ void HistoricalKvGc::manual_tick() {
     std::lock_guard<std::mutex> guard(tick_mu_);
     ++ticks_;
     if (config_.retire_at_decode_boundary) {
-        {
-            std::lock_guard<std::mutex> pending_guard(pending_mu_);
-            if (pending_state_ == PendingState::Committed) {
-                acknowledged_intents_.swap(pending_intents_);
-                acknowledged_codes_.swap(pending_codes_);
-                pending_state_ = PendingState::Idle;
-            }
+        if (pending_state_.load(std::memory_order_acquire) == PendingState::Committed) {
+            acknowledged_intents_.swap(pending_intents_);
+            acknowledged_codes_.swap(pending_codes_);
+            pending_state_.store(PendingState::Idle, std::memory_order_release);
         }
-        // The foreground shares pending_mu_. Neither a policy callback nor
-        // opt-in diagnostic IO may run while that mutex is held.
+        // The worker owns these buffers even after the mailbox becomes Idle.
+        // Slow policy callbacks/audit output cannot hold a foreground lock.
         for (size_t i = 0; i < acknowledged_intents_.size(); ++i) {
             acknowledge(acknowledged_intents_[i], acknowledged_codes_[i]);
             if (acknowledged_codes_[i] == HistoricalKvCommitCode::Retry)
@@ -233,19 +232,16 @@ void HistoricalKvGc::manual_tick() {
                       reclaim_cursor_ + reclaim_scan;
     if (config_.mode == Mode::Off) return;
     if (config_.retire_at_decode_boundary) {
-        std::lock_guard<std::mutex> pending_guard(pending_mu_);
-        if (pending_state_ != PendingState::Idle) return;
+        if (pending_state_.load(std::memory_order_acquire) != PendingState::Idle) return;
     }
 
     // Retry retained commands before taking a fresh snapshot. A previous
     // failure must not cause the next round to over-delete new candidates.
     if (!retry_.empty()) {
         if (config_.retire_at_decode_boundary) {
-            std::lock_guard<std::mutex> pending_guard(pending_mu_);
             pending_intents_.swap(retry_);
             pending_codes_.resize(pending_intents_.size());
-            pending_state_ = PendingState::Prepared;
-            pending_ready_.store(true, std::memory_order_release);
+            pending_state_.store(PendingState::Prepared, std::memory_order_release);
             return;
         }
         size_t write = 0;
@@ -389,11 +385,9 @@ void HistoricalKvGc::manual_tick() {
         }
     }
     if (!prepared_.empty()) {
-        std::lock_guard<std::mutex> pending_guard(pending_mu_);
         pending_intents_.swap(prepared_);
         pending_codes_.resize(pending_intents_.size());
-        pending_state_ = PendingState::Prepared;
-        pending_ready_.store(true, std::memory_order_release);
+        pending_state_.store(PendingState::Prepared, std::memory_order_release);
     }
     decisions_.clear_after_ack();
     if (step.status != HistoricalKvStepStatus::Yielded) {

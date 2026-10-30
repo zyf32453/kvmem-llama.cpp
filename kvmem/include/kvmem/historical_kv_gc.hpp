@@ -100,15 +100,20 @@ private:
     std::unique_ptr<HistoricalKvPolicy> policy_;
     Config config_;
     mutable std::mutex tick_mu_;
-    mutable std::mutex pending_mu_;
-    enum class PendingState { Idle, Prepared, Committed };
-    PendingState pending_state_ = PendingState::Idle;
-    std::atomic<bool> pending_ready_{false};
+    // One outstanding batch, one serialized worker, one serialized decode
+    // owner. Idle/Committed give the worker exclusive buffer ownership;
+    // Prepared publishes the initialized batch; a single bounded CAS claims
+    // it for the foreground. No worker mutex is acquired by the boundary.
+    enum class PendingState { Idle, Prepared, Committing, Committed };
+    static_assert(std::atomic<PendingState>::is_always_lock_free,
+                  "historical GC boundary requires lock-free mailbox state");
+    std::atomic<PendingState> pending_state_{PendingState::Idle};
     std::vector<HistoricalKvDeleteIntent> prepared_;
     std::vector<HistoricalKvDeleteIntent> pending_intents_;
     std::vector<HistoricalKvCommitCode> pending_codes_;
-    // Worker-owned handoff buffers: acknowledgement (including diagnostic IO)
-    // runs after releasing pending_mu_, which the decode boundary also needs.
+    // Worker-owned acknowledgement buffers. The worker takes the completed
+    // batch before returning the mailbox to Idle; callbacks and diagnostic IO
+    // cannot delay the boundary or access a buffer owned by the foreground.
     std::vector<HistoricalKvDeleteIntent> acknowledged_intents_;
     std::vector<HistoricalKvCommitCode> acknowledged_codes_;
     bool audit_ = false;
