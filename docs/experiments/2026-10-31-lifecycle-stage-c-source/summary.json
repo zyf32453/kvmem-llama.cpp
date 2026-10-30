@@ -1,0 +1,170 @@
+{
+  "date": "2026-10-31",
+  "stage": "C1_source_component",
+  "status": "component_contracts_passed_native_adapter_pending",
+  "parent_commit": "e595b746ea2db1e9902c1d72f1fad606a470c501",
+  "production_qualified": false,
+  "native_source_capture": false,
+  "native_recovery": false,
+  "gpu_or_agent_tests_run": false,
+  "source_pins": 97,
+  "manifest_sha256": "67a9bcb334c5d0e61feb63969586e73ea27142171798b19e758fb69a1fcb029c",
+  "host_contracts": {
+    "results": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.488128
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.685269
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 1.02792
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 16.3401
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 0.90178
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.715529
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.811434
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.790522
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.820054
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.84156
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.607986
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.954293
+      },
+      {
+        "name": "source_journal_test",
+        "seconds": 0.0550875
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.774215
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.529792
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.593961
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.721491
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.676886
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.670749
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.523139
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.838839
+      }
+    ],
+    "binary_sha256": {
+      "historical_gc_ninfer_core_test": "279f43ad57d665f1fc1157d5d22c7952f76d9938d424df81eab3c5c46079b70a",
+      "memory_contract_test": "e3aeef0f3ff6d060331e177a5849dc0b27d0724e00e38308b01ad7b72a2c194a",
+      "native_kv_payload_test": "527e9d00dc5e6dbbeca915f7ee96f2a539ff17bdcd729a94fac2b3ddbbb0f077",
+      "host_kv_storage_test": "74c5cf5687fb7a235a5c7a3302b1cfca4acb645eff51e3438485ba08187c26d8",
+      "spill_io_test": "bd758bd38923d37b35aaf381c074e41258dd18703f89c0ca241d891e10f2ef5c",
+      "tiered_kv_storage_test": "aa130f2974c979cacc6176d72b9179bb5b9547bceab08a35fb2252690e017ee4",
+      "native_residency_test": "1b0ddd8075bb6c28db93c4d130edf93cfa6d6ad6065b3ed651310b5f348de2d9",
+      "kv_content_test": "ca07e823f4ea53d34b23586d6a0bcf08022857da1d7bb1b0bb8d56a129f4ee97",
+      "prefix_checkpoint_test": "416fa873b6e719ad3a24265945ff67b9026babfd73e21cdf497c848999324d4b",
+      "checkpoint_policy_test": "0fdd15cb45e06e4c8c40b412fcf2f4c1758676b46e3621196850f2366b54f4f6",
+      "checkpoint_image_test": "41dd0088534b7862b8d1d0884da5575d0ead4dc8a8e15d536dce70ca48e9fa41",
+      "historical_kv_boundary_mailbox_test": "0d1bffcf39546c3a334d05b1bd9ef9c2cdb94825d5d3f5c6be1ff846f8d93ab6",
+      "historical_kv_commit_conditions_test": "a00de03b60ec594dcd3a0f950d590610756c8daa8b2f189fb5dd2c0ca8b79a1d",
+      "historical_kv_range_lock_test": "95a5dbc31f5072c7c814ce63ea02fc3176e0cd297340d55b4aab0bdd1801baf8",
+      "historical_kv_witness_lifecycle_test": "7f0e9a09b779a340aaebdfd17a2260a0542c3f5dc2fd95a0b55f2fbdf0324b15",
+      "historical_kv_score_evidence_test": "cd4f5eb44f66841356db04c2c20d0e6d55394d71813dc4aeac5f162f3859b281",
+      "historical_kv_auxiliary_budget_test": "042cf06db9cdefd61c06b35f4bb9b63ca928122fb4dc6879786634b0bd375175",
+      "historical_kv_owner_budget_test": "568eadbeed4783c9179294c395f5bf800ee5cc12613d189007181c2b6d95ef65",
+      "historical_kv_service_health_test": "00a2c3511565f56a1aa2e5b0d2e3a1b4d9a29c8adcb73604fe4cf7e9cc7085f3",
+      "mean_key_retrieval_test": "7212b31b977d78db1759f0ecc6f194b508f941490df7e66bd258f1ea9d88ecee",
+      "source_journal_test": "179e747d6a690525c3aff39fcafcf875cdc64cdc1a2eb893a4488f9cb70d6db5"
+    },
+    "compiler": "C:/mingw/mingw64/bin/c++.exe",
+    "build_type": "Debug"
+  },
+  "linux": {
+    "compiler": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "verified": {
+      "files": 96,
+      "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+      "source_archive_sha256": "4452d08d91a8d8226f616b866e4307bfc0fed38249d6c6a6a88fba94a600372e"
+    },
+    "tests": 1,
+    "scenario_groups": 6,
+    "allocation_failure_points": 12,
+    "binary_sha256": "e29999a5535a25183c32d45cd34d70f458e006826132a4e8c23e196366025eb9",
+    "address_sanitizer": true,
+    "undefined_behavior_sanitizer": true,
+    "leak_detection": true,
+    "evidence_sha256": "d23f164fec96620da3ca2f63fb2aa98b2562f6be8ac3aa5030c175c9e6cd6a34",
+    "evidence_path": "artifacts/lifecycle-stage-c-source/linux-asan-evidence.tar.gz"
+  },
+  "native_backend_changes": false,
+  "actions": {
+    "capture": "implemented_component",
+    "append": "accepted_rows_only_component",
+    "branch": "new_source_identity_component",
+    "forget": "store_and_recorded_descendants_only_not_system_wide",
+    "recover": "not_implemented"
+  },
+  "evidence_scope": [
+    "accepted versus computed frontier",
+    "source revisions and cross-store identity",
+    "event boundaries and completed-event immutability",
+    "branch prefix clipping without changing original",
+    "explicit store-local descendant forgetting without directory ABA",
+    "real capacity/transient old+new refusal without silent forgetting",
+    "12 allocation failure points with unchanged old data and current charge",
+    "actual public page GC retires/releases CPU KV while all original source token IDs remain readable; reading does not revive the page"
+  ],
+  "limitations": [
+    "No NInfer accepted-commit/configuration/event/admission/usage wiring yet",
+    "No real model rebuild, recovery planner, archive fence or crash persistence",
+    "S covers fixed source entries and real buffer capacities/reservations, not process RSS or HostKvStorage control objects",
+    "Branching duplicates a prefix and growth needs simultaneous old/new capacity; it can refuse despite final-size fit",
+    "Single owner synchronous RAM token reads; no media/position-row or exact sparse replay",
+    "Configuration digest producer/verification remains native adapter work; tests use explicit fixture keys",
+    "Process-local source refs and store-local forget are not durable/system-wide guarantees",
+    "No performance measurement; prior CUDA issue and TSan unavailability remain open; stages C-F incomplete"
+  ]
+}
