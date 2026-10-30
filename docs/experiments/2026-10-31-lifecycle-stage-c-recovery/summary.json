@@ -1,0 +1,225 @@
+{
+  "date": "2026-10-31",
+  "stage": "C3_source_recovery_planning_and_staging",
+  "status": "component_qualified_native_execution_not_implemented",
+  "full_goal_complete": false,
+  "stage_C_complete": false,
+  "production_qualified": false,
+  "based_on_commit": "14d74168372d751d54bb17a1282a4d84bbe58571",
+  "primary_backend": "ninfer",
+  "native_patched_tree": "3a7573b8f77e5e0d266e67e2a78b252e78e96ec2",
+  "native_patch_count": 27,
+  "candidate_manifest": {
+    "path": "docs/contracts/kv-lifecycle-recovery-candidate-v1.json",
+    "sha256": "7cb57b7363b7dd2859ccf0d043828e78a06670701afabaa054e11134ef463647",
+    "pinned_source_files": 102
+  },
+  "changes": [
+    "Reuse SourceJournalStore / SourceRef / MemoryStamp / HostKvStorage; no parallel history catalog, checkpoint registry, identity allocator, worker or inference framework",
+    "SourceRecoveryPlan requires explicit RebuildAsNew, owner-issued different destination identity, current source/domain/configuration, whole canonical prefix plus independently rounded generation headroom",
+    "ExactState never falls back to source tokens; no token text or computed-frontier equality authorizes old derived state",
+    "PreparedSourceRecovery reserves real caller-owned R before copying; bounded stack chunks and no exposed mutable/raw/lease handle; strong failure guarantee",
+    "Every read checks current domain, execution configuration, strict source revision and local descendant forget; revoked staging stays charged until actual destruction"
+  ],
+  "checks": {
+    "windows_host": {
+      "status": "passed",
+      "count": 22,
+      "build_type": "Debug",
+      "compiler": "C:/mingw/mingw64/bin/c++.exe",
+      "results": [
+        {
+          "name": "checkpoint_policy_test",
+          "seconds": 0.423305
+        },
+        {
+          "name": "checkpoint_image_test",
+          "seconds": 0.644808
+        },
+        {
+          "name": "historical_gc_ninfer_core_test",
+          "seconds": 0.860806
+        },
+        {
+          "name": "historical_kv_boundary_mailbox_test",
+          "seconds": 16.1873
+        },
+        {
+          "name": "historical_kv_commit_conditions_test",
+          "seconds": 0.790942
+        },
+        {
+          "name": "historical_kv_range_lock_test",
+          "seconds": 0.630814
+        },
+        {
+          "name": "historical_kv_witness_lifecycle_test",
+          "seconds": 0.740946
+        },
+        {
+          "name": "historical_kv_score_evidence_test",
+          "seconds": 0.718032
+        },
+        {
+          "name": "historical_kv_auxiliary_budget_test",
+          "seconds": 0.676889
+        },
+        {
+          "name": "historical_kv_owner_budget_test",
+          "seconds": 0.885809
+        },
+        {
+          "name": "historical_kv_service_health_test",
+          "seconds": 0.59086
+        },
+        {
+          "name": "memory_contract_test",
+          "seconds": 0.211923
+        },
+        {
+          "name": "source_journal_test",
+          "seconds": 0.0564493
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.950275
+        },
+        {
+          "name": "native_kv_payload_test",
+          "seconds": 0.831341
+        },
+        {
+          "name": "host_kv_storage_test",
+          "seconds": 0.538732
+        },
+        {
+          "name": "spill_io_test",
+          "seconds": 0.589279
+        },
+        {
+          "name": "tiered_kv_storage_test",
+          "seconds": 0.638519
+        },
+        {
+          "name": "native_residency_test",
+          "seconds": 0.586594
+        },
+        {
+          "name": "kv_content_test",
+          "seconds": 0.526301
+        },
+        {
+          "name": "prefix_checkpoint_test",
+          "seconds": 0.449433
+        },
+        {
+          "name": "mean_key_retrieval_test",
+          "seconds": 0.813182
+        }
+      ],
+      "binary_sha256": {
+        "historical_gc_ninfer_core_test": "d86f415d81262e8a86ee93f68010ac09a9b2971981605def108deac6f0526959",
+        "memory_contract_test": "7dac077c28523915158496f0e437df347a72a9edede69ebc4b394e1591b200e9",
+        "native_kv_payload_test": "346463cdc6bd22897bc2df6b9d4fb0e9d504736bba90c87a75df76e749634f8b",
+        "host_kv_storage_test": "9288a1082e8a48c70035f8347a23112d4e189c2217afd70b42596de58181b1aa",
+        "spill_io_test": "97e98bd512a87ee55e8afb0ee2ed8e6f5e5063b96568f21f85bb97e846b4c9ad",
+        "tiered_kv_storage_test": "4107fcb396e1093e6de90678503c5141496592d1689335b67bd4e60db987a712",
+        "native_residency_test": "2c52071e99bad652396647ba8a01a738663806a42805ecee0e08b650a7ba75b4",
+        "kv_content_test": "f1b96dbc47c864085f4419a1923e13b4dc1eaec140dedef82d2e79e02cbebbb8",
+        "prefix_checkpoint_test": "a3a54984e6f14afa90d7f2c19415a008fdb2dbc608337b00a8ddaf4f3481ac42",
+        "checkpoint_policy_test": "6c0b5f078e81def07e5171c40b8bfca7b8f56fd762c7d9d10a2d0826786412c8",
+        "checkpoint_image_test": "a10ae751732a4a406dbb402ad605a352778687567da0fc2f6fc289f2072ba0c8",
+        "historical_kv_boundary_mailbox_test": "4195c65909da479754dafa58cf6670b84606b8131cc1ead617e827818e3342dd",
+        "historical_kv_commit_conditions_test": "61da3ea42a4f0b1c93b189ce940ccf507b39f501cc9ebc99fcbd8baf931f7542",
+        "historical_kv_range_lock_test": "aee5555ff729d7504799e3eafc09c612d5c07a0e9fbcac648ce3c00ba0368d39",
+        "historical_kv_witness_lifecycle_test": "c55f52b07c92047e6c2abc385b790fc1305565a6236a3652cbed471d471b452c",
+        "historical_kv_score_evidence_test": "800f5e495dfe10144dd9096f5a7398eab8f14b97b34d6137c0e4ba9095936cdb",
+        "historical_kv_auxiliary_budget_test": "5244e579979f27942fabf729643983248ace2b491ab8f75af5d4ddd999f7dae5",
+        "historical_kv_owner_budget_test": "343e81edb44c4f6d1aa8a01589cf5925cc4740672bebdc76649c0a206312d75e",
+        "historical_kv_service_health_test": "693723a2fa404732dd63ec1451219bbc59d41d148128ef22162a8063f387623e",
+        "mean_key_retrieval_test": "e982177fa7067f784c8247d9eb0328eb8f82ad255510c5d467f781b6c60e055b",
+        "source_journal_test": "fcd364d95b4b8c1b86071d69235808484790d7921dbe1b1e46430f10f0823e6e",
+        "source_recovery_test": "0c0de93b165e40523dbbc45756d3b750b4de2b597e815b8f4b385c803320ba9a"
+      }
+    },
+    "linux_sanitizers": {
+      "product_status": "passed",
+      "product_test_count": 3,
+      "asan": true,
+      "ubsan": true,
+      "leak_detection": true,
+      "compiler": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+      "python": "3.11.18",
+      "image_id": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "binaries": {
+        "memory_contract_test": "7b7093d8cc50773634d29b6cae3eb6f5e40a50fa397c8be5fea9759198ed0d12",
+        "source_journal_test": "dfbce0b7a188f4cafe515d1c43b0b70b179aceed114e68176a276c1d483d9a72",
+        "source_recovery_test": "748dd73fd7c19e6f9f3e942103196a54ea95dcc43a7aa651533e948b2d70fbd2"
+      },
+      "results": [
+        {
+          "name": "memory_contract_test",
+          "seconds": 0.15289
+        },
+        {
+          "name": "source_journal_test",
+          "seconds": 0.0140192
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.0160037
+        }
+      ],
+      "source_recovery_allocation_faults": 2,
+      "existing_source_journal_allocation_faults": 12,
+      "source_files_verified": 99
+    },
+    "behavior_groups": [
+      "Explicit semantics, fresh-destination precondition, accepted frontier, independent page rounding and complete canonical capacity; invalid old domain may rebuild into a new one",
+      "Partial 96-token prefix, empty source and exact 600-token copy across 256-token stack chunks, including a cross-boundary read",
+      "All seven MemoryStamp field changes, current configuration change, mismatched source interpretation and computed-only SourceRef revision invalidate old plans/preparations",
+      "Parent/child local forget rejects new preparation and already-staged reads; slot reuse and different stores do not revive old refs; charged bytes remain until destruction",
+      "One-byte-short real R quota, two simultaneous copies sharing one R account, move lifetime and two actual allocation failures preserve S/source/previous state and refund R",
+      "Actual HistoricalKvPageGc retirement + outstanding Host reader + final physical release; prepare original accepted tokens independently without reviving the retired page; NO model execution"
+    ],
+    "native_or_gpu_run_this_component": false,
+    "paired_performance_run": false,
+    "long_duration_run": false,
+    "new_agent_run": false,
+    "native_patch_replayed_this_component": false
+  },
+  "adverse_findings": [
+    {
+      "kind": "test_driver",
+      "original_exit": 1,
+      "product_ctest_exit": 0,
+      "detail": "After sanitizer tests passed, archive driver expected build/bin executable; minimal core harness actually emitted build/kvmem. Original script/state/exit retained. Corrected future driver and separately finalized existing verified evidence without rerunning tests or changing product source.",
+      "finalizer_exit": 0
+    },
+    {
+      "kind": "coverage_limit",
+      "detail": "Canonical complete-prefix planner rejects histories beyond the full device window even with a source. Sparse/current-executor source rebuild semantics are not implemented."
+    },
+    {
+      "kind": "resource_cost",
+      "detail": "A full prefix copy costs prefix_tokens*4 real R bytes plus bounded plan/account/control/allocator/stack overhead outside R. R is not model reservation or RSS bound. No performance neutrality claim."
+    },
+    {
+      "kind": "remaining_native_work",
+      "detail": "Actual model resource feasibility/reservation, execution/completion and atomic publication; checkpoint/archive retirement and forget fences; system-wide ForgetSource and persisted recovery remain incomplete."
+    },
+    {
+      "kind": "existing_uncertainty",
+      "detail": "Existing TSan environment limitation and occasional CUDA issue remain unresolved; no host debugging settings changed. DeepSWE remains deferred."
+    }
+  ],
+  "evidence": {
+    "local_directory": "artifacts/lifecycle-stage-c-recovery",
+    "remote_isolated_directory": "/tmp/kvmem-lifecycle-source-recovery-20261031-yngvutp_",
+    "linux_raw_archive_sha256": "77c7545be5eae79aef7bb0249a233175fc27c42dc22e46dfe9fdb3dcdc220d60",
+    "linux_raw_archive_bytes": 235508,
+    "all_test_processes_terminal": true,
+    "owned_test_container_removed": true
+  },
+  "next": "Continue C3 with the existing NInfer Program resource planner: actual model reservation, isolated rebuild, failure rollback/isolation and fenced publication; then persisted checkpoint/archive recovery fences. D-F remain incomplete."
+}
