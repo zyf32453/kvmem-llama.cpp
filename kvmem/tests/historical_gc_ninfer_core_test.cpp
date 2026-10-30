@@ -22,6 +22,10 @@ public:
     std::optional<kvmem::HistoricalKvEpochGuard> commit_epoch_guard(uint64_t expected) const noexcept override {
         return kvmem::HistoricalKvEpochGuard{&fixed_epoch_, expected};
     }
+    uint64_t score_epoch() const noexcept override { return 1; }
+    std::optional<kvmem::HistoricalKvEpochGuard> commit_score_guard(uint64_t expected) const noexcept override {
+        return kvmem::HistoricalKvEpochGuard{&fixed_score_, expected};
+    }
     size_t dimensions() const noexcept override { return 3; }
     bool begin_round(uint64_t) override { return true; }
     bool read(const kvmem::HistoricalKvBlockMeta & meta, float * descriptor, double & logit) override {
@@ -34,6 +38,7 @@ public:
     }
 private:
     const std::atomic<uint64_t> fixed_epoch_{0};
+    const std::atomic<uint64_t> fixed_score_{1};
 };
 
 } // namespace

@@ -82,6 +82,14 @@ public:
     virtual std::optional<HistoricalKvEpochGuard> commit_epoch_guard(uint64_t) const noexcept {
         return std::nullopt;
     }
+    // Schema is immutable for the source/manager lifetime. Score epochs name
+    // frozen importance banks, not every live attention update, so decoding
+    // does not perpetually revoke pending decisions.
+    virtual uint64_t feature_schema_id() const noexcept { return 1; }
+    virtual uint64_t score_epoch() const noexcept { return 0; }
+    virtual std::optional<HistoricalKvEpochGuard> commit_score_guard(uint64_t) const noexcept {
+        return std::nullopt;
+    }
 };
 class HistoricalKvRedundancyPolicy final : public HistoricalKvPolicy {
 public:
@@ -155,10 +163,12 @@ private:
         const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out);
     size_t emit_unclassified_lru(std::vector<size_t> & indices, size_t take,
         const HistoricalKvSnapshot & snapshot, HistoricalKvDecisionBuffer & out);
+    HistoricalKvScoreEvidence evidence(uint64_t round, bool scored) const noexcept;
     size_t capacity_, dimensions_;
     std::shared_ptr<HistoricalKvRedundancySource> source_;
     Config config_;
     uint64_t round_ = 0, incarnation_ = 0, question_epoch_ = 0;
+    uint64_t score_epoch_ = 0;
     size_t cursor_ = 0, pair_row_ = 0, pair_reference_ = 0, older_origin_ = 0, refresh_cursor_ = 0;
     bool initialized_ = false, pressure_mode_ = false, done_ = false, collected_ = false, source_ready_ = false;
     bool pool_built_ = false;

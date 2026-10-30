@@ -186,9 +186,20 @@ HistoricalKvPrepareCode HistoricalKvRedundancyPolicy::prepare_commit(const Histo
     HistoricalKvCommitConditions & conditions) const noexcept {
     conditions = {};
     conditions.live_only = conditions.sealed_only = conditions.reject_mandatory = true;
+    conditions.requires_score_evidence = true;
+    conditions.evidence_schema = source_->feature_schema_id();
+    conditions.evidence_query_epoch = question_epoch_;
+    conditions.evidence_score_epoch = score_epoch_;
+    conditions.evidence_round = round_;
+    if (!conditions.evidence_schema) return HistoricalKvPrepareCode::Unsupported;
     const auto query = source_->commit_epoch_guard(question_epoch_);
     if (!query) return HistoricalKvPrepareCode::Unsupported;
     if (!conditions.add_epoch(*query)) return HistoricalKvPrepareCode::Reevaluate;
+    if (source_ready_) {
+        const auto score = source_->commit_score_guard(score_epoch_);
+        if (!score || !score_epoch_) return HistoricalKvPrepareCode::Unsupported;
+        if (!conditions.add_epoch(*score)) return HistoricalKvPrepareCode::Reevaluate;
+    }
     if (!config_.thinking) return HistoricalKvPrepareCode::Ready;
     const unsigned tiers = thinking_mode_
         ? (1u << content_tier_) | (fallback_commit_enabled_ ? 1u << 2 : 0u)
@@ -209,16 +220,13 @@ void HistoricalKvRedundancyPolicy::on_result(const HistoricalKvCommitResult & re
     const auto & intent = result.intent;
     if (result.code != HistoricalKvCommitCode::Committed ||
         intent.reason != HistoricalKvDeleteReason::Redundancy ||
-        intent.round_id != round_ || intent.victim.incarnation != incarnation_ ||
-        intent.victim.slot >= seen_.size() || !intent.expected_content_version) return;
-    const auto & victim = seen_[intent.victim.slot];
-    if (victim.generation != intent.victim.generation ||
-        victim.content_version != *intent.expected_content_version ||
-        victim.mate_slot >= seen_.size() ||
-        victim.mate_cosine < config_.representative_similarity) return;
-    auto & witness = seen_[victim.mate_slot];
-    if (witness.generation == victim.mate_generation &&
-        witness.content_version == victim.mate_version)
+        intent.victim.incarnation != incarnation_ || !intent.evidence ||
+        !intent.evidence->witness) return;
+    const auto & proof = *intent.evidence->witness;
+    if (proof.handle.incarnation != incarnation_ || proof.handle.slot >= seen_.size()) return;
+    // Use the committed intent, not a reconstructed mate from a later cache.
+    auto & witness = seen_[proof.handle.slot];
+    if (witness.generation == proof.handle.generation && witness.content_version == proof.content_version)
         witness.carries_retired = true;
 }
 
@@ -455,7 +463,7 @@ size_t HistoricalKvRedundancyPolicy::emit_unclassified_lru(std::vector<size_t> &
     for (size_t i = 0; i < take; ++i) {
         const auto & meta = snapshot.blocks[indices[i]];
         if (!out.push({meta.handle, snapshot.round_id, HistoricalKvDeleteReason::Lru,
-                       meta.content_version}))
+                       meta.content_version, evidence(snapshot.round_id, false)}))
             throw std::logic_error("historical LRU fallback output capacity changed");
         if (audit_)
             std::fprintf(stderr, "KVMEM_GC_AUDIT event=proposed incarnation=%llu slot=%u generation=%llu content_version=%llu round=%llu original_begin=%llu valid_tokens=%u reason=lru_fallback intent_reason=lru content_tier=2 witness=0\n",
@@ -486,6 +494,7 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
         content_tier_ = 0;
         lru_fallback_mode_ = false;
         fallback_commit_enabled_ = false;
+        score_epoch_ = 0;
         if (thinking_mode_ && config_.thinking->tiered()) {
             // Exhaust eligible thinking before considering older replies.
             // One tier per round retains the existing bounded comparison N.
@@ -561,6 +570,7 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
             return {HistoricalKvStepStatus::NoCandidate, 0, 0};
         }
         source_ready_ = true;
+        score_epoch_ = source_->score_epoch();
     }
     const bool index_pool = config_.max_candidate_blocks || thinking_mode_;
     if (!pool_built_ && index_pool) {
@@ -700,6 +710,7 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
         if (!refresh_started_) {
             if (!source_->begin_round(snapshot.incarnation))
                 return {HistoricalKvStepStatus::Yielded, pairs, 0};
+            score_epoch_ = source_->score_epoch();
             refresh_started_ = true;
             return {HistoricalKvStepStatus::Yielded, pairs, 0};
         }
@@ -809,6 +820,16 @@ HistoricalKvStepResult HistoricalKvRedundancyPolicy::step(const HistoricalKvSnap
     return {emitted ? HistoricalKvStepStatus::Complete : HistoricalKvStepStatus::NoCandidate, pairs, emitted};
 }
 
+HistoricalKvScoreEvidence HistoricalKvRedundancyPolicy::evidence(uint64_t round, bool scored) const noexcept {
+    HistoricalKvScoreEvidence result;
+    result.feature_schema = source_->feature_schema_id();
+    result.query_epoch = question_epoch_;
+    result.score_epoch = score_epoch_;
+    result.scoring_round = round;
+    result.feature_score_used = scored;
+    return result;
+}
+
 size_t HistoricalKvRedundancyPolicy::emit_ranked(std::vector<size_t> & group, size_t take,
     HistoricalKvDeleteReason reason, const HistoricalKvSnapshot & snapshot,
     HistoricalKvDecisionBuffer & out) {
@@ -845,11 +866,20 @@ size_t HistoricalKvRedundancyPolicy::emit_ranked(std::vector<size_t> & group, si
     for (size_t i = 0; i < n; ++i) {
         const auto & row = rows_[group[i]];
         const auto & meta = *row.meta;
-        const bool pushed = out.push({meta.handle, snapshot.round_id, reason, meta.content_version});
-        if (!pushed || !audit_) continue;
         const bool redundant = reason == HistoricalKvDeleteReason::Redundancy;
         const Row * witness = redundant && row.mate < rows_.size() && rows_[row.mate].retained
             ? &rows_[row.mate] : nullptr;
+        if (redundant && !witness) throw std::logic_error("redundancy intent lacks a retained witness");
+        auto proof = evidence(snapshot.round_id, true);
+        proof.importance = row.importance;
+        proof.retention_score = redundant ? row.score : row.importance;
+        if (witness) {
+            proof.witness = HistoricalKvWitnessRequirement{witness->meta->handle, witness->meta->content_version};
+            proof.similarity = row.max_sim;
+            proof.threshold = config_.representative_similarity;
+        }
+        const bool pushed = out.push({meta.handle, snapshot.round_id, reason, meta.content_version, proof});
+        if (!pushed || !audit_) continue;
         const HistoricalKvBlockMeta empty{};
         const auto & other = witness ? *witness->meta : empty;
         // One stdio call keeps each event a single line across worker threads.

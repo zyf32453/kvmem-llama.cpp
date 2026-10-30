@@ -73,6 +73,9 @@ void HistoricalKvPageFeatures::truncate_to(uint64_t token_frontier, uint32_t pag
 
 bool HistoricalKvPageFeatures::begin_round(uint64_t) {
     std::lock_guard<std::mutex> lock(mu_);
+    const auto current = score_epoch_.load(std::memory_order_relaxed);
+    if (current == UINT64_MAX) return false;
+    score_epoch_.store(current + 1, std::memory_order_release);
     frozen_importance_ = output_peaks_;
     for (size_t id = 0; id < std::min(question_scores_.size(), frozen_importance_.size()); ++id)
         frozen_importance_[id] = std::max(frozen_importance_[id], question_scores_[id]);

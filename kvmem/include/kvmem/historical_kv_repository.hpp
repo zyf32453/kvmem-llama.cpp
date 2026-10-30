@@ -53,7 +53,7 @@ public:
         uint32_t pending = 0; // Retired or Releasing full-slot credits.
     };
 
-    enum class RetireResult { Committed, AlreadyRetired, Stale, VersionChanged, Retry, NotPermitted };
+    enum class RetireResult { Committed, AlreadyRetired, Stale, VersionChanged, Retry, NotPermitted, WitnessChanged };
     // ResourceReleased means a component progressed without completing the
     // whole record. HostReleased means the entire Host bundle just completed,
     // while another dependency remains. Neither grants a Ready slot credit.
@@ -223,6 +223,14 @@ public:
     RetireResult retire(HistoricalKvHandle handle,
                         std::optional<uint64_t> expected_content_version = std::nullopt,
                         RetirePredicate permits = nullptr, const void * policy = nullptr);
+    // Validate an exact Live/sealed witness and retire the victim in one
+    // nonwaiting retirement transaction. Other retirements return Retry while
+    // it owns the transaction; metadata pinning grants no payload/GPU rights.
+    // The witness is not permanently protected after the victim commits.
+    RetireResult retire_with_witness(HistoricalKvHandle handle,
+        std::optional<uint64_t> expected_content_version,
+        const HistoricalKvWitnessRequirement & witness,
+        RetirePredicate permits = nullptr, const void * context = nullptr);
     // Call from the CPU reclaimer, not from the foreground. False/throwing
     // callbacks keep admission closed and retry with the same handle. Host
     // release may run in Retired while GPU-only/metadata users remain; only
@@ -303,6 +311,8 @@ private:
         uint64_t birth_seq, uint64_t payload_bytes,
         ReleaseCallback release, ResourceRelease resources, Lease * gpu_execution = nullptr);
     bool claim_gc_owner() noexcept;
+    RetireResult retire_impl(HistoricalKvHandle, std::optional<uint64_t>,
+        RetirePredicate, const void *, const HistoricalKvWitnessRequirement *);
     void release_gc_owner() noexcept;
     std::optional<Lease> acquire_kind(HistoricalKvHandle, LeaseKind, uint32_t allowed_phases,
                                      bool request_operation = true);

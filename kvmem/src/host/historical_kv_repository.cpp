@@ -226,6 +226,10 @@ struct HistoricalKvRepository::Shared {
     std::atomic<uint32_t> cursor{0};
     std::atomic<bool> closing{false};
     std::atomic<bool> gc_owner_claimed{false};
+    // Covers retirement facts only, never payload/IO or allocator work. All
+    // retire entry points participate so a witness cannot retire between its
+    // validation and the victim's CAS. Contenders make one attempt, then Retry.
+    std::atomic_flag retirement_turn = ATOMIC_FLAG_INIT;
     std::atomic<uint64_t> operations{0};
 };
 
@@ -718,9 +722,26 @@ std::optional<HistoricalKvRepository::Lease> HistoricalKvRepository::acquire_kin
 HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(
         HistoricalKvHandle handle, std::optional<uint64_t> expected_content_version,
         RetirePredicate permits, const void * policy) {
+    return retire_impl(handle, expected_content_version, permits, policy, nullptr);
+}
+
+HistoricalKvRepository::RetireResult HistoricalKvRepository::retire_with_witness(
+        HistoricalKvHandle handle, std::optional<uint64_t> expected_content_version,
+        const HistoricalKvWitnessRequirement & witness, RetirePredicate permits, const void * context) {
+    return retire_impl(handle, expected_content_version, permits, context, &witness);
+}
+
+HistoricalKvRepository::RetireResult HistoricalKvRepository::retire_impl(
+        HistoricalKvHandle handle, std::optional<uint64_t> expected_content_version,
+        RetirePredicate permits, const void * policy, const HistoricalKvWitnessRequirement * witness) {
     const auto shared = shared_;
     if (handle.incarnation != shared->incarnation || handle.slot >= shared->capacity ||
         handle.generation == 0) return RetireResult::Stale;
+    if (shared->retirement_turn.test_and_set(std::memory_order_acquire)) return RetireResult::Retry;
+    struct ReturnTurn {
+        Shared & shared;
+        ~ReturnTurn() { shared.retirement_turn.clear(std::memory_order_release); }
+    } turn{*shared};
     if (!shared->try_pin(handle.slot, kReadable)) {
         const Phase current = phase_of(shared->slots[handle.slot].control.load(std::memory_order_acquire));
         if (current == Phase::Releasing) {
@@ -743,6 +764,22 @@ HistoricalKvRepository::RetireResult HistoricalKvRepository::retire(
     auto & slot = shared->slots[handle.slot];
     auto & control = slot.control;
     uint64_t observed = control.load(std::memory_order_acquire);
+    Lease witness_guard;
+    if (witness && phase_of(observed) != Phase::Retired) {
+        const auto other = witness->handle;
+        if (other.incarnation != shared->incarnation || other.slot >= shared->capacity ||
+            other.generation == 0 || witness->content_version == 0 || other.slot == handle.slot)
+            return RetireResult::WitnessChanged;
+        if (!shared->try_pin(other.slot, phase_bit(Phase::Live)))
+            return phase_of(shared->slots[other.slot].control.load(std::memory_order_acquire)) == Phase::Live
+                ? RetireResult::Retry : RetireResult::WitnessChanged;
+        witness_guard = Lease(shared, other, LeaseKind::Read);
+        if (!shared->matches(other.slot, other) ||
+            shared->slots[other.slot].content_version.load(std::memory_order_acquire) != witness->content_version)
+            return RetireResult::WitnessChanged;
+        // Live cannot become Growing; every competing retirement needs our
+        // turn. The exact witness therefore stays Live through the victim CAS.
+    }
     for (unsigned attempt = 0; attempt < kCasAttempts; ++attempt) {
         if (phase_of(observed) == Phase::Retired) return RetireResult::AlreadyRetired;
         if (phase_of(observed) == Phase::Growing) return RetireResult::NotPermitted;

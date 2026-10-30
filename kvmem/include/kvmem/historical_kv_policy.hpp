@@ -62,8 +62,13 @@ struct HistoricalKvEpochGuard {
     uint64_t expected = 0;
 };
 
+struct HistoricalKvWitnessRequirement {
+    HistoricalKvHandle handle;
+    uint64_t content_version = 0;
+};
+
 struct HistoricalKvCommitConditions {
-    static constexpr size_t kEpochGuards = 3;
+    static constexpr size_t kEpochGuards = 4;
     static_assert(std::atomic<uint64_t>::is_always_lock_free &&
                   std::atomic<uint8_t>::is_always_lock_free,
                   "historical commit conditions require lock-free counters");
@@ -73,6 +78,11 @@ struct HistoricalKvCommitConditions {
     const std::atomic<uint8_t> * protected_page = nullptr;
     std::array<HistoricalKvEpochGuard, kEpochGuards> epochs{};
     size_t epoch_count = 0;
+    bool requires_score_evidence = false;
+    uint64_t evidence_schema = 0;
+    uint64_t evidence_query_epoch = 0;
+    uint64_t evidence_score_epoch = 0;
+    uint64_t evidence_round = 0;
     bool add_epoch(HistoricalKvEpochGuard guard) noexcept;
     bool matches(const HistoricalKvBlockMeta &) const noexcept;
 };
@@ -106,12 +116,28 @@ struct HistoricalKvWorkBudget {
 
 enum class HistoricalKvDeleteReason { Lru, Custom, Redundancy };
 
+// Provenance of this bounded policy decision, not a proof of semantic/KV
+// equivalence. A zero score epoch is allowed only for unscored fallback.
+struct HistoricalKvScoreEvidence {
+    uint64_t feature_schema = 0;
+    uint64_t query_epoch = 0;
+    uint64_t score_epoch = 0;
+    uint64_t scoring_round = 0;
+    bool feature_score_used = false;
+    double importance = 0;
+    double retention_score = 0;
+    double similarity = 0;
+    double threshold = 0;
+    std::optional<HistoricalKvWitnessRequirement> witness;
+};
+
 struct HistoricalKvDeleteIntent {
     HistoricalKvHandle victim;
     uint64_t round_id = 0;
     HistoricalKvDeleteReason reason = HistoricalKvDeleteReason::Custom;
     // Only policies which explicitly need an optimistic content condition set it.
     std::optional<uint64_t> expected_content_version;
+    std::optional<HistoricalKvScoreEvidence> evidence;
 };
 
 enum class HistoricalKvCommitCode {

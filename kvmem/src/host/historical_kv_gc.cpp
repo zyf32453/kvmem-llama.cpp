@@ -3,11 +3,44 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <stdexcept>
 #include <utility>
 
 namespace kvmem {
+namespace {
+bool same(HistoricalKvHandle a, HistoricalKvHandle b) noexcept {
+    return a.incarnation == b.incarnation && a.slot == b.slot && a.generation == b.generation;
+}
+
+bool valid_evidence(const HistoricalKvDeleteIntent & intent,
+                    const HistoricalKvCommitConditions * conditions = nullptr) noexcept {
+    if (!intent.evidence)
+        return intent.reason != HistoricalKvDeleteReason::Redundancy &&
+               (!conditions || !conditions->requires_score_evidence);
+    const auto & proof = *intent.evidence;
+    if (!intent.expected_content_version || !*intent.expected_content_version ||
+        !proof.feature_schema || !proof.scoring_round || proof.scoring_round != intent.round_id ||
+        (proof.feature_score_used && !proof.score_epoch) ||
+        !std::isfinite(proof.importance) || !std::isfinite(proof.retention_score)) return false;
+    if (intent.reason == HistoricalKvDeleteReason::Redundancy && !proof.witness) return false;
+    if (proof.witness) {
+        const auto & witness = *proof.witness;
+        if (!proof.feature_score_used || !witness.content_version || !witness.handle.generation ||
+            witness.handle.incarnation != intent.victim.incarnation ||
+            witness.handle.slot == intent.victim.slot ||
+            !std::isfinite(proof.similarity) || !std::isfinite(proof.threshold) ||
+            proof.threshold < 0 || proof.threshold > 1 ||
+            proof.similarity < proof.threshold || proof.similarity > 1) return false;
+    }
+    return !conditions || (conditions->requires_score_evidence &&
+        conditions->evidence_schema == proof.feature_schema &&
+        conditions->evidence_query_epoch == proof.query_epoch &&
+        conditions->evidence_score_epoch == proof.score_epoch &&
+        conditions->evidence_round == proof.scoring_round);
+}
+} // namespace
 
 HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repository,
                                std::unique_ptr<HistoricalKvPolicy> policy,
@@ -83,15 +116,37 @@ void HistoricalKvGc::run() noexcept {
 
 HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & intent,
                                              const HistoricalKvCommitConditions * conditions) {
-    const auto code = conditions
-        ? repository_->retire(intent.victim, intent.expected_content_version,
-            [](const HistoricalKvBlockMeta & meta, const void * prepared) noexcept {
-                return static_cast<const HistoricalKvCommitConditions *>(prepared)->matches(meta);
-            }, conditions)
-        : repository_->retire(intent.victim, intent.expected_content_version,
-            [](const HistoricalKvBlockMeta & meta, const void * policy) noexcept {
-                return static_cast<const HistoricalKvPolicy *>(policy)->permits(meta);
-            }, policy_.get());
+    HistoricalKvCommitConditions direct_conditions;
+    if (!conditions && intent.evidence) {
+        // Worker-only mode also binds scored decisions to their exact source
+        // context; old unscored custom predicates keep their worker path.
+        const auto meta = repository_->inspect(intent.victim);
+        if (!meta) return HistoricalKvCommitCode::Stale;
+        if (policy_->prepare_commit(*meta, direct_conditions) != HistoricalKvPrepareCode::Ready)
+            return HistoricalKvCommitCode::Reevaluate;
+        conditions = &direct_conditions;
+    }
+    if (!valid_evidence(intent, conditions)) {
+        ++invalid_evidence_;
+        return HistoricalKvCommitCode::Reevaluate;
+    }
+    HistoricalKvRepository::RetirePredicate predicate;
+    const void * context;
+    if (conditions) {
+        predicate = [](const HistoricalKvBlockMeta & meta, const void * prepared) noexcept {
+            return static_cast<const HistoricalKvCommitConditions *>(prepared)->matches(meta);
+        };
+        context = conditions;
+    } else {
+        predicate = [](const HistoricalKvBlockMeta & meta, const void * policy) noexcept {
+            return static_cast<const HistoricalKvPolicy *>(policy)->permits(meta);
+        };
+        context = policy_.get();
+    }
+    const auto * witness = intent.evidence && intent.evidence->witness ? &*intent.evidence->witness : nullptr;
+    const auto code = witness
+        ? repository_->retire_with_witness(intent.victim, intent.expected_content_version, *witness, predicate, context)
+        : repository_->retire(intent.victim, intent.expected_content_version, predicate, context);
     switch (code) {
     case HistoricalKvRepository::RetireResult::Committed:
         return HistoricalKvCommitCode::Committed;
@@ -101,6 +156,9 @@ HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & i
         return HistoricalKvCommitCode::Stale;
     case HistoricalKvRepository::RetireResult::VersionChanged:
     case HistoricalKvRepository::RetireResult::NotPermitted:
+        return HistoricalKvCommitCode::Reevaluate;
+    case HistoricalKvRepository::RetireResult::WitnessChanged:
+        ++witness_rejected_;
         return HistoricalKvCommitCode::Reevaluate;
     case HistoricalKvRepository::RetireResult::Retry:
         return HistoricalKvCommitCode::Retry;
@@ -136,13 +194,24 @@ void HistoricalKvGc::audit_acknowledgement(const HistoricalKvDeleteIntent & inte
     if (!audit_) return;
     // Use the intent's original round. A terminal policy step can already have
     // cleared round_.blocks before a decode boundary commits this batch.
-    std::fprintf(stderr, "KVMEM_GC_AUDIT event=ack incarnation=%llu slot=%u generation=%llu content_version=%llu has_content_version=%d round=%llu intent_reason=%s outcome=%s mode=%s\n",
+    const HistoricalKvScoreEvidence empty{};
+    const auto & proof = intent.evidence ? *intent.evidence : empty;
+    const HistoricalKvWitnessRequirement absent{};
+    const auto & witness = proof.witness ? *proof.witness : absent;
+    std::fprintf(stderr, "KVMEM_GC_AUDIT event=ack incarnation=%llu slot=%u generation=%llu content_version=%llu has_content_version=%d round=%llu intent_reason=%s outcome=%s mode=%s evidence=%d feature_schema=%llu query_epoch=%llu score_epoch=%llu scoring_round=%llu feature_score_used=%d importance=%.17g retention_score=%.17g witness=%d witness_incarnation=%llu witness_slot=%u witness_generation=%llu witness_content_version=%llu similarity=%.17g threshold=%.17g\n",
         (unsigned long long)intent.victim.incarnation, intent.victim.slot,
         (unsigned long long)intent.victim.generation,
         (unsigned long long)intent.expected_content_version.value_or(0),
         int(intent.expected_content_version.has_value()), (unsigned long long)intent.round_id,
         historical_kv_audit_reason(intent.reason), outcome,
-        config_.mode == Mode::Delete ? "delete" : config_.mode == Mode::Shadow ? "shadow" : "off");
+        config_.mode == Mode::Delete ? "delete" : config_.mode == Mode::Shadow ? "shadow" : "off",
+        int(intent.evidence.has_value()), (unsigned long long)proof.feature_schema,
+        (unsigned long long)proof.query_epoch, (unsigned long long)proof.score_epoch,
+        (unsigned long long)proof.scoring_round, int(proof.feature_score_used),
+        proof.importance, proof.retention_score, int(proof.witness.has_value()),
+        (unsigned long long)witness.handle.incarnation, witness.handle.slot,
+        (unsigned long long)witness.handle.generation, (unsigned long long)witness.content_version,
+        proof.similarity, proof.threshold);
 }
 
 void HistoricalKvGc::audit_reclaim(const HistoricalKvBlockMeta & block,
@@ -366,6 +435,22 @@ void HistoricalKvGc::manual_tick() {
             acknowledge(intent, HistoricalKvCommitCode::Stale);
             continue;
         }
+        bool evidence_ok = valid_evidence(intent);
+        if (evidence_ok && intent.evidence && intent.evidence->witness) {
+            const auto & witness = *intent.evidence->witness;
+            const auto found = std::lower_bound(round_.blocks.begin(), round_.blocks.end(), witness.handle.slot,
+                [](const HistoricalKvBlockMeta & meta, uint32_t slot) { return meta.handle.slot < slot; });
+            evidence_ok = found != round_.blocks.end() && same(found->handle, witness.handle) &&
+                found->life == HistoricalKvLife::Live && found->sealed &&
+                found->content_version == witness.content_version &&
+                std::none_of(decisions_.values().begin(), decisions_.values().end(),
+                    [&](const auto & other) { return same(other.victim, witness.handle); });
+        }
+        if (!evidence_ok) {
+            ++invalid_evidence_;
+            acknowledge(intent, HistoricalKvCommitCode::Reevaluate);
+            continue;
+        }
         if (seen_generation_[intent.victim.slot] == intent.victim.generation) {
             if (config_.mode != Mode::Shadow)
                 acknowledge(intent, HistoricalKvCommitCode::AlreadyRetired);
@@ -375,7 +460,11 @@ void HistoricalKvGc::manual_tick() {
         seen_generation_[intent.victim.slot] = intent.victim.generation;
         if (config_.mode == Mode::Shadow) {
             const auto current = repository_->inspect(intent.victim);
-            if (!current || !policy_->permits(*current)) {
+            HistoricalKvCommitConditions simulated;
+            const bool score_valid = !intent.evidence || (current &&
+                policy_->prepare_commit(*current, simulated) == HistoricalKvPrepareCode::Ready &&
+                valid_evidence(intent, &simulated) && simulated.matches(*current));
+            if (!current || !policy_->permits(*current) || !score_valid) {
                 audit_acknowledgement(intent, "shadow_skipped");
                 continue;
             }
@@ -396,6 +485,11 @@ void HistoricalKvGc::manual_tick() {
                         std::fprintf(stderr, "[historical-kv-gc] boundary conditions unsupported; policy disabled\n");
                     }
                 }
+                acknowledge(intent, HistoricalKvCommitCode::Reevaluate);
+                continue;
+            }
+            if (!valid_evidence(intent, &conditions)) {
+                ++invalid_evidence_;
                 acknowledge(intent, HistoricalKvCommitCode::Reevaluate);
                 continue;
             }
@@ -434,7 +528,8 @@ HistoricalKvGc::Stats HistoricalKvGc::stats() const {
             reclaimed_.load(), deferred_.load(), stale_.load(),
             reevaluate_.load(), retry_count_.load(), policy_failures_.load(),
             worker_failures_.load(), host_released_early_.load(), partial_resource_releases_.load(),
-            boundary_batches_.load(), boundary_committed_.load(), unsupported_conditions_.load()};
+            boundary_batches_.load(), boundary_committed_.load(), unsupported_conditions_.load(),
+            invalid_evidence_.load(), witness_rejected_.load()};
 }
 
 } // namespace kvmem

@@ -57,6 +57,8 @@ public:
         uint64_t boundary_batches = 0;
         uint64_t boundary_committed = 0;
         uint64_t unsupported_conditions = 0;
+        uint64_t invalid_evidence = 0;
+        uint64_t witness_rejected = 0;
     };
     struct BoundaryResult {
         uint64_t started_ns = 0;
@@ -153,6 +155,7 @@ private:
     std::atomic<uint64_t> partial_resource_releases_{0};
     std::atomic<uint64_t> boundary_batches_{0}, boundary_committed_{0};
     std::atomic<uint64_t> unsupported_conditions_{0};
+    std::atomic<uint64_t> invalid_evidence_{0}, witness_rejected_{0};
     std::atomic<uint32_t> requested_ready_{0};
     bool policy_failed_ = false;
 };

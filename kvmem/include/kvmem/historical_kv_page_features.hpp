@@ -26,6 +26,10 @@ public:
     std::optional<HistoricalKvEpochGuard> commit_epoch_guard(uint64_t expected) const noexcept override {
         return HistoricalKvEpochGuard{&question_epoch_, expected};
     }
+    uint64_t score_epoch() const noexcept override { return score_epoch_.load(std::memory_order_acquire); }
+    std::optional<HistoricalKvEpochGuard> commit_score_guard(uint64_t expected) const noexcept override {
+        return HistoricalKvEpochGuard{&score_epoch_, expected};
+    }
 
     bool has_page(uint32_t page) const;
     // A sealed page is published once. Rewriting an ID requires truncate_to()
@@ -51,6 +55,7 @@ private:
     // mutate this frozen view, even during a multi-tick comparison round.
     std::vector<double> frozen_importance_;
     std::atomic<uint64_t> question_epoch_{1};
+    std::atomic<uint64_t> score_epoch_{0};
 };
 
 } // namespace kvmem
