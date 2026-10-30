@@ -51,8 +51,84 @@ The unchanged `scripts/ninfer_gc_harbor.py` pressure profile reruns
 and Host KV. The previous 24-patch trials and binary are preserved. All model,
 server, Agent, task/verifier, sampling and timeout settings are reused; literal
 terminal hostnames and later stochastic trajectories still differ between attempts.
-Results are pending. A missing reward will be reported separately from reward 0;
-no deletion means the fallback percentage is undefined, rather than a measured 0%.
+The three trials have finished. The server-command arrays, Agent/task/environment
+configuration and task-source hashes match their previous respective controls after
+normalizing only the Docker container name and output directory. The model remains
+Qwen3.8-27B IQ3_S, active 8,192, Host 65,536 token positions (1,190 MiB native
+RK4V4/MTP layout), reserve/output 16,384, thinking 4,096 per call, sink 1,024,
+recent/block 64, MTP4, prefill 512, temperature 0.6, seed 1,000 and one request.
+Query/replay limits remain 8,192; context remains 262,144. Harness summarization
+stays disabled, Agent timeout 7,200 s and the official verifier timeout unchanged.
+This is the earlier diagnostic profile, not the teacher's 96K-active/256K-Host profile.
+
+| Mode | Before: official reward / total time | After: official reward / total time | After: calls / generated tokens | Whole-Job retirement / observed ready events |
+|---|---|---|---|---|
+| Off | 1.0 (3/3), 484.474 s (8.07 min) | 1.0 (3/3), **444.294 s (7.40 min)** | 17 / 16,691 | 0 / 0 |
+| LRU | 1.0 (3/3), 1,682.545 s (28.04 min) | **No reward**, 3,365.131 s (56.09 min), context error | 116 / 163,501 | 3,125 / 3,100 |
+| Redundancy | 1.0 (3/3), 873.253 s (14.55 min) | 1.0 (3/3), **514.930 s (8.58 min)** | 18 / 20,018 | **0 / 0** |
+
+Off/red total time is 8.29%/41.03% shorter in these respective attempts; LRU is
+100.00% longer and fails to finish the Agent workflow. This is not an overall
+performance improvement. Previous calls/generated tokens were off 18/21,046,
+LRU 49/82,200 and redundancy 27/39,394. Agent-only times, excluding surrounding
+setup/verifier work, change from 438.898/1,612.554/827.899 s to
+338.364/3,322.631/405.528 s for off/LRU/redundancy. Whole-Agent trajectories and
+output volumes differ, including repeated source/data inspection in LRU; these
+elapsed changes cannot be attributed to per-token GC execution cost. No new p95
+or throughput benchmark was run, and a single trial per mode cannot rank strategies.
+
+**Fallback fraction remains unmeasured under the new watermarks.** Previously,
+redundancy committed 741 retirements: 216 redundancy, 142 capacity fallback and
+383 unclassified LRU fallback, giving 525/741 = **70.85% fallback**. The new
+redundancy trial stops at a 36,066-token frontier with 3/3 verifier checks passed,
+zero comparisons and zero retirements. Its enabled GC never reaches pressure.
+Its fallback fraction is therefore **N/A (0/0), not 0%**. This demonstrates avoiding
+unnecessary deletion on that successful shorter trajectory; it does not qualify
+the new-watermark redundancy policy under actual pressure. A common long workload
+that reaches pressure is still needed to compare fallback fractions meaningfully.
+The earlier 24-patch pressured redundancy evidence remains separate, not a
+substitute for that missing new-watermark coverage.
+
+**LRU has a material task-completion regression in this attempt.** Its first
+completed request reporting GC is at frontier 63,078, after the near-empty-store
+pressure has been removed. It continues past physical Host capacity without a
+Host reservation/503 failure. However, its Agent repeatedly inspects the source
+and data, at one point reports a validation mismatch in its own Python program,
+and reaches logical frontier 262,144. Request 117 ends with context capacity;
+request 118 is rejected during prepare with HTTP **400**, code
+`context_length_exceeded`, message `prepared prompt exceeds Engine max_context
+262144`. Harbor records `ContextLengthExceededError`, does not run the official
+verifier and has no reward. This is neither reward 0, an Agent timeout, a Docker
+failure nor a Host-space 503. A program file exists, but it is not an officially
+verified successful task. The reason for the long non-converging trajectory is
+not isolated by this one comparison; do not claim that it proves an intrinsic LRU
+algorithm failure, a KV-corruption defect or a watermark-caused quality regression.
+
+**Accounting limit:** whole-Job counts above use distinct audit repository handles
+(incarnation, slot, generation), rather than summing request-end snapshots. LRU
+has 226 GC lifetimes; 109 are reset without an endpoint summary during Query/
+checkpoint restore. Those lifetimes contain 1,296 additional retirement events.
+Summing endpoint snapshots alone yields only 1,829 committed / 1,806 reclaimed;
+the full audit yields 3,125 committed / 3,100 ready. The missing 25 ready events
+occur across lifetime resets; manager destruction and reader/owner teardown are
+not covered by that ready-event log. The difference alone establishes neither a
+leak nor fully observed asynchronous release for every retired page. The model
+and task containers are stopped after the trials. More Host payload is deliberately
+retained under the same quota; sampled request-end charged bytes reach
+1,197,844,480 of 1,247,805,440 bytes in LRU. This is not a measurement of peak
+process RSS or total CPU memory.
+
+`qualification-watermarks-pressure-agent-20261030/comparison.json` contains the
+full old/new table, timing scopes, unmatched audit handles and configuration
+checks. Complete Harbor Jobs, verifier logs, Agent trajectories and server audit
+logs are retained beside it. The implementation commit is `d69e8e8`.
+
+Conclusion: the erroneous/unreachable watermark derivation is fixed and the
+pressure lifecycle works in the long LRU run. The requested three-way task pilot
+is complete, with **two officially verified successes and one unscored context
+failure**, not a benchmark pass rate. It does not establish improved pressured
+redundancy fallback behavior or universally improved task quality/time. Those
+limits and the LRU regression are part of the result.
 
 The following 24/23/21-patch observations are retained as versioned earlier evidence.
 
