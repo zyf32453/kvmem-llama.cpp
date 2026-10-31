@@ -1,6 +1,6 @@
 # 源记录镜像：离线组件与后续接入边界
 
-日期：2026-10-31。本组件最初从 C4 提交 `57a2f514baf73d7b6b5a08fca5bdd2b27aa67739` 建立离线分支，现已合入完成首批功能验收的 C5 基线。源记录镜像已通过 Windows、Linux 内存检查和 NInfer 实际构建接入检查；尚未接入 Engine 保存/导入接口、归档清单或持久恢复。完整阶段 C 和生产系统都未完成。
+日期：2026-10-31。本组件最初从 C4 提交 `57a2f514baf73d7b6b5a08fca5bdd2b27aa67739` 建立离线分支，现已合入完成首批功能验收的 C5 基线。源记录镜像已通过 Windows、Linux 内存检查和 NInfer 实际构建接入检查；后续 [C6 SourceArchive](kv-lifecycle-source-archive.md) 已在独立组件内建立持久清单与归档发布/遗忘 fence，但尚未接入 Engine 保存/导入和持久模型恢复。完整阶段 C 和生产系统都未完成。
 
 ## 本批解决什么问题
 
@@ -51,7 +51,7 @@ R 不包含固定 SourceImage 对象、HostKvStorage 的 account/control 对象�
 
 ## 持久化接入必须满足的契约
 
-以下是下一批的接口约束，尚未实现，不能据此宣称已经可跨重启恢复：
+以下是完整接线约束。后续 C6 已实现其中的独立归档清单、owner 工单、发布/读取/归档家族 fence 和失败拒绝；Engine 导入、新域发布及在线别名统一遗忘仍待实现，不能据此宣称已经可跨重启推理：
 
 接线先冻结为当前 NInfer/Linux、单 Engine owner、文本 token/event、显式新域重建。后台传输复用 `StorageIoQueue` 的 jobs/bytes 上限及完成票据，不建立第二个线程池；完成票据只证明 I/O 结束，不直接发布归档资格。现有 `SpillFile` 的合同明确为 ephemeral/process-local、无 crash/restart 保证，不能把临时 extent 和 checksum 升格为持久恢复权威。
 
@@ -64,7 +64,7 @@ R 不包含固定 SourceImage 对象、HostKvStorage 的 account/control 对象�
 5. 导入前先查询权威清单及当前配置/遗忘/退休规则，再用本 codec 解析数据；发布前再次核对。显式源重建取得新身份和正常资源准入，不能把旧 origin 直接装回 repository，不能把 computed frontier 当作已有 KV 覆盖证明。派生 checkpoint 恢复仍需要自己的完整覆盖与 MemoryStamp 校验。
 6. 缺失/损坏权威清单、旧清单回滚、晚到 writer、读取中遗忘、配置变化及清单提交失败均须明确拒绝并回收暂存。单个镜像通过 checksum 不允许绕过这些条件。普通内存压力仍只回收允许的副本或退休历史，不自动永久遗忘原始恢复依据。
 
-已有 C4 遗忘只覆盖当前 Engine。源镜像是尚未接入 Engine 的独立数据 owner，因此本批测试特意保留一个边界事实：源目录局部 forget 后，一个早已取得的镜像仍能写完数据，R 也不会提前退款。这不构成合法的归档发布或恢复；接入前必须落实上面的持久 fence，才能把它纳入系统级 ForgetSource。
+已有 C4 遗忘只覆盖当前 Engine。源镜像是独立数据 owner，因此本批测试特意保留一个边界事实：源目录局部 forget 后，一个早已取得的镜像仍能写完数据，R 也不会提前退款。这不构成合法的归档发布或恢复；后续 C6 通过归档当前表关闭晚到 writer 的发布，Engine 接线仍须统一持久与在线撤销，才能把它纳入系统级 ForgetSource。
 
 ## 本地验证与复现
 
@@ -74,13 +74,13 @@ R 不包含固定 SourceImage 对象、HostKvStorage 的 account/control 对象�
 
 执行结果及源码/二进制身份见 [本批摘要](experiments/2026-10-31-lifecycle-source-image-offline/summary.json)。本地 Windows/GCC Debug 的结果只归属公共组件和主机契约。SSH 恢复后，另在固定构建镜像的 Linux/GCC 13.3、Python 3.11.18 下对整个公共 kvmem host library 和 source_image_test 启用 ASan/UBSan；启用 detect_leaks 后的一项组件目标全部通过，实测 0.28 秒。已核对动态链接包含 libasan.so.8 与 libubsan.so.1，所有 102 项输入与 Windows 冻结源码逐字节一致；两种环境的故障注入数量一致。
 
-新增 Linux 原始日志、JUnit、运行脚本与 CMake 配置保存在 `artifacts/source-image-offline/linux-evidence.tar.gz`，SHA-256 为 `ba3191f19801173697b516373fb9c05cd31efaf708fe97aa2b97ecbfb6ade1eb`。输入清单保留初次 Windows 冻结时的状态；后续资格以执行摘要为准。尚未运行本组件的 CUDA、真实模型、掉电恢复、性能或 Agent 检查，尚无 Engine/持久清单接线；本次 sanitizer 通过不代替 C5 的预算或模型验收。
+新增 Linux 原始日志、JUnit、运行脚本与 CMake 配置保存在 `artifacts/source-image-offline/linux-evidence.tar.gz`，SHA-256 为 `ba3191f19801173697b516373fb9c05cd31efaf708fe97aa2b97ecbfb6ade1eb`。输入清单保留初次 Windows 冻结时的状态；后续资格以执行摘要为准。该批未运行 CUDA、真实模型、掉电恢复、性能或 Agent 检查，也未接线 Engine/持久清单；后续 C6 的独立归档结果见其当前文档。本次 sanitizer 通过不代替 C5 的预算或模型验收。
 
 本批最终重新构建并运行 23 项主机契约，全部通过，CTest 总耗时 31.52 秒。prepare/decode 各覆盖 4 个真实分配失败点，三条传输路径共覆盖 99 次回调故障。原始证据保存在 `artifacts/source-image-offline/evidence.zip`，SHA-256 为 `550bbfcb8e6ca9a6e5f5b8143b2b3c9e34f485b420e90f3656c8a5f6df01222a`；[离线组件清单](contracts/kv-lifecycle-source-image-offline-v1.json) 冻结 102 项主机/core 源输入，未冻结或验收新的原生 GPU tree。源码 hash 按实际输入字节计算；Git 换行转换可能改变 checkout 字节，逐字节复现应使用证据包内的冻结副本。
 
 合入 C5 后，在新的隔离目录复用已完成的构建缓存，实际完成 NInfer/C++20 Release 增量编译及 source_image_test。原 C5 目录保持不变；serve、policy/query bundle、三个模型检查和两个预算检查共八个原生可执行文件的 SHA-256 前后完全相同。因此 C5 的 12 项原生及七组 GPU 结果按相同二进制复用，没有重复计成源镜像的新 GPU 检查。这也明确说明当前 Engine 路径还没有调用新增的保存/导入 API。
 
-当前组合源码合同是 [source-image-candidate-v1](contracts/kv-lifecycle-source-image-candidate-v1.json)，冻结 111 项归一化源码输入及 R07 组件契约；初次 102 项精确字节清单继续作为历史测试输入保留。接入检查的日志、输入与八份前后摘要在 `artifacts/lifecycle-source-image-integration/evidence.tar.gz`，SHA-256 为 `0dbd1be8f27e9f790db96c0cffc8118c1743aef341cf64a9d5c8cab0a4c95cd1`。下一项仍是先实现有界持久清单与 owner/版本/遗忘 fence，再接 Engine，不从镜像存在或 checksum 通过推导恢复许可。
+源镜像合入时的组合源码合同是 [source-image-candidate-v1](contracts/kv-lifecycle-source-image-candidate-v1.json)，冻结 111 项归一化源码输入及 R07 组件契约；初次 102 项精确字节清单继续作为历史测试输入保留。接入检查的日志、输入与八份前后摘要在 `artifacts/lifecycle-source-image-integration/evidence.tar.gz`，SHA-256 为 `0dbd1be8f27e9f790db96c0cffc8118c1743aef341cf64a9d5c8cab0a4c95cd1`。后续 C6 增加归档输入后，以 [source-archive-candidate-v1](contracts/kv-lifecycle-source-archive-candidate-v1.json) 为当前组合合同；下一项是受配额的源导入与 Engine 接线，不从镜像存在或 checksum 通过推导恢复许可。
 
 可在独立主机构建目录复现：
 

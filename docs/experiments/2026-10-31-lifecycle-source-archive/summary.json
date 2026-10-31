@@ -1,0 +1,355 @@
+{
+  "date": "2026-10-31",
+  "stage": "C6",
+  "status": "Linux_source_archive_component_qualified_no_Engine_import",
+  "full_goal_complete": false,
+  "stage_C_complete": false,
+  "production_qualified": false,
+  "previous_goal_turn": "progress: C5 qualification and SourceImage native integration committed/pushed",
+  "contract": {
+    "path": "docs/contracts/kv-lifecycle-source-archive-candidate-v1.json",
+    "sha256": "815558ee45db2a081717535179580da08a075ef12cc0c4816eb3e6c8973d4cc2",
+    "source_pins": 125,
+    "source_gate": {
+      "status": "source_verified_only",
+      "gpu_or_agent_tests_run": false,
+      "production_qualified": false,
+      "local_model_verified": false,
+      "manifest_sha256": "815558ee45db2a081717535179580da08a075ef12cc0c4816eb3e6c8973d4cc2",
+      "profile": {
+        "backend": "ninfer",
+        "gpu_count": 1,
+        "max_concurrency": 1,
+        "modality": "text",
+        "historical_tier": "ram",
+        "page_tokens": 64,
+        "kv_dtype": "rk4v4",
+        "admission": "bounded_prefill",
+        "query_scorer": "meanq-cosine",
+        "query_aggregation": "max",
+        "lrfu": false,
+        "graph_alpha": 0,
+        "query_max_tokens": 512,
+        "query_replay_max_tokens": 2048,
+        "policy_modes": [
+          "off",
+          "lru",
+          "redundancy"
+        ],
+        "prefill_chunk": 512,
+        "id": "checkpoint-functional-none",
+        "spec": "none",
+        "active_tokens": 2048,
+        "reserve_tokens": 512,
+        "host_mib": 96,
+        "context_tokens": 65536,
+        "output_tokens": 8,
+        "records": 256,
+        "seed": 42,
+        "temperature": 0,
+        "timing_unit": "functional_not_performance",
+        "entrypoint": "scripts/ninfer_checkpoint_budget_acceptance.py",
+        "audit": true,
+        "sink_recent": "frozen native defaults: sink_tokens=0 means one page; recent_tokens=64",
+        "gc_aux_mib": 1024,
+        "source_mib": 16,
+        "input_tokens": 1024,
+        "rebuild_prefix_tokens": 1024,
+        "recovery_bytes": 8192,
+        "retained_sessions": 8,
+        "qualified_policy_modes": [
+          "lru",
+          "redundancy"
+        ],
+        "sink_requested_tokens": 0,
+        "effective_sink_pages": 1,
+        "recent_tokens": 64,
+        "model_stop_defaults": false,
+        "reasoning_loop": "off",
+        "checkpoint_mib": 384,
+        "quota_probe_checkpoint_mib": 1,
+        "source_regression_checkpoint_mib": 2048,
+        "rotation_requests": 8
+      },
+      "source": {
+        "commit": "69fc0e4f8be2ac42f1aef46fce9b1532eb9e712a",
+        "pinned_source_files": 125,
+        "native_patches": 30,
+        "native_tree_replayed": false
+      }
+    },
+    "source_gate_path": "artifacts/lifecycle-source-archive/source-check-r1/report.json"
+  },
+  "linux_component": {
+    "container": "kvmem-source-archive-70a73df0",
+    "root": "/home/yifan/kvmem-validation/source-archive-20261031-70a73df0",
+    "id": "ffc444d871dee27521e276c20a17db7bcf014d8cfb47c80b3177d6f4e0967678",
+    "started": "2026-10-31T10:39:02.700603896Z",
+    "finished": "2026-10-31T10:39:45.740195268Z",
+    "exit_code": 0,
+    "oom": false,
+    "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+    "evidence_sha256": "22fc3486b091584bfa3aebe9e7a8666d41e7aee7327e44583db1572ac9118b85",
+    "result": {
+      "passed": true,
+      "source_pins": 104,
+      "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+      "targets": [
+        "source_archive_test",
+        "source_image_test",
+        "source_journal_test",
+        "source_recovery_test",
+        "spill_io_test"
+      ],
+      "sanitizers": "detect_leaks=1:halt_on_error=1 / halt_on_error=1:print_stacktrace=1",
+      "binaries": {
+        "build/kvmem-core/source_archive_test": "2188b7783d014a64cebefe7913414ae9516ef04492506360ce29a03903eff6a5",
+        "build-asan/kvmem-core/source_archive_test": "06e0d92d70ae86d6411730c4c70e0a5582885ac24c968c9a7afb7a4dc038a987"
+      },
+      "scope": "Linux local-filesystem archive component; no Engine/model, real power-loss, complete-backup rollback or global forgetting claim"
+    },
+    "executions": {
+      "junit.xml": [
+        {
+          "name": "source_journal_test",
+          "seconds": 0.00181487
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.00189541
+        },
+        {
+          "name": "source_image_test",
+          "seconds": 0.0628566
+        },
+        {
+          "name": "source_archive_test",
+          "seconds": 12.0444
+        },
+        {
+          "name": "spill_io_test",
+          "seconds": 0.00396252
+        }
+      ],
+      "asan-junit.xml": [
+        {
+          "name": "source_journal_test",
+          "seconds": 0.0161079
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.0177059
+        },
+        {
+          "name": "source_image_test",
+          "seconds": 0.240516
+        },
+        {
+          "name": "source_archive_test",
+          "seconds": 12.0794
+        },
+        {
+          "name": "spill_io_test",
+          "seconds": 0.0158306
+        }
+      ]
+    },
+    "source_pins": 104
+  },
+  "native_embedding": {
+    "container": "kvmem-source-archive-integration-942865d8",
+    "root": "/home/yifan/kvmem-validation/source-archive-integration-20261031-942865d8",
+    "id": "89bf1b3b05a549c7b5103938c04e6b03052a49bb478b2466f07521469e16e818",
+    "started": "2026-10-31T10:39:33.299793153Z",
+    "finished": "2026-10-31T10:40:29.952648601Z",
+    "exit_code": 0,
+    "oom": false,
+    "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+    "evidence_sha256": "f3d91ed3ded707ca360d3c29f2007926ba0e4fda1645fc5f874ce8a9d109c089",
+    "result": {
+      "passed": true,
+      "source_archive_passed": true,
+      "native_binaries_identical": true,
+      "binaries_before": {
+        "build-native/apps/ninfer-serve": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+        "build-native/tests/ninfer_memory_policy_tests": "16dc5c288296f511b528179da5f615a93adcf7f7ee8dd4d36a83fc85c45bb742",
+        "build-native/tests/ninfer_query_policy_tests": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+        "build-native/tests/ninfer_engine_source_recovery_real_test": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+        "build-native/tests/ninfer_engine_source_forget_real_test": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+        "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+        "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+        "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "56c5d961a5a0930a49191ca4cae4c13acca34916ca2fce209167863dd74cac13"
+      },
+      "binaries_after": {
+        "build-native/apps/ninfer-serve": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+        "build-native/tests/ninfer_memory_policy_tests": "16dc5c288296f511b528179da5f615a93adcf7f7ee8dd4d36a83fc85c45bb742",
+        "build-native/tests/ninfer_query_policy_tests": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+        "build-native/tests/ninfer_engine_source_recovery_real_test": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+        "build-native/tests/ninfer_engine_source_forget_real_test": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+        "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+        "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+        "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "56c5d961a5a0930a49191ca4cae4c13acca34916ca2fce209167863dd74cac13"
+      },
+      "parent_root": "/home/yifan/kvmem-validation/source-image-integration-20261031-eaa2e0c2",
+      "binary_sha256": "4ae91b6088e7383d75dbd2a3275d1f9dcd165bed4b818637d620ff93632d66fc",
+      "scope": "Native C++20 Release embedding; component only, no Engine archive API. Reuse prior C5 GPU evidence only for identical existing executables.",
+      "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]"
+    }
+  },
+  "fault_counts": {
+    "metadata_errors": 83,
+    "save_errors_total": 113,
+    "save_metadata_errors": 83,
+    "background_blob_errors": 30,
+    "process_exit_after_fsync_rename": 6,
+    "foreground_save_allocations": 7,
+    "foreground_read_allocations": 4,
+    "note": "Metadata83 is exercised once for forget and once for save; counts are per tested operation, not 196 independent kinds. Error/crash injection is expected, not failed qualification."
+  },
+  "prior_passed_snapshots": [
+    {
+      "container": "kvmem-source-archive-f53c04e0",
+      "root": "/home/yifan/kvmem-validation/source-archive-20261031-f53c04e0",
+      "id": "821bd54f2953ec6c44c03224d561556b6f55ae9b4c9af567890b7e470af6f8ea",
+      "started": "2026-10-31T10:28:29.673984402Z",
+      "finished": "2026-10-31T10:28:52.399414978Z",
+      "exit_code": 0,
+      "oom": false,
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "evidence_sha256": "67c576b26ae2936b18ca200961e950d0f65ef415b60ffac58b1c893eebd9f4a2",
+      "result": {
+        "passed": true,
+        "source_pins": 104,
+        "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+        "targets": [
+          "source_archive_test",
+          "source_image_test",
+          "source_journal_test",
+          "source_recovery_test",
+          "spill_io_test"
+        ],
+        "sanitizers": "detect_leaks=1:halt_on_error=1 / halt_on_error=1:print_stacktrace=1",
+        "binaries": {
+          "build/kvmem-core/source_archive_test": "7781101568da960ac185b85ba38c10bf9f5b980f16fd7b5b9839aee746b2ea14",
+          "build-asan/kvmem-core/source_archive_test": "98fe1a4f6a6c54e3b49e034f45088fbe49fab3ea8df1c625437bb6a1eb465541"
+        },
+        "scope": "Linux local-filesystem archive component; no Engine/model, real power-loss, complete-backup rollback or global forgetting claim"
+      }
+    },
+    {
+      "container": "kvmem-source-archive-a49178ac",
+      "root": "/home/yifan/kvmem-validation/source-archive-20261031-a49178ac",
+      "id": "66e6ec15e7dd1b13a1bdd9583bde376ca848449c5557607900f0006a2c7e3f4d",
+      "started": "2026-10-31T10:30:42.496443157Z",
+      "finished": "2026-10-31T10:31:24.870472943Z",
+      "exit_code": 0,
+      "oom": false,
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "evidence_sha256": "d0e4995f103059e58191b69491b68b41d96ab484f57dc4715dc673e764194c66",
+      "result": {
+        "passed": true,
+        "source_pins": 104,
+        "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+        "targets": [
+          "source_archive_test",
+          "source_image_test",
+          "source_journal_test",
+          "source_recovery_test",
+          "spill_io_test"
+        ],
+        "sanitizers": "detect_leaks=1:halt_on_error=1 / halt_on_error=1:print_stacktrace=1",
+        "binaries": {
+          "build/kvmem-core/source_archive_test": "9c137f7489504ad386c5ef0dc73e6de85887d10367ec7601c6a100e4c9395290",
+          "build-asan/kvmem-core/source_archive_test": "52602c1fde4c070930c80d5d5f2457b51044438043d606d0fa090a6e18a765e2"
+        },
+        "scope": "Linux local-filesystem archive component; no Engine/model, real power-loss, complete-backup rollback or global forgetting claim"
+      }
+    },
+    {
+      "container": "kvmem-source-archive-a590b840",
+      "root": "/home/yifan/kvmem-validation/source-archive-20261031-a590b840",
+      "id": "b0acd81467a9b3027fc177832fba52e5b20974fdac3e728f158b4eba192d8551",
+      "started": "2026-10-31T10:33:09.862179799Z",
+      "finished": "2026-10-31T10:33:52.674392345Z",
+      "exit_code": 0,
+      "oom": false,
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "evidence_sha256": "266d062ec0510c9efd4246ba1847c3e9c691af1782cf12374595214a4ed13106",
+      "result": {
+        "passed": true,
+        "source_pins": 104,
+        "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+        "targets": [
+          "source_archive_test",
+          "source_image_test",
+          "source_journal_test",
+          "source_recovery_test",
+          "spill_io_test"
+        ],
+        "sanitizers": "detect_leaks=1:halt_on_error=1 / halt_on_error=1:print_stacktrace=1",
+        "binaries": {
+          "build/kvmem-core/source_archive_test": "a94278d6e969686ad88127ac85adbc2c51d29bcde50ff8d25c9b41156b0b48ec",
+          "build-asan/kvmem-core/source_archive_test": "d0d4aa44012830146ad21013fec211d052f81b76a4c3f396ba18c424f973c02c"
+        },
+        "scope": "Linux local-filesystem archive component; no Engine/model, real power-loss, complete-backup rollback or global forgetting claim"
+      }
+    },
+    {
+      "container": "kvmem-source-archive-integration-e8a26e5f",
+      "root": "/home/yifan/kvmem-validation/source-archive-integration-20261031-e8a26e5f",
+      "id": "5cced8dc2edb0d3afe376edd517f0a8bcb0fced52d32ac1729d13fbc73839c6a",
+      "started": "2026-10-31T10:33:54.899049745Z",
+      "finished": "2026-10-31T10:34:52.710549181Z",
+      "exit_code": 0,
+      "oom": false,
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "evidence_sha256": "da7c90ebaf51b586e502903cba68aeb12690edcedfb9d252fdad86f36d40666f",
+      "result": {
+        "passed": true,
+        "source_archive_passed": true,
+        "native_binaries_identical": true,
+        "binaries_before": {
+          "build-native/apps/ninfer-serve": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+          "build-native/tests/ninfer_memory_policy_tests": "16dc5c288296f511b528179da5f615a93adcf7f7ee8dd4d36a83fc85c45bb742",
+          "build-native/tests/ninfer_query_policy_tests": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+          "build-native/tests/ninfer_engine_source_recovery_real_test": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+          "build-native/tests/ninfer_engine_source_forget_real_test": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+          "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+          "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+          "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "56c5d961a5a0930a49191ca4cae4c13acca34916ca2fce209167863dd74cac13"
+        },
+        "binaries_after": {
+          "build-native/apps/ninfer-serve": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+          "build-native/tests/ninfer_memory_policy_tests": "16dc5c288296f511b528179da5f615a93adcf7f7ee8dd4d36a83fc85c45bb742",
+          "build-native/tests/ninfer_query_policy_tests": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+          "build-native/tests/ninfer_engine_source_recovery_real_test": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+          "build-native/tests/ninfer_engine_source_forget_real_test": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+          "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+          "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+          "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "56c5d961a5a0930a49191ca4cae4c13acca34916ca2fce209167863dd74cac13"
+        },
+        "parent_root": "/home/yifan/kvmem-validation/source-image-integration-20261031-eaa2e0c2",
+        "binary_sha256": "a7cd489288fc396630d0b9178fc4ca0ca8137c0488ee15e583ba63d5c584ce26",
+        "scope": "Native C++20 Release embedding; component only, no Engine archive API. Reuse prior C5 GPU evidence only for identical existing executables.",
+        "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]"
+      }
+    }
+  ],
+  "evidence": {
+    "path": "artifacts/lifecycle-source-archive/evidence.zip",
+    "sha256": "c267eba79506a218d10c97801ab09626982825c326958954284ed7ac771052a9",
+    "bytes": 2309107
+  },
+  "adverse_and_limits": [
+    "Source review found initial collect return mixed reservation refunds and actual removed bytes; final Collection splits both and preserves exact unlink size across fsync retry. Earlier passing snapshots retained, not substituted for final.",
+    "Source-only preflight initially used an unsupported default profile, then runner refused a reused output directory. Final invocation selected the unchanged frozen profile and a fresh output directory; all125 source pins/30 patch hashes passed. Failed attempts retained; no code assertion weakened.",
+    "Partial catalog/seal commit can deny the whole archive on reopen; missing/truncated published blob or unknown file also denies open. No repair/fallback implemented.",
+    "No external monotone anchor: coherent rollback of entire namespace with both authority files is not detected; FNV is not authentication or secure erasure.",
+    "Control operations synchronously write/fsync two metadata files and directories; not safe for decode-boundary calls and no latency/throughput claim. Queue refusal can consume a durable ID/reservation until collect.",
+    "D is logical reserved file bytes, M counts fixed arrays via existing allocator; bounded state/control/ticket/allocator/OS overhead outside these and R is not a whole-process RSS bound.",
+    "Archive family forget does not yet revoke Engine/RAM/native aliases; local RAM forget does not remove already-published archives. Engine save/import, S-bounded new-source capture and cross-process version rebinding are still missing.",
+    "No actual power interruption, complete-backup rollback protection, Windows archive, TSan, archive GPU/model, end-to-end performance or Agent validation. Intentional _exit children do not run destructor/LeakSanitizer exit checks.",
+    "Existing8 native executables are byte-identical; prior C5 GPU results reused without new GPU executions. Previous occasional CUDA issue and global C-F requirements remain open."
+  ],
+  "next": "Atomic S-bounded source image import with new identity and zero computed frontier; authorize rebinding from current read receipt using durable sequence rather than cross-process SourceRef ordering; then Engine integration"
+}

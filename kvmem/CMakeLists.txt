@@ -116,6 +116,16 @@ kvmem_add_test(memory_contract_test)
 kvmem_add_test(source_journal_test)
 kvmem_add_test(source_recovery_test)
 kvmem_add_test(source_image_test)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(kvmem PRIVATE src/host/source_archive.cpp)
+    kvmem_add_test(source_archive_test)
+    # Compile the product implementation into this executable so OS-call fault
+    # injection also works when the embedding backend uses a shared kvmem.
+    target_sources(source_archive_test PRIVATE src/host/source_archive.cpp)
+    target_link_options(source_archive_test PRIVATE
+        -Wl,--wrap=write -Wl,--wrap=fsync -Wl,--wrap=renameat)
+    set_tests_properties(source_archive_test PROPERTIES TIMEOUT 120)
+endif()
 kvmem_add_test(native_kv_payload_test)
 kvmem_add_test(host_kv_storage_test)
 kvmem_add_test(spill_io_test)
