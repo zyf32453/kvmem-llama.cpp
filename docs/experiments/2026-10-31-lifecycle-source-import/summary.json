@@ -1,0 +1,949 @@
+{
+  "date": "2026-10-31",
+  "stage": "C7",
+  "status": "atomic_source_import_and_restart_binding_qualified_no_Engine_archive_API",
+  "full_goal_complete": false,
+  "stage_C_complete": false,
+  "production_qualified": false,
+  "previous_goal_turn": "progress: C6 component implemented, independently qualified and pushed at da74b1f",
+  "contract": {
+    "path": "docs/contracts/kv-lifecycle-source-import-candidate-v1.json",
+    "sha256": "437e475ff7a22995cccfcfef4a24fe311f732dd07acca06226636c355c4c655d",
+    "source_pins": 125,
+    "execution_contract_sha256": "8d665532de1ffa3159a1667ba3e66cddb42aa4bd08f078f02b1c827aec50b3ef",
+    "code_pins_equal_execution_input": true,
+    "source_gate": {
+      "status": "source_verified_only",
+      "gpu_or_agent_tests_run": false,
+      "production_qualified": false,
+      "local_model_verified": false,
+      "manifest_sha256": "437e475ff7a22995cccfcfef4a24fe311f732dd07acca06226636c355c4c655d",
+      "profile": {
+        "backend": "ninfer",
+        "gpu_count": 1,
+        "max_concurrency": 1,
+        "modality": "text",
+        "historical_tier": "ram",
+        "page_tokens": 64,
+        "kv_dtype": "rk4v4",
+        "admission": "bounded_prefill",
+        "query_scorer": "meanq-cosine",
+        "query_aggregation": "max",
+        "lrfu": false,
+        "graph_alpha": 0,
+        "query_max_tokens": 512,
+        "query_replay_max_tokens": 2048,
+        "policy_modes": [
+          "off",
+          "lru",
+          "redundancy"
+        ],
+        "prefill_chunk": 512,
+        "id": "checkpoint-functional-none",
+        "spec": "none",
+        "active_tokens": 2048,
+        "reserve_tokens": 512,
+        "host_mib": 96,
+        "context_tokens": 65536,
+        "output_tokens": 8,
+        "records": 256,
+        "seed": 42,
+        "temperature": 0,
+        "timing_unit": "functional_not_performance",
+        "entrypoint": "scripts/ninfer_checkpoint_budget_acceptance.py",
+        "audit": true,
+        "sink_recent": "frozen native defaults: sink_tokens=0 means one page; recent_tokens=64",
+        "gc_aux_mib": 1024,
+        "source_mib": 16,
+        "input_tokens": 1024,
+        "rebuild_prefix_tokens": 1024,
+        "recovery_bytes": 8192,
+        "retained_sessions": 8,
+        "qualified_policy_modes": [
+          "lru",
+          "redundancy"
+        ],
+        "sink_requested_tokens": 0,
+        "effective_sink_pages": 1,
+        "recent_tokens": 64,
+        "model_stop_defaults": false,
+        "reasoning_loop": "off",
+        "checkpoint_mib": 384,
+        "quota_probe_checkpoint_mib": 1,
+        "source_regression_checkpoint_mib": 2048,
+        "rotation_requests": 8
+      },
+      "source": {
+        "commit": "da74b1f2bfa4da3f7c59d543eb60920414df5506",
+        "pinned_source_files": 125,
+        "native_patches": 30,
+        "native_tree_replayed": false
+      }
+    },
+    "source_gate_path": "artifacts/lifecycle-source-import/source-check-r2/report.json"
+  },
+  "windows": {
+    "passed": true,
+    "toolchain": "Windows GCC16.2 Debug",
+    "targets": [
+      "source_image_test",
+      "source_journal_test",
+      "source_recovery_test",
+      "spill_io_test"
+    ],
+    "scope": "Four public host regression targets, no Windows archive or sanitizer claim",
+    "binaries": {
+      "source_image_test": "e607cb32764181195bfc365da24f626b8e73d70537ff863685b3f9c567316384",
+      "source_journal_test": "e5b812c0751fec0061262449ad5be48652446f9a52cb9460c23dd9999679ee22",
+      "source_recovery_test": "e7e8bad7cc9c9a5e616794b6773c7f41c8a06c65213aba74ae3d0c97c9cadd36",
+      "spill_io_test": "894de0410d6d33db3b5145b1e83cbd0c58f6411fca626376a94fe827521fa336"
+    },
+    "executions": [
+      {
+        "name": "source_journal_test",
+        "seconds": 0.976865
+      },
+      {
+        "name": "source_recovery_test",
+        "seconds": 0.990945
+      },
+      {
+        "name": "source_image_test",
+        "seconds": 0.946402
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.687106
+      }
+    ]
+  },
+  "linux_core": {
+    "kind": "153941d8",
+    "container": "kvmem-source-import-153941d8",
+    "id": "573bd62e77aa5b9a28affcda0959ef8076a1474d285cb73c44a662533730d49a",
+    "root": "/home/yifan/kvmem-validation/source-import-20261031-153941d8",
+    "started": "2026-10-31T10:55:22.156408691Z",
+    "finished": "2026-10-31T10:56:07.019958268Z",
+    "exit_code": 0,
+    "oom": false,
+    "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+    "evidence_sha256": "baf181aa1bbab19533c3916dd7007b4beb61f06c64afad66d0d23b4990447abc",
+    "result": {
+      "passed": true,
+      "source_pins": 104,
+      "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+      "targets": [
+        "source_archive_test",
+        "source_image_test",
+        "source_journal_test",
+        "source_recovery_test",
+        "spill_io_test"
+      ],
+      "sanitizers": "detect_leaks=1:halt_on_error=1 / halt_on_error=1:print_stacktrace=1",
+      "binaries": {
+        "build/kvmem-core/source_archive_test": "3306405e968e4395f893ab8fad2a8ddf0aa978fcb417259a64da11cd2ec8fdb4",
+        "build-asan/kvmem-core/source_archive_test": "065b627960ebc846cecd264d7d928fc66415078c08d14f022ad7382c4a5bcd90"
+      },
+      "scope": "Linux local-filesystem archive component; no Engine/model, real power-loss, complete-backup rollback or global forgetting claim"
+    },
+    "executions": {
+      "junit.xml": [
+        {
+          "name": "source_journal_test",
+          "seconds": 0.00233512
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.00161646
+        },
+        {
+          "name": "source_image_test",
+          "seconds": 0.0637028
+        },
+        {
+          "name": "source_archive_test",
+          "seconds": 12.8992
+        },
+        {
+          "name": "spill_io_test",
+          "seconds": 0.00404379
+        }
+      ],
+      "asan-junit.xml": [
+        {
+          "name": "source_journal_test",
+          "seconds": 0.0203632
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.0180221
+        },
+        {
+          "name": "source_image_test",
+          "seconds": 0.210194
+        },
+        {
+          "name": "source_archive_test",
+          "seconds": 13.0269
+        },
+        {
+          "name": "spill_io_test",
+          "seconds": 0.0157903
+        }
+      ],
+      "windows": [
+        {
+          "name": "source_journal_test",
+          "seconds": 0.976865
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.990945
+        },
+        {
+          "name": "source_image_test",
+          "seconds": 0.946402
+        },
+        {
+          "name": "spill_io_test",
+          "seconds": 0.687106
+        }
+      ]
+    },
+    "exact_core_pins": 104
+  },
+  "failed_native_attempt": {
+    "kind": "native-2eedc00d",
+    "container": "kvmem-source-import-native-2eedc00d",
+    "id": "f525290a4b058829191b91b5ca0049a15ff61abdd79944d46ec336e47c6b2687",
+    "root": "/home/yifan/kvmem-validation/source-import-native-20261031-2eedc00d",
+    "started": "2026-10-31T11:00:57.489153292Z",
+    "finished": "2026-10-31T11:03:37.104584701Z",
+    "exit_code": 1,
+    "oom": false,
+    "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+    "evidence_sha256": "cd73b9fc1d348c80f0042771866f82b0527715ba4914ce4d7a1aff2ede783067",
+    "result": null
+  },
+  "native": {
+    "kind": "native-46b42640",
+    "container": "kvmem-source-import-native-46b42640",
+    "id": "66a041fc6256208166e01b47e9c50299d9573c9e9abf69cedd7fe404ea428dc9",
+    "root": "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640",
+    "started": "2026-10-31T11:04:42.793485398Z",
+    "finished": "2026-10-31T11:05:28.519036474Z",
+    "exit_code": 0,
+    "oom": false,
+    "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+    "evidence_sha256": "4b8cb39fc686203d2857db2005727d57bb8f7b5ee49f24ead30b20244036ca01",
+    "result": {
+      "passed": true,
+      "binaries_before": {
+        "build-native/apps/ninfer-serve": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+        "build-native/tests/ninfer_memory_policy_tests": "16dc5c288296f511b528179da5f615a93adcf7f7ee8dd4d36a83fc85c45bb742",
+        "build-native/tests/ninfer_query_policy_tests": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+        "build-native/tests/ninfer_engine_source_recovery_real_test": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+        "build-native/tests/ninfer_engine_source_forget_real_test": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+        "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+        "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+        "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "56c5d961a5a0930a49191ca4cae4c13acca34916ca2fce209167863dd74cac13"
+      },
+      "binaries_after": {
+        "build-native/apps/ninfer-serve": "c218442864d5ddc6612d1b5fc58bd83537a4a73f5b2039e24435ca97782c8bf8",
+        "build-native/tests/ninfer_memory_policy_tests": "c4b51435135d244f686e9dca14fd014086467c69e305b15476e6af13c1bbb779",
+        "build-native/tests/ninfer_query_policy_tests": "ad01043bbf898aa75020649b8441ddd5581f0151f3135cdb376ffc3ecd6042a2",
+        "build-native/tests/ninfer_engine_source_recovery_real_test": "e1a1fc850a8012319076fc725b8f14aabeafee5ca5414e1ac99f27609e33fd1b",
+        "build-native/tests/ninfer_engine_source_forget_real_test": "1783567ae620e9c33222230e21513847353fbd6a2cfe7c17a57ac5b693b00807",
+        "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "db333e4c232ebb57752e1039a302b4166bddf574ca75385069cdc3d6bb04b545",
+        "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+        "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "ecb8ccabf9ce49af225b8f030c6d2601215934824ea572883261f5617d503b92"
+      },
+      "native_binaries_identical": false,
+      "native_checks": 12,
+      "components": [
+        "source_image_test",
+        "source_archive_test"
+      ],
+      "parent_root": "/home/yifan/kvmem-validation/source-import-native-20261031-2eedc00d",
+      "source_pins": 3446,
+      "contract_pins": 125,
+      "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+      "scope": "Current C7 core/Native C++20 regression; Engine archive API and archive-driven model inference still absent"
+    }
+  },
+  "gpu": {
+    "controller": {
+      "kind": "gpu",
+      "container": "kvmem-source-import-gpu-46b42640",
+      "id": "5d6baeccb293eae7e87f1f0b435837113749c8a9caf2a93d4566de36f580f69b",
+      "root": "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640",
+      "started": "2026-10-31T11:05:43.88238986Z",
+      "finished": "2026-10-31T11:10:13.230623235Z",
+      "exit_code": 0,
+      "oom": false,
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "evidence_sha256": "6a9ce2a65749025e841d9f4f0f8af6e29deaa7469c1559eb64649549c3e3f832"
+    },
+    "fresh_execution": true,
+    "cases": [
+      {
+        "config": "pinned-pool-contract",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-8d8b486fece4",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_query_policy_tests",
+          "ninfer_kvmem_checkpoint_pool_test"
+        ],
+        "binary_sha256": "ad01043bbf898aa75020649b8441ddd5581f0151f3135cdb376ffc3ecd6042a2",
+        "passed": true,
+        "terminal": true,
+        "id": "13962ba992d8c69a5b043916cd3cc08953f46f5ee2e9aca810cfc389041f2091",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:06:34.143234452Z",
+          "FinishedAt": "2026-10-31T11:06:34.806356353Z"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:06:34.143234452Z",
+          "FinishedAt": "2026-10-31T11:06:34.806356353Z"
+        }
+      },
+      {
+        "config": "quota-lru-none",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-c846ac303e82",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "db333e4c232ebb57752e1039a302b4166bddf574ca75385069cdc3d6bb04b545",
+        "passed": true,
+        "terminal": true,
+        "id": "e9400acade50fe0ff9a2bbd5d4b5e409ee3014f0b64cde00d833475f0ffe7796",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:06:38.151085924Z",
+          "FinishedAt": "2026-10-31T11:07:03.565888597Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308084854,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 176246,
+          "mtp": false,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308084854,
+          "rebuild_speculative_rounds": 0,
+          "redundancy": false,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:06:38.151085924Z",
+          "FinishedAt": "2026-10-31T11:07:03.565888597Z"
+        }
+      },
+      {
+        "config": "quota-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-3fd7263bbaab",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "db333e4c232ebb57752e1039a302b4166bddf574ca75385069cdc3d6bb04b545",
+        "passed": true,
+        "terminal": true,
+        "id": "ad399ede4e432c64963d70fb72adad782dd708aa780db001897291da3d066b5d",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:07:06.85843303Z",
+          "FinishedAt": "2026-10-31T11:07:33.622838607Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308089986,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 181378,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308089986,
+          "rebuild_speculative_rounds": 2,
+          "redundancy": false,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:07:06.85843303Z",
+          "FinishedAt": "2026-10-31T11:07:33.622838607Z"
+        }
+      },
+      {
+        "config": "quota-redundancy-none",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-d379fefabb11",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "db333e4c232ebb57752e1039a302b4166bddf574ca75385069cdc3d6bb04b545",
+        "passed": true,
+        "terminal": true,
+        "id": "48395ada8d411b5c03e59d1785707dd483250300cb0642efda22fbb650e08876",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:07:36.779643236Z",
+          "FinishedAt": "2026-10-31T11:08:03.328383203Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308084854,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 176246,
+          "mtp": false,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308084854,
+          "rebuild_speculative_rounds": 0,
+          "redundancy": true,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:07:36.779643236Z",
+          "FinishedAt": "2026-10-31T11:08:03.328383203Z"
+        }
+      },
+      {
+        "config": "quota-redundancy-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-7505710d2f38",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_MTP=1",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "db333e4c232ebb57752e1039a302b4166bddf574ca75385069cdc3d6bb04b545",
+        "passed": true,
+        "terminal": true,
+        "id": "bddb9e10bed5f96f02d166bff5535f161a486e2728c104f2ce4a895e3b1dbb39",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:08:06.695132456Z",
+          "FinishedAt": "2026-10-31T11:08:33.730834067Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308089986,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 181378,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308089986,
+          "rebuild_speculative_rounds": 2,
+          "redundancy": true,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:08:06.695132456Z",
+          "FinishedAt": "2026-10-31T11:08:33.730834067Z"
+        }
+      },
+      {
+        "config": "recovery-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-21b1b22e058b",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_RECOVERY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_SOURCE_RECOVERY_MTP=1",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_recovery_real_test"
+        ],
+        "binary_sha256": "e1a1fc850a8012319076fc725b8f14aabeafee5ca5414e1ac99f27609e33fd1b",
+        "passed": true,
+        "terminal": true,
+        "id": "b2d33b87271f4fdbb0202f21a4f4aa16e1afde508fd4fa04c03ddaf3b881cc40",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:08:37.697210249Z",
+          "FinishedAt": "2026-10-31T11:09:52.634326029Z"
+        },
+        "result": {
+          "admission_reserve_rejected": true,
+          "cancel_computed": 512,
+          "cancel_processed": 512,
+          "cancelled_source_id": 2,
+          "canonical_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "final_source_records": 12,
+          "first_token_stop": true,
+          "fresh_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "history_evictions": 6,
+          "input_tokens": 32768,
+          "mtp": true,
+          "original_speculative_rounds": 2,
+          "rebuild_prefix": 1024,
+          "rebuilt_source_id": 3,
+          "rebuilt_speculative_rounds": 2,
+          "redundancy": false,
+          "retired_pages": 480,
+          "source_id": 1,
+          "source_only_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "source_only_speculative_rounds": 2,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:08:37.697210249Z",
+          "FinishedAt": "2026-10-31T11:09:52.634326029Z"
+        }
+      },
+      {
+        "config": "forget-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-898844765646",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-import-native-20261031-46b42640:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_FORGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_SOURCE_FORGET_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_forget_real_test"
+        ],
+        "binary_sha256": "1783567ae620e9c33222230e21513847353fbd6a2cfe7c17a57ac5b693b00807",
+        "passed": true,
+        "terminal": true,
+        "id": "328d75d5fad37ac4e2e2404bd9e8c172b1bf84b90ba5b13fabc11df4161ce0f2",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:09:56.262997302Z",
+          "FinishedAt": "2026-10-31T11:10:12.31695789Z"
+        },
+        "result": {
+          "busy_partial_prefill": true,
+          "checkpoint_bytes_after": 924062228,
+          "checkpoint_bytes_before": 1540423578,
+          "discarded_native_domains": 3,
+          "final_staging_bytes": 0,
+          "forgotten_sources": 3,
+          "fresh_reused_tokens": 0,
+          "fresh_source_id": 6,
+          "fresh_speculative_rounds": 2,
+          "host_bytes_after": 26808320,
+          "host_bytes_before": 88954880,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "redundancy": false,
+          "revoked_staging_bytes": 8192,
+          "source_bytes_after": 53760,
+          "source_bytes_before": 79104,
+          "sources_after": 2,
+          "sources_before": 5,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T11:09:56.262997302Z",
+          "FinishedAt": "2026-10-31T11:10:12.31695789Z"
+        }
+      }
+    ],
+    "quota_summary": [
+      {
+        "config": "quota-lru-none",
+        "evictions": 8,
+        "budget": 402653184,
+        "peak": 308084854,
+        "refusal_healthy": true
+      },
+      {
+        "config": "quota-lru-mtp4",
+        "evictions": 8,
+        "budget": 402653184,
+        "peak": 308089986,
+        "refusal_healthy": true
+      },
+      {
+        "config": "quota-redundancy-none",
+        "evictions": 8,
+        "budget": 402653184,
+        "peak": 308084854,
+        "refusal_healthy": true
+      },
+      {
+        "config": "quota-redundancy-mtp4",
+        "evictions": 8,
+        "budget": 402653184,
+        "peak": 308089986,
+        "refusal_healthy": true
+      }
+    ],
+    "scope": "Existing pinned pool/quota/source rebuild/forget model regressions, NOT inference from persisted archive"
+  },
+  "source_import": {
+    "primitive_allocation_faults": 4,
+    "authorized_import_allocation_faults": 4,
+    "sequence": "four separate executable processes, each Debug/ASan/native Release run",
+    "collision": "old id/incarnation numerically repeat, old revision4 vs new1; durable saved version advances after append to2",
+    "new_ram_state": "fresh current source root, same accepted tokens/events/configuration, parent empty and computed0",
+    "failure": "S quota/limits/real allocation failure preserve old records, source IDs, charges and archive binding"
+  },
+  "adverse_and_limits": [
+    "C6 revision comparison cannot order resumed sources across processes. Replaced with monotonically committed blob IDs; runtime SourceRef validation remains local to its binding. Actual exec counter collision and revision reset now tested.",
+    "First native77-step build and12+2checks passed, but final provenance failed because harness overwrote frozen inputs.json. Final harness writes CURRENT metadata before freezing and verifies same3446 exact inputs afterward; same compiled candidate in a fresh directory with build-id stamp only (no C++ compile/link) passed. Failed exit1/nonOOM logs retained.",
+    "Exported native source has no Git worktree: existing build-id stamp warns build unknown. Provenance is the verified3446 inputs,125contract pins, native tree/patch chain, exact binary hashes and model identity; no unverified build-id claim. Recording initially assumed Ninja no-work wording, corrected to actual stamp-only log before publication.",
+    "Seven of8 native binaries changed. All current12native/2component and7GPU regressions rerun; never substituted C5 old binary results for current. Native targeted budget sanitizer is not whole-CUDA instrumentation.",
+    "Import retains R while allocating complete S capacities; this is a deliberate bounded copy cost, not zero-copy or whole-process RSS bound. Metadata/control/runtime/allocator overhead remains outside existing array/buffer quotas.",
+    "One binding per durable key per owner; any existing binding refuses replacement, including after independent local RAM forget. Reopen clears runtime bindings. No automatic cold-source detach/rebind policy yet.",
+    "RAM imported roots have no old parent refs; durable lineage remains in archive. Archive-only forget does NOT revoke imported RAM/native aliases; Engine unified durable-first revocation is still missing.",
+    "No Engine archive attach/save/import, archive-driven model inference, persisted checkpoint, long-source sparse replay, end-to-end performance/long-run/Agent qualification. Existing catalog/seal crash-denial and coherent whole-directory backup rollback limits remain.",
+    "GPU checks retain explicit C1/384/2048MiB scopes, not a new default1GiB GPU cohort or quality/performance comparison; repeated output fixture is mechanism evidence, not task quality.",
+    "Docker log capture initially retained only stdout; original stderr/timestamps were retrieved separately before final evidence packaging, preserving the failed native assertion Traceback without rerunning tests."
+  ],
+  "next": "Native Engine archive control-plane attachment with actual Frontend/Program configuration, async save receipts, S import and new-domain rebuild, then persistent-first unified family revocation and actual two-process model acceptance",
+  "evidence": {
+    "path": "artifacts/lifecycle-source-import/evidence.zip",
+    "sha256": "5afa13ca74c2e0072f1bc72f8e4b966a37163008bbf3694e8adec337de1a785e",
+    "bytes": 2199513
+  }
+}

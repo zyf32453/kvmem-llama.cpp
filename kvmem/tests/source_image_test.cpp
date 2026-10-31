@@ -324,6 +324,69 @@ void allocation_failures_and_move_assignment() {
     }
     CHECK(!ram.charged_bytes());
 }
+void import_new_root_and_atomic_failure() {
+    Fixture f; HostKvStorage ram(1<<16);
+    auto image = prepare_source_image(f.store, f.ref, limits(), ram);
+    SourceJournalStore target{{1<<20,8192,256,4}};
+    const auto seed = target.capture(configuration(), nullptr, 0, nullptr, 0, 0);
+    const auto imported = target.import_image(image); const auto state = target.state(imported);
+    CHECK(!(imported.source == f.ref.source) && imported.revision == 1 && imported.source.id == seed.source.id+1);
+    CHECK(state.configuration == configuration() && state.accepted_frontier == 513 && !state.computed_frontier);
+    CHECK(state.parent == SourceRef{} && state.parent_prefix == 0 && state.events == 3);
+    std::vector<int32_t> actual(f.rows.size()); target.read_tokens(imported,0,actual.data(),actual.size()); CHECK(actual == f.rows);
+    for (uint64_t i = 0; i < state.events; ++i) {
+        const auto expected = image.event(i), event = target.event(imported,i);
+        CHECK(event.id == expected.id && event.begin == expected.begin && event.end == expected.end &&
+            event.kind == expected.kind && event.complete == expected.complete);
+    }
+    const auto child = f.store.branch(f.ref,258);
+    auto branch_image = prepare_source_image(f.store,child,limits(),ram);
+    const auto branch_import = target.import_image(branch_image);
+    CHECK(target.state(branch_import).parent == SourceRef{} && target.state(branch_import).accepted_frontier == 258);
+    CHECK(!target.event(branch_import,2).complete && target.event(branch_import,2).end == 258);
+    CHECK(target.state(seed).accepted_frontier == 0);
+    const int32_t next = 17;
+    const auto appended = target.append(imported,&next,1,nullptr,0,513);
+    CHECK(target.state(appended).accepted_frontier == 514);
+
+    SourceJournalStore probe{{1<<20,8192,256,2}};
+    const auto metadata = probe.stats().metadata_bytes;
+    const auto payload = 513*sizeof(int32_t)+8*sizeof(SourceEvent);
+    SourceJournalStore exact{{metadata+payload,8192,256,2}}, short_s{{metadata+payload-1,8192,256,2}};
+    const auto old = short_s.capture(configuration(),nullptr,0,nullptr,0,0);
+    const auto before = short_s.stats();
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { short_s.import_image(image); });
+    CHECK(short_s.stats().charged == before.charged && short_s.stats().sources == 1 && short_s.stats().denied > before.denied);
+    CHECK(short_s.state(old).ref == old);
+    exact.import_image(image); CHECK(exact.stats().charged == exact.stats().capacity);
+    SourceJournalStore token_limit{{1<<20,512,256,2}}, event_limit{{1<<20,8192,2,2}}, full{{1<<20,8192,256,1}};
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { token_limit.import_image(image); });
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { event_limit.import_image(image); });
+    const auto occupied = full.capture(configuration(),nullptr,0,nullptr,0,0);
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { full.import_image(image); });
+    CHECK(full.state(occupied).ref == occupied && full.stats().sources == 1);
+
+    size_t failures = 0; bool complete = false; const auto held_r = ram.charged_bytes();
+    for (size_t point = 0; point < 32; ++point) {
+        SourceJournalStore destination{{1<<20,8192,256,2}};
+        const auto existing = destination.capture(configuration(),nullptr,0,nullptr,0,0);
+        const auto charge = destination.stats().charged; bool failed = false;
+        fail_at = point; allocations = 0;
+        try { destination.import_image(image); } catch (const std::bad_alloc &) { failed = true; }
+        fail_at = SIZE_MAX;
+        CHECK(ram.charged_bytes() == held_r && destination.state(existing).ref == existing);
+        if (!failed) { complete = true; break; }
+        ++failures; CHECK(destination.stats().charged == charge && destination.stats().sources == 1);
+        const auto retry = destination.import_image(image); CHECK(retry.source.id == existing.source.id+1);
+    }
+    CHECK(complete && failures > 0);
+    const auto empty_source = f.store.capture(configuration(),nullptr,0,nullptr,0,0);
+    auto empty_image = prepare_source_image(f.store,empty_source,limits(),ram);
+    const auto empty_import = probe.import_image(empty_image); CHECK(!probe.state(empty_import).accepted_frontier);
+    auto moved = std::move(empty_image); const auto sources = probe.stats().sources;
+    rejects(MemoryErrorCode::InvalidPlan,[&] { probe.import_image(empty_image); }); CHECK(probe.stats().sources == sources);
+    std::printf("atomic source image import allocation failure points: %zu\n",failures);
+}
 } // namespace
 int main() {
     roundtrip_and_file();
@@ -333,5 +396,6 @@ int main() {
     limits_transport_and_revision();
     every_transport_failure();
     allocation_failures_and_move_assignment();
-    std::puts("source image codec contracts passed; no durable manifest or native restore claim");
+    import_new_root_and_atomic_failure();
+    std::puts("source image codec and atomic data import contracts passed; no native restore claim");
 }

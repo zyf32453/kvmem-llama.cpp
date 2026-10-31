@@ -2,6 +2,8 @@
 
 日期：2026-10-31。范围是 Linux 本地文件系统上的独立源归档组件，单 owner 串行管理、后台文件写入。已实现真实文件、重开、版本/家族遗忘 fence、配额与失败处理；尚未接入 NInfer Engine，不代表已经能通过 Engine 跨重启推理或执行系统级 ForgetSource。完整阶段 C、D–F 继续开放。
 
+后续 C7 已补原子源导入、当前读回执授权的 RAM binding 和持久保存序号，见 [C7 源导入与跨进程续存](kv-lifecycle-source-import.md)。下文的 C6 运行结果仍按其原候选归属；当前 Engine 接线依然未完成。
+
 ## 本批交付与完成条件
 
 在已有 SourceJournalStore、SourceImage、StorageIoQueue 和辅助 allocator 上建立持久的源归档权威。完成条件是：文件写完不自动授权恢复；晚到 writer 和旧版本不能覆盖当前资格；遗忘后重开不能授权旧 key；缺失/损坏/提交不确定时拒绝；在真实 reader、writer、receipt 退出前不提前归还相应配额。本组件不改变 CPU KV 退休、GPU 工作集、模型数学或原生 checkpoint 格式。
@@ -16,13 +18,13 @@
 
 `create()` 只接受新目录；已有目录必须 `open()`。打开需要既有 lock、完整 catalog 与 seal，独占 flock 失败明确返回 Pending。不同 owner、进程和 namespace 的工单不能互用。读写 receipt 可以晚于包装 owner 退出，但它们保留实际表、文件 quota 和目录锁；不能同时打开另一 owner 来绕过这些权利。
 
-重开时，磁盘源条目不会自动绑定到任何 RAM SourceRef。`enroll()` 必须从当前 SourceJournalStore 验证真实源；分支必须先登记现存祖先。当前尚无“重开后把旧 key 导入/绑定为新 RAM 源”的接口，下一批与 Engine 导入一起实现。不能只比较 decoded origin 的数值来补这个缺口；跨进程的 SourceRef 数值本来就可能重复。
+重开时，磁盘源条目不会自动绑定到任何 RAM SourceRef。`enroll()` 必须从当前 SourceJournalStore 验证真实源；分支必须先登记现存祖先。后续 `import_source()` 通过当前 read receipt 将旧 key 显式绑定到原子导入的新 RAM 源，已有 binding 拒绝替换；不能只比较 decoded origin 的数值来取得资格，跨进程的 SourceRef 数值本来就可能重复。
 
 ## 保存、发布、读取与遗忘
 
 1. owner 登记源，`save()` 从当前 revision 准备真实 R 中的不可变 SourceImage，并先提交 blob ID high-water mark，再投递现有 StorageIoQueue。queue 的 jobs/bytes 上限继续生效，运行中也计数。没有新增线程池。
 2. worker 只创建独有的 `blob.ID`，流式编码、同步文件、同步目录，返回 I/O 完成状态。它不改清单、源目录、KV 退休状态或 Engine。失败和取消不会删除原源，也不会发布部分文件。
-3. owner `publish()` 等待条件满足后，重新检查工单归属、当前源身份/配置、归档条目是否存在及版本。源只在末尾追加时，较早的不可变 accepted 前缀可作为明确旧版快照发布，避免连续生成让保存永久失效。已发布新版后，旧 revision 或同 revision 的更早工单不能覆盖它；源已遗忘或绑定变化则拒绝。相同已发布工单重复确认幂等。
+3. owner `publish()` 等待条件满足后，重新检查工单归属、当前源身份/配置、归档条目是否存在及版本。源只在末尾追加时，较早的不可变 accepted 前缀可作为明确旧版快照发布，避免连续生成让保存永久失效。后续 C7 使用持久 blob 序号拒绝旧工单覆盖新版；RAM revision 只在当前 binding 内校验，不能跨重启比大小。源已遗忘或绑定变化则拒绝，相同已发布工单重复确认幂等。
 4. `read()` 先查询当前权威，再核对文件大小、SourceImage 校验/配置、完整文件摘要及准确 SourceState，成功才返回带 reader lease 的对象。adapter 在真正导入前必须再次 `validate()`；读取期间发生遗忘或新版替换后，旧 receipt 失效，但其 R 和旧文件仍随真实 owner 存活。
 5. `forget()` 先提交删除指定 durable key 及全部子孙的清单，关闭新发布和新读取；`collect()` 再清理不再被清单引用、job 已结束、receipt/reader 都已退出的文件。进程重开后也用同一清单拒绝旧 key，不根据剩余 blob 重建资格。
 
@@ -81,9 +83,9 @@ ctest --test-dir build-source-archive --no-tests=error --output-on-failure \
 
 ASan/UBSan 使用 `-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer`、同样 linker flags，运行时启用 `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1`、`UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`。源文件按实际冻结字节复现，故障注入通过测试可执行文件链接真实实现并 wrap 系统调用，没有向公共 API 添加测试开关。
 
-## 下一批接线条件
+## 接线落实程度与下一步
 
-1. 先实现受 S 约束的原子源镜像导入，建立新 SourceRef，computed 重置为零，不能依赖旧进程 origin。归档 key 到新 RAM 源的 binding 只能来自当前有效 read receipt。
-2. 保存版本须使用 durable 序号/owner binding epoch；跨重启不能比较新旧进程的 SourceRef revision 大小来判断谁更新。当前发布比较只适用于现存的同一 RAM binding，重开后还不能沿用旧 key 保存。
+1. C7 已实现受 S 约束的原子源镜像导入，建立当前新根、computed 重置为零；归档 key 的新 RAM binding 只接受当前有效 read receipt，未接 Engine。
+2. C7 已将保存新旧顺序改为持久 blob 序号，独立 exec 覆盖 counter 数值重复与 revision 重置后继续保存；SourceRef 只在当前 RAM owner 内校验。
 3. 再接空闲 Engine 的保存/读取/重建入口，先验证持久撤销，再按现有 C4 顺序撤销所有在线别名。恢复失败保持已提交源或明确回滚新源，不发布半成品。
 4. 最后用实际模型做两进程保存/恢复、已回收 CPU 页后的新域重建、晚到保存/读取中遗忘及损坏/容量拒绝；仅数据组件成功不能关闭阶段 C。

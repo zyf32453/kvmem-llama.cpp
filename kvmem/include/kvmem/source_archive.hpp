@@ -103,6 +103,11 @@ public:
     // Required again immediately before an adapter imports/rebuilds from read().
     // A decoded image by itself is data and cannot replace this receipt check.
     void validate(const SourceArchiveRead &) const;
+    // Explicit restart import: validate CURRENT receipt, atomically capture a
+    // fresh S root with computed0, then bind this durable key to it. A live
+    // binding returns Pending; no implicit replacement, alias or decoded-origin
+    // matching. Durable lineage remains in the archive, not old RAM parent refs.
+    SourceRef import_source(const SourceArchiveRead &, SourceJournalStore &);
     std::optional<SourceArchiveSnapshot> inspect(size_t slot) const;
     // Durable archive-family revocation ONLY. An Engine adapter must then revoke
     // its online aliases/source family; this is not system-wide ForgetSource.

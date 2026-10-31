@@ -501,11 +501,118 @@ void shared_metadata_and_cleanup_retry() {
     auto reopened = SourceArchive::open(temp.path(), config(), limits(), budget);
     auto new_key = reopened.enroll(f.store, f.ref); CHECK(new_key.id > replacement.id);
 }
+void import_receipt_version_and_family() {
+    Temp temp; Fixture f; SourceArchiveKey root, child;
+    for (int i = 0; i < 4; ++i) f.append();
+    {
+        auto archive = SourceArchive::create(temp.path(),config(),limits()); root = archive.enroll(f.store,f.ref);
+        const auto branch = f.store.branch(f.ref,300); child = archive.enroll(f.store,branch);
+        StorageIoQueue queue(2,1<<20);
+        auto a = archive.save(queue,f.store,f.ref,f.staging), b = archive.save(queue,f.store,branch,f.staging);
+        a.wait(); b.wait(); archive.publish(a,f.store); archive.publish(b,f.store);
+    }
+    auto archive = SourceArchive::open(temp.path(),config(),limits());
+    auto read = archive.read(root,f.staging);
+    SourceJournalStore small{{1<<16,32,2,2}}, restored{{1<<20,8192,256,4}}, another{{1<<20,8192,256,4}};
+    const auto small_before = small.stats();
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { archive.import_source(read,small); });
+    CHECK(small.stats().sources == 0 && small.stats().charged == small_before.charged);
+    const auto imported = archive.import_source(read,restored);
+    CHECK(imported.revision == 1 && imported.revision < read.image().origin().ref.revision);
+    CHECK(!restored.state(imported).computed_frontier && restored.state(imported).parent == SourceRef{});
+    const auto count = restored.stats().sources;
+    rejects(MemoryErrorCode::Pending,[&] { archive.import_source(read,restored); }); CHECK(restored.stats().sources == count);
+    const int32_t token = 777; const auto appended = restored.append(imported,&token,1,nullptr,0,0);
+    StorageIoQueue queue(2,1<<20); auto next = archive.save(queue,restored,appended,f.staging); next.wait();
+    CHECK(appended.revision < read.image().origin().ref.revision);
+    archive.publish(next,restored); // durable sequence wins over the old process/store revision
+    rejects(MemoryErrorCode::Stale,[&] { archive.import_source(read,another); }); CHECK(!another.stats().sources);
+    auto child_read = archive.read(child,f.staging);
+    const auto imported_child = archive.import_source(child_read,restored);
+    CHECK(restored.state(imported_child).parent == SourceRef{} && archive.inspect(1)->parent == root);
+    auto late = archive.save(queue,restored,imported_child,f.staging); late.wait();
+    CHECK(archive.forget(root) == 2);
+    rejects(MemoryErrorCode::Stale,[&] { archive.publish(late,restored); });
+    rejects(MemoryErrorCode::Stale,[&] { archive.import_source(child_read,another); });
+    CHECK(restored.state(imported_child).ref == imported_child); // archive-only forget, not Engine alias revocation
 }
-int main() {
+void import_allocation_rollback() {
+    Temp temp; Fixture f; SourceArchiveKey key;
+    {
+        auto archive = SourceArchive::create(temp.path(),config(),limits()); key = archive.enroll(f.store,f.ref);
+        StorageIoQueue queue(1,1<<20); auto write = archive.save(queue,f.store,f.ref,f.staging); write.wait(); archive.publish(write,f.store);
+    }
+    auto archive = SourceArchive::open(temp.path(),config(),limits()); auto read = archive.read(key,f.staging);
+    size_t failures = 0; bool complete = false;
+    for (size_t point = 0; point < 32; ++point) {
+        SourceJournalStore destination{{1<<20,8192,256,4}}; const auto before = destination.stats().charged;
+        bool failed = false; allocation::calls = 0; allocation::fail_at = point;
+        try { archive.import_source(read,destination); } catch (const std::bad_alloc &) { failed = true; }
+        allocation::fail_at = SIZE_MAX;
+        if (!failed) { complete = true; break; }
+        ++failures; CHECK(!destination.stats().sources && destination.stats().charged == before);
+        archive.validate(read); CHECK(archive.stats().healthy);
+    }
+    CHECK(complete && failures > 0); std::printf("archive authorized import allocation failure points: %zu\n",failures);
+}
+void write_client_key(const std::filesystem::path & path, SourceArchiveKey key) {
+    std::ofstream out(path.string()+".key",std::ios::binary);
+    out.write(reinterpret_cast<const char *>(key.space.data()),key.space.size());
+    out.write(reinterpret_cast<const char *>(&key.id),sizeof(key.id)); CHECK(out.good());
+}
+SourceArchiveKey client_key(const std::filesystem::path & path) {
+    SourceArchiveKey key; std::ifstream in(path.string()+".key",std::ios::binary);
+    in.read(reinterpret_cast<char *>(key.space.data()),key.space.size());
+    in.read(reinterpret_cast<char *>(&key.id),sizeof(key.id)); CHECK(in.good()); return key;
+}
+void restart_child(const char * mode, const std::filesystem::path & path) {
+    if (!std::strcmp(mode,"--restart-write")) {
+        Fixture f; for (int i = 0; i < 3; ++i) f.append();
+        auto archive = SourceArchive::create(path,config(),limits()); const auto key = archive.enroll(f.store,f.ref);
+        StorageIoQueue queue(1,1<<20); auto write = archive.save(queue,f.store,f.ref,f.staging); write.wait(); archive.publish(write,f.store);
+        write_client_key(path,key); return;
+    }
+    SourceJournalStore store{{1<<20,8192,256,4}}; HostKvStorage staging(1<<20);
+    auto archive = SourceArchive::open(path,config(),limits()); const auto key = client_key(path);
+    if (!std::strcmp(mode,"--restart-deny")) {
+        rejects(MemoryErrorCode::Stale,[&] { (void)archive.read(key,staging); });
+        CHECK(archive.stats().sources == 0); archive.collect(); return;
+    }
+    auto read = archive.read(key,staging);
+    const auto imported = archive.import_source(read,store); CHECK(!store.state(imported).computed_frontier);
+    if (!std::strcmp(mode,"--restart-append")) {
+        // Both executables start their RAM incarnation counter at1. Numeric
+        // identity collision is legal; only a current archive receipt authorizes
+        // this import, and durable version ordering must not use those counters.
+        CHECK(imported.source == read.image().origin().ref.source);
+        CHECK(imported.revision == 1 && read.image().origin().ref.revision == 4);
+        const int32_t token = 777; const auto next = store.append(imported,&token,1,nullptr,0,0);
+        StorageIoQueue queue(1,1<<20); auto write = archive.save(queue,store,next,staging); write.wait(); archive.publish(write,store);
+        std::printf("exec restart: numeric-origin-collision=1 saved-revision=4 new-revision=1 durable-publication=PASS\n"); return;
+    }
+    CHECK(!std::strcmp(mode,"--restart-forget"));
+    CHECK(read.image().origin().accepted_frontier == 517);
+    int32_t last = 0; store.read_tokens(imported,516,&last,1); CHECK(last == 777);
+    CHECK(archive.forget(key) == 1);
+    rejects(MemoryErrorCode::Stale,[&] { archive.validate(read); });
+}
+void separate_exec_restart() {
+    Temp temp;
+    for (const auto mode : {"--restart-write","--restart-append","--restart-forget","--restart-deny"}) {
+        const auto child = ::fork(); CHECK(child >= 0);
+        if (!child) { ::execl("/proc/self/exe","source_archive_test",mode,temp.path().c_str(),static_cast<char *>(nullptr)); ::_exit(74); }
+        int result = 0; CHECK(::waitpid(child,&result,0) == child);
+        CHECK(WIFEXITED(result) && WEXITSTATUS(result) == 0);
+    }
+    std::puts("four separate executable processes: save/import-append/reimport-forget/reopen-deny PASS");
+}
+}
+int main(int argc, char ** argv) {
+    if (argc == 3) { restart_child(argv[1],argv[2]); return 0; }
     roundtrip_reopen_and_lock(); versions_and_reader_retention(); forget_family_late_writer_and_reuse();
     cancel_queue_quota_and_local_forget(); receipts_owners_and_survivors(); restart_orphans_and_corruption();
     rollback_and_missing_authority(); error_and_process_crash_boundaries(); actual_save_io_failures(); allocation_failures();
     shared_metadata_and_cleanup_retry();
+    import_receipt_version_and_family(); import_allocation_rollback(); separate_exec_restart();
     std::puts("source archive lifecycle, quotas, durable authority and failure boundaries PASS");
 }

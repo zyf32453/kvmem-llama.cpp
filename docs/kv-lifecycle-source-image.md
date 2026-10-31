@@ -2,6 +2,8 @@
 
 日期：2026-10-31。本组件最初从 C4 提交 `57a2f514baf73d7b6b5a08fca5bdd2b27aa67739` 建立离线分支，现已合入完成首批功能验收的 C5 基线。源记录镜像已通过 Windows、Linux 内存检查和 NInfer 实际构建接入检查；后续 [C6 SourceArchive](kv-lifecycle-source-archive.md) 已在独立组件内建立持久清单与归档发布/遗忘 fence，但尚未接入 Engine 保存/导入和持久模型恢复。完整阶段 C 和生产系统都未完成。
 
+后续 [C7](kv-lifecycle-source-import.md) 已补镜像到 S 的原子数据导入、当前读回执授权和跨进程续存；数据对象本身仍不提供归档/旧 KV 许可。当前组合合同为 [source-import-candidate-v1](contracts/kv-lifecycle-source-import-candidate-v1.json)，以下源镜像最初批次的身份与结果保持历史归属。
+
 ## 本批解决什么问题
 
 此前 `SourceJournalStore` 保存已接受的 token 和事件，只提供 owner 串行的同步复制读取。若直接持有引擎锁写大文件，磁盘等待会拖住引擎；若把未计费的完整向量交给后台，又会绕过内存预算。
@@ -80,7 +82,7 @@ R 不包含固定 SourceImage 对象、HostKvStorage 的 account/control 对象�
 
 合入 C5 后，在新的隔离目录复用已完成的构建缓存，实际完成 NInfer/C++20 Release 增量编译及 source_image_test。原 C5 目录保持不变；serve、policy/query bundle、三个模型检查和两个预算检查共八个原生可执行文件的 SHA-256 前后完全相同。因此 C5 的 12 项原生及七组 GPU 结果按相同二进制复用，没有重复计成源镜像的新 GPU 检查。这也明确说明当前 Engine 路径还没有调用新增的保存/导入 API。
 
-源镜像合入时的组合源码合同是 [source-image-candidate-v1](contracts/kv-lifecycle-source-image-candidate-v1.json)，冻结 111 项归一化源码输入及 R07 组件契约；初次 102 项精确字节清单继续作为历史测试输入保留。接入检查的日志、输入与八份前后摘要在 `artifacts/lifecycle-source-image-integration/evidence.tar.gz`，SHA-256 为 `0dbd1be8f27e9f790db96c0cffc8118c1743aef341cf64a9d5c8cab0a4c95cd1`。后续 C6 增加归档输入后，以 [source-archive-candidate-v1](contracts/kv-lifecycle-source-archive-candidate-v1.json) 为当前组合合同；下一项是受配额的源导入与 Engine 接线，不从镜像存在或 checksum 通过推导恢复许可。
+源镜像合入时的组合源码合同是 [source-image-candidate-v1](contracts/kv-lifecycle-source-image-candidate-v1.json)，冻结 111 项归一化源码输入及 R07 组件契约；初次 102 项精确字节清单继续作为历史测试输入保留。接入检查的日志、输入与八份前后摘要在 `artifacts/lifecycle-source-image-integration/evidence.tar.gz`，SHA-256 为 `0dbd1be8f27e9f790db96c0cffc8118c1743aef341cf64a9d5c8cab0a4c95cd1`。后续 C6 的 [source-archive-candidate-v1](contracts/kv-lifecycle-source-archive-candidate-v1.json) 和 C7 的 source-import 合同分别记录各批扩展；当前下一项是 Engine 接线，不从镜像存在或 checksum 通过推导恢复许可。
 
 可在独立主机构建目录复现：
 

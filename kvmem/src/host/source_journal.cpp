@@ -1,4 +1,5 @@
 #include "kvmem/source_journal.hpp"
+#include "kvmem/source_image.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -162,6 +163,56 @@ SourceRef SourceJournalStore::capture_impl(const SourceConfiguration & configura
 SourceRef SourceJournalStore::capture(const SourceConfiguration & configuration,
     const int32_t * tokens, size_t count, const SourceEvent * events, size_t event_count, uint64_t computed) {
     return capture_impl(configuration, tokens, count, events, event_count, computed);
+}
+SourceRef SourceJournalStore::import_image(const SourceImage & image) {
+    const auto origin = image.origin();
+    if (origin.accepted_frontier > limits_.max_tokens || origin.events > limits_.max_events)
+        exhausted("source import row/event limit exceeded");
+    // Reject moved-from images and size/geometry limits before touching S.
+    if (source_image_bytes(origin, {UINT64_MAX, limits_.max_tokens, limits_.max_events}) != image.image_bytes())
+        throw MemoryError(MemoryErrorCode::InvalidPlan, "source image owner is empty or inconsistent");
+    Entry * destination = nullptr;
+    for (size_t i = 0; i < limits_.max_sources; ++i)
+        if (!entries_[i].state.ref.source.id) { destination = &entries_[i]; break; }
+    if (!destination) exhausted("source import directory entry limit exceeded");
+    if (next_id_ == UINT64_MAX)
+        throw MemoryError(MemoryErrorCode::InvalidSession, "source identity space exhausted");
+    Entry prepared;
+    prepared.token_capacity = growth(origin.accepted_frontier, 0, limits_.max_tokens, 64);
+    prepared.event_capacity = growth(origin.events, 0, limits_.max_events, 8);
+    const auto token_bytes = prepared.token_capacity * sizeof(int32_t);
+    const auto event_bytes = prepared.event_capacity * sizeof(SourceEvent);
+    if (token_bytes > UINT64_MAX - event_bytes) exhausted("source import size overflow");
+    auto reserved = [&] {
+        try { return buffers_.reserve(token_bytes + event_bytes); }
+        catch (const MemoryError & e) {
+            if (e.code() != MemoryErrorCode::BudgetExceeded) throw;
+            exhausted("historical source import budget exceeded");
+        }
+    }();
+    peak_ = std::max(peak_, metadata_bytes_ + buffers_.charged_bytes());
+    if (token_bytes) prepared.tokens = reserved.allocate(size_t(token_bytes));
+    if (event_bytes) prepared.events = reserved.allocate(size_t(event_bytes));
+    std::array<int32_t, 256> rows{};
+    for (uint64_t begin = 0; begin < origin.accepted_frontier;) {
+        const auto count = size_t(std::min<uint64_t>(rows.size(), origin.accepted_frontier-begin));
+        image.read_tokens(begin, rows.data(), count); valid_tokens(rows.data(), count);
+        std::memcpy(prepared.tokens.writable_data()+begin*sizeof(int32_t), rows.data(), count*sizeof(int32_t));
+        begin += count;
+    }
+    uint64_t previous_end = 0;
+    for (uint64_t i = 0; i < origin.events; ++i) {
+        const auto event = image.event(i); valid_event(event, origin.accepted_frontier);
+        if (event.begin < previous_end)
+            throw MemoryError(MemoryErrorCode::InvalidPlan, "imported source events overlap");
+        std::memcpy(prepared.events.writable_data()+i*sizeof(SourceEvent), &event, sizeof(event));
+        previous_end = event.end;
+    }
+    prepared.state = {{{next_id_, incarnation_}, 1}, origin.configuration, {}, 0, origin.accepted_frontier, 0, origin.events};
+    // All fallible work was private. Neither old parent identity nor a claimed
+    // computed frontier is installed; this is new source, not restored KV.
+    *destination = std::move(prepared); ++next_id_;
+    return destination->state.ref;
 }
 SourceRef SourceJournalStore::append(SourceRef expected, const int32_t * tokens, size_t count,
     const SourceEvent * events, size_t event_count, uint64_t computed) {

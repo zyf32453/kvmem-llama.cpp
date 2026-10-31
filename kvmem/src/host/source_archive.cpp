@@ -423,11 +423,11 @@ void SourceArchive::publish(const SourceArchiveWrite & write, const SourceJourna
     if (current.configuration != s.configuration || current.ref.revision < object.origin.ref.revision ||
         current.accepted_frontier < object.origin.accepted_frontier)
         throw MemoryError(MemoryErrorCode::Stale, "archive source version invalidated");
-    // Appends need not starve an immutable accepted-prefix save. Older completed
-    // jobs, however, cannot overwrite a newer published revision (or same-rev job).
+    // IDs are committed monotonically before a CURRENT source snapshot is
+    // queued. Use that durable order across restart/import: SourceRef counters
+    // belong to their RAM store and may reset or collide in another process.
     if (e.blob == object.id) return;
-    if (e.blob && (object.origin.ref.revision < e.origin.ref.revision ||
-        (object.origin.ref.revision == e.origin.ref.revision && object.id < e.blob)))
+    if (object.id < e.blob)
         throw MemoryError(MemoryErrorCode::Stale, "archive completion would regress saved version");
     s.copy_entries(); auto & next = s.scratch[index];
     next.blob = object.id; next.bytes = object.bytes; next.hash = object.hash; next.origin = object.origin;
@@ -456,6 +456,17 @@ void SourceArchive::validate(const SourceArchiveRead & read) const {
     const auto & object = s.objects[read.slot_];
     const auto index = s.find(s.key(object.source));
     if (s.entries[index].blob != object.id) throw MemoryError(MemoryErrorCode::Stale, "archive read was replaced or forgotten");
+}
+SourceRef SourceArchive::import_source(const SourceArchiveRead & read, SourceJournalStore & store) {
+    validate(read); auto & s = *state_;
+    const auto index = s.find(read.key()); auto & entry = s.entries[index];
+    if (entry.bound_store)
+        throw MemoryError(MemoryErrorCode::Pending, "archive source already has a live owner binding");
+    const auto imported = store.import_image(read.image());
+    try { validate(read); }
+    catch (...) { store.forget(imported); throw; }
+    entry.bound_store = &store; entry.bound_source = imported.source;
+    return imported;
 }
 std::optional<SourceArchiveSnapshot> SourceArchive::inspect(size_t slot) const {
     auto & s = *state_; s.check();

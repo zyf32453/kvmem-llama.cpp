@@ -10,6 +10,7 @@
 #include <optional>
 
 namespace kvmem {
+class SourceImage;
 
 // Backend-produced digest of model, tokenizer/template, position/row encoding,
 // KV/state schema and execution configuration. A match authorizes interpreting
@@ -71,6 +72,12 @@ public:
 
     SourceRef capture(const SourceConfiguration &, const int32_t * tokens, size_t count,
         const SourceEvent * events, size_t event_count, uint64_t computed_frontier);
+    // Copy verified source DATA into a new canonical RAM root under S. Both
+    // buffers are reserved before allocation; failure publishes nothing. Old
+    // origin/parent refs are not current identities and computed restarts at0.
+    // This grants no archive/derived-KV authority; an adapter must validate its
+    // own read receipt and current configuration before calling this primitive.
+    SourceRef import_image(const SourceImage &);
     // Only accepted rows, never speculative/provisional candidates. All inputs
     // are validated and both growth buffers reserved before publishing anything.
     // A final event may be extended using its same id/kind/begin, then new events
