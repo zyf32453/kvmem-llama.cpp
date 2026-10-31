@@ -140,6 +140,43 @@ void partial_prefix_and_empty_source() {
     f.unchanged();
 }
 
+void explicit_windowed_replay_contract() {
+    Fixture f; std::array<int32_t, 3073> input{}; std::iota(input.begin(),input.end(),100);
+    auto request=f.request(); request.source=f.sources.capture(f.current.configuration,input.data(),input.size(),nullptr,0,0);
+    request.prefix_tokens=input.size(); request.mode=SourceRecoveryMode::ReplayAsNew;
+    request.budget={256,128,384,0}; request.replay={64,512};
+    rejects(MemoryErrorCode::Unsupported,[&] { plan_source_recovery(f.sources,f.model,f.current,request); });
+    f.model.capabilities.windowed_source_replay=true;
+    const auto plan=plan_source_recovery(f.sources,f.model,f.current,request);
+    CHECK(plan.device_tokens_required()==384 && plan.staging_bytes_required()==input.size()*sizeof(int32_t));
+    HostKvStorage ram(plan.staging_bytes_required());
+    auto prepared=prepare_source_recovery(plan,f.sources,f.current,ram);
+    for (size_t begin=0;begin<input.size();begin+=64) {
+        std::array<int32_t,64> rows{};const auto count=std::min(rows.size(),input.size()-begin);
+        prepared.read_tokens(f.sources,f.current,begin,rows.data(),count);
+        CHECK(std::equal(rows.begin(),rows.begin()+count,input.begin()+begin));
+    }
+    auto changed=request;changed.replay={};
+    rejects(MemoryErrorCode::InvalidPlan,[&] { plan_source_recovery(f.sources,f.model,f.current,changed); });
+    changed=request;changed.replay.chunk_tokens=65;
+    rejects(MemoryErrorCode::InvalidPlan,[&] { plan_source_recovery(f.sources,f.model,f.current,changed); });
+    changed=request;changed.replay.chunk_tokens=192;
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { plan_source_recovery(f.sources,f.model,f.current,changed); });
+    changed=request;changed.budget.reserve_tokens=129;
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { plan_source_recovery(f.sources,f.model,f.current,changed); });
+    changed=request;changed.replay.completion_tokens=f.model.capabilities.max_position;
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { plan_source_recovery(f.sources,f.model,f.current,changed); });
+    changed=request;changed.replay.completion_tokens=UINT64_MAX;
+    rejects(MemoryErrorCode::InvalidPlan,[&] { plan_source_recovery(f.sources,f.model,f.current,changed); });
+    changed=request;changed.mode=SourceRecoveryMode::RebuildAsNew;
+    rejects(MemoryErrorCode::InvalidPlan,[&] { plan_source_recovery(f.sources,f.model,f.current,changed); });
+    changed.replay={};
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { plan_source_recovery(f.sources,f.model,f.current,changed); });
+    CHECK(f.sources.forget(request.source)==1 && ram.charged_bytes()==input.size()*sizeof(int32_t));
+    rejects(MemoryErrorCode::Stale,[&] { prepared.validate(f.sources,f.current); });
+    f.unchanged();
+}
+
 void source_configuration_and_domain_fences() {
     Fixture f;
     const auto plan = f.plan();
@@ -265,6 +302,7 @@ void plan_after_actual_cpu_release_does_not_revive_retired_page() {
 int main() {
     explicit_semantics_and_capacity();
     partial_prefix_and_empty_source();
+    explicit_windowed_replay_contract();
     source_configuration_and_domain_fences();
     forget_revokes_prepared_and_old_plans();
     real_staging_quota_and_failure_atomicity();

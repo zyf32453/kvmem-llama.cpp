@@ -42,18 +42,30 @@ SourceRecoveryPlan plan_source_recovery(const SourceJournalStore & store,
         fail(MemoryErrorCode::InvalidPlan, "source recovery needs an owner stamp and a fresh destination identity");
     if (request.mode == SourceRecoveryMode::ExactState)
         fail(MemoryErrorCode::Unsupported, "accepted source rows cannot restore exact model state");
-    if (request.mode != SourceRecoveryMode::RebuildAsNew)
+    if (request.mode != SourceRecoveryMode::RebuildAsNew && request.mode != SourceRecoveryMode::ReplayAsNew)
         fail(MemoryErrorCode::InvalidPlan, "unknown source recovery mode");
     validate_fences(store, current, request);
     const auto page = descriptor.capabilities.page_tokens;
     const auto & budget = request.budget;
     if (!budget.device_tokens || budget.device_tokens % page || budget.selected_tokens % page)
         fail(MemoryErrorCode::InvalidPlan, "source recovery budget must respect native page granularity");
-    if (add(request.prefix_tokens, budget.reserve_tokens) > descriptor.capabilities.max_position)
+    const bool replay = request.mode == SourceRecoveryMode::ReplayAsNew;
+    if (replay) {
+        if (!descriptor.capabilities.windowed_source_replay)
+            fail(MemoryErrorCode::Unsupported, "backend has no windowed source replay execution contract");
+        if (!request.prefix_tokens || !request.replay.chunk_tokens || !request.replay.completion_tokens ||
+            request.replay.chunk_tokens % page || !budget.selected_tokens || !budget.reserve_tokens)
+            fail(MemoryErrorCode::InvalidPlan, "source replay requires aligned nonempty units and logical completion");
+        if (request.replay.chunk_tokens > budget.reserve_tokens)
+            fail(MemoryErrorCode::BudgetExceeded, "source replay unit exceeds the physical append reserve");
+    } else if (request.replay.chunk_tokens || request.replay.completion_tokens) {
+        fail(MemoryErrorCode::InvalidPlan, "full-prefix rebuild cannot borrow a replay budget");
+    }
+    if (add(request.prefix_tokens, replay ? request.replay.completion_tokens : budget.reserve_tokens) > descriptor.capabilities.max_position)
         fail(MemoryErrorCode::BudgetExceeded, "source recovery prefix and output exceed logical context");
     const auto prefix = rounded(request.prefix_tokens, page);
-    const auto device = add(prefix, rounded(budget.reserve_tokens, page));
-    if (prefix > budget.selected_tokens || device > budget.device_tokens)
+    const auto device = add(replay ? budget.selected_tokens : prefix, rounded(budget.reserve_tokens, page));
+    if ((!replay && prefix > budget.selected_tokens) || device > budget.device_tokens)
         fail(MemoryErrorCode::BudgetExceeded, "complete canonical source recovery does not fit the device window");
     if (request.prefix_tokens > std::numeric_limits<size_t>::max() / sizeof(int32_t))
         fail(MemoryErrorCode::InvalidPlan, "source recovery staging size overflow");

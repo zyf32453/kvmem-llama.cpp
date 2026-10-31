@@ -1,5 +1,7 @@
 # 源记录恢复规划与准备契约
 
+后续 [C9 长前缀新域重放](kv-lifecycle-source-replay.md) 已增加独立 ReplayAsNew 能力和真实模型检查；原严格短前缀入口及本页原批次结果保持原范围，不倒写成精确旧轨迹或完整生产验收。
+
 日期：2026-10-31。C3 的规划和源数据准备组件已实现并验证，后续已接入 [NInfer 规范前缀新域重建](kv-lifecycle-native-recovery.md)。本页保留组件本身的边界和原始验证归属；checkpoint/归档及完整版本闭环尚未完成，阶段 C 仍未完成。当前总状态见 [六阶段进度](kv-lifecycle-progress.md)。
 
 ## 本次完成的边界

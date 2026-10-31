@@ -7,7 +7,12 @@ namespace kvmem {
 
 // Source tokens can rebuild a NEW computation, not restore the original sparse,
 // recurrent or speculative state. ExactState deliberately has no source fallback.
-enum class SourceRecoveryMode { ExactState, RebuildAsNew };
+enum class SourceRecoveryMode { ExactState, RebuildAsNew, ReplayAsNew };
+
+struct SourceReplayBudget {
+    uint64_t chunk_tokens = 0; // maximum native prefill unit, not total history
+    uint64_t completion_tokens = 0; // logical output including backend workspace
+};
 
 // Snapshot of two existing authorities, not a second mutable catalog. The
 // adapter supplies its CURRENT execution configuration on every validation.
@@ -25,6 +30,9 @@ struct SourceRecoveryRequest {
     uint64_t prefix_tokens = 0; // accepted source prefix, not computed_frontier
     SourceRecoveryMode mode = SourceRecoveryMode::ExactState;
     MemoryBudget budget;
+    // ReplayAsNew only. budget.reserve_tokens bounds a physical append unit;
+    // completion_tokens is a separate logical limit across repeated units.
+    SourceReplayBudget replay;
 };
 
 // A fixed-size plan, not a resource reservation or a KV/state reuse permit.
@@ -48,6 +56,9 @@ private:
 // reserve independently, as in WorkingSetPlan. Chunk size is not a capacity
 // substitute. The backend still has to reserve actual main/draft/state/scratch
 // resources before executing; these arithmetic checks do not do that for it.
+// ReplayAsNew additionally requires an explicit windowed_source_replay adapter:
+// selected history + physical append reserve fit, chunk <= reserve, and total
+// prefix + logical completion fit max_position. Neither mode restores old state.
 SourceRecoveryPlan plan_source_recovery(const SourceJournalStore &,
     const MemoryDescriptor &, const SourceRecoveryContext & current, const SourceRecoveryRequest &);
 

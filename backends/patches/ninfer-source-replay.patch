@@ -1,0 +1,382 @@
+diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
+index 2818ec2..6302f7b 100644
+--- a/docs/maintainer/engine-architecture.md
++++ b/docs/maintainer/engine-architecture.md
+@@ -33,7 +33,15 @@ Qwen3.5 主后端的 `Engine` 提供显式历史源归档接口。首批支持 L
+ 
+ `import_historical_source` 仅把有当前授权的 token/event 数据导入 S，建立新的 RAM 根，computed=0。
+ 后续显式 `prepare_source_rebuild` 使用正常 Program 资源预约从规范前缀计算新域，不能复活旧
+-KV/checkpoint/coverage 身份。当前重建范围仍限完整前缀可装入窗口，不支持长源稀疏轨迹恢复。
++KV/checkpoint/coverage 身份。该入口仍要求完整前缀可装入窗口。
++
++`prepare_source_replay` 是独立的长源新域入口，要求后端明确提供 windowed_source_replay 能力。
++计划分别核对物理 selected+append 窗口、prefill 单元及逻辑 completion，原严格重建不会自动降级为
++稀疏重放。首批为 Linux、单 GPU/单请求、文本/RAM、none/MTP；复用正常 Program 的分块 prefill、
++Pressure/Query 选择、checkpoint 预约和逐单元源版本检查，禁止复用旧域。R 仍持有整个前缀副本，
++prepared-input 另占请求工作区，不承诺只占一个 chunk 的 CPU 内存。取消未完成重放不保留新 native
++history；源分支和 accepted/computed 事实按正常请求回执保留。此能力计算新的当前策略轨迹，不是
++旧稀疏/recurrent 状态的精确恢复，也不是 dense/full-attention 数学等价承诺。
+ 
+ 源或归档家族遗忘先找全持久家族对应的 RAM 根及子孙，预检查原生别名，再提交持久撤销，最后
+ 清理在线 KV/checkpoint/coverage/S。持久提交结果不确定时仍撤销已预检查的在线别名并向调用方
+diff --git a/include/ninfer/engine.h b/include/ninfer/engine.h
+index d4dc8b0..83d27bd 100644
+--- a/include/ninfer/engine.h
++++ b/include/ninfer/engine.h
+@@ -120,6 +120,11 @@ public:
+     // whole prefix and output reserve must fit; old history need not be resident.
+     [[nodiscard]] PreparedPrompt prepare_source_rebuild(HistoricalSourceRef source,
+         std::uint32_t prefix_tokens, std::uint32_t output_reserve_tokens) const;
++    // Explicit new sparse trajectory through bounded native prefill units; the
++    // accepted prefix may exceed the device window. R still holds the full
++    // prefix. No exact old-state or dense/full-attention equivalence is implied.
++    [[nodiscard]] PreparedPrompt prepare_source_replay(HistoricalSourceRef source,
++        std::uint32_t prefix_tokens, std::uint32_t output_reserve_tokens) const;
+     // Linux single-GPU text/RAM KVMem, idle owner, one fixed configuration per
+     // namespace. Reference must come from this Frontend configuration (raw/chat
+     // and template options are distinct). Metadata I/O is outside decode units.
+diff --git a/src/models/qwen3_5/program/planning/request_plan.cpp b/src/models/qwen3_5/program/planning/request_plan.cpp
+index a4bfb05..f838461 100644
+--- a/src/models/qwen3_5/program/planning/request_plan.cpp
++++ b/src/models/qwen3_5/program/planning/request_plan.cpp
+@@ -389,8 +389,10 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
+     if (prompt.source_rebuild) {
+         validate_source_rebuild(*prompt.source_rebuild);
+         const auto extra = backend_kv_pages ? std::max(draft_window, ngram_draft_window) + draft_window : 0U;
+-        if (std::uint64_t(base->summary.effective_output_tokens) + extra >
+-            prompt.source_rebuild->plan().request().budget.reserve_tokens)
++        const auto& recovery = prompt.source_rebuild->plan().request();
++        const auto completion = recovery.mode == kvmem::SourceRecoveryMode::ReplayAsNew
++            ? recovery.replay.completion_tokens : recovery.budget.reserve_tokens;
++        if (std::uint64_t(base->summary.effective_output_tokens) + extra > completion)
+             throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded, "source rebuild output exceeds prepared reserve");
+         if (options.branches) throw std::invalid_argument("source rebuild cannot execute branched reads");
+     }
+diff --git a/src/models/qwen3_5/program/program.cpp b/src/models/qwen3_5/program/program.cpp
+index e5e37ca..536adc1 100644
+--- a/src/models/qwen3_5/program/program.cpp
++++ b/src/models/qwen3_5/program/program.cpp
+@@ -752,6 +752,9 @@ std::optional<HistoricalSourceRef> Program::source_receipt(SequenceHandle sequen
+ SourceRebuildInput Program::prepare_source_rebuild(HistoricalSourceRef source, std::uint32_t prefix, std::uint32_t reserve) {
+     return impl_->prepare_source_rebuild(source, prefix, reserve);
+ }
++SourceRebuildInput Program::prepare_source_replay(HistoricalSourceRef source, std::uint32_t prefix, std::uint32_t reserve) {
++    return impl_->prepare_source_replay(source, prefix, reserve);
++}
+ void Program::attach_historical_archive(const HistoricalArchiveOptions& options, const kvmem::SourceConfiguration& config) {
+     impl_->attach_historical_archive(options, config);
+ }
+diff --git a/src/models/qwen3_5/program/program.h b/src/models/qwen3_5/program/program.h
+index 45efeec..363f6e0 100644
+--- a/src/models/qwen3_5/program/program.h
++++ b/src/models/qwen3_5/program/program.h
+@@ -1284,6 +1284,7 @@ public:
+     [[nodiscard]] HistoricalSourceForgetResult forget_historical_source(HistoricalSourceRef);
+     [[nodiscard]] std::optional<HistoricalSourceRef> source_receipt(SequenceHandle) const noexcept;
+     [[nodiscard]] SourceRebuildInput prepare_source_rebuild(HistoricalSourceRef, std::uint32_t, std::uint32_t);
++    [[nodiscard]] SourceRebuildInput prepare_source_replay(HistoricalSourceRef, std::uint32_t, std::uint32_t);
+     void attach_historical_archive(const HistoricalArchiveOptions&, const kvmem::SourceConfiguration&);
+     [[nodiscard]] kvmem::SourceArchiveWrite begin_historical_save(HistoricalSourceRef);
+     void finish_historical_save(const kvmem::SourceArchiveWrite&);
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index e926892..e3c64ed 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -1186,6 +1186,9 @@ public:
+     HistoricalSourceForgetResult forget_historical_source(HistoricalSourceRef);
+     std::optional<HistoricalSourceRef> source_receipt(SequenceHandle) const noexcept;
+     SourceRebuildInput prepare_source_rebuild(HistoricalSourceRef, std::uint32_t, std::uint32_t);
++    SourceRebuildInput prepare_source_replay(HistoricalSourceRef, std::uint32_t, std::uint32_t);
++    SourceRebuildInput prepare_source_recovery(HistoricalSourceRef, std::uint32_t, std::uint32_t, kvmem::SourceRecoveryMode);
++    bool source_replay_supported() const noexcept;
+     void require_source_control() const;
+     void attach_historical_archive(const HistoricalArchiveOptions&, const kvmem::SourceConfiguration&);
+     kvmem::SourceArchiveWrite begin_historical_save(HistoricalSourceRef);
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 4cbe461..d9641b0 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -151,6 +151,7 @@ kvmem::MemoryDescriptor ProgramImpl::memory_descriptor() const {
+             }
+         }
+         d.capabilities = {page_tokens, capacity, true, true, true, false, false, false};
++        d.capabilities.windowed_source_replay = source_replay_supported();
+         return d;
+     }
+ 
+diff --git a/src/models/qwen3_5/program/storage/source_journal.cpp b/src/models/qwen3_5/program/storage/source_journal.cpp
+index 7bff53e..89b91f2 100644
+--- a/src/models/qwen3_5/program/storage/source_journal.cpp
++++ b/src/models/qwen3_5/program/storage/source_journal.cpp
+@@ -201,6 +201,21 @@ void ProgramImpl::validate_source_rebuild(const kvmem::PreparedSourceRecovery& p
+     // Program receipts fail the store incarnation check before any config use.
+     const auto state = source_journal->state(preparation.plan().request().source);
+     preparation.validate(*source_journal, {{}, state.configuration});
++    const auto& request = preparation.plan().request();
++    if (request.mode == kvmem::SourceRecoveryMode::ReplayAsNew &&
++        (!source_replay_supported() || request.budget.selected_tokens != kvmem_options.selected_tokens ||
++         request.budget.reserve_tokens != kvmem_options.reserve_tokens ||
++         request.budget.device_tokens != kvmem_window_tokens || request.replay.chunk_tokens != prefill_chunk))
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source replay geometry differs from current Program");
++}
++bool ProgramImpl::source_replay_supported() const noexcept {
++#if defined(__linux__)
++    return source_journal && kvmem_options.recovery_bytes && kvmem_window_tokens &&
++        max_concurrency == 1 && device.size() == 1 && !kvmem_options.disk_bytes &&
++        (speculative_backend == SpeculativeBackend::None || speculative_backend == SpeculativeBackend::Mtp);
++#else
++    return false;
++#endif
+ }
+ 
+ void ProgramImpl::attach_historical_archive(const HistoricalArchiveOptions& options,
+@@ -309,6 +324,16 @@ void ProgramImpl::collect_historical_archives() {
+ 
+ SourceRebuildInput ProgramImpl::prepare_source_rebuild(HistoricalSourceRef source,
+     std::uint32_t prefix, std::uint32_t reserve) {
++    return prepare_source_recovery(source,prefix,reserve,kvmem::SourceRecoveryMode::RebuildAsNew);
++}
++SourceRebuildInput ProgramImpl::prepare_source_replay(HistoricalSourceRef source,
++    std::uint32_t prefix, std::uint32_t reserve) {
++    if (!source_replay_supported())
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source replay needs Linux single-GPU text/RAM S/R KVMem with none/MTP");
++    return prepare_source_recovery(source,prefix,reserve,kvmem::SourceRecoveryMode::ReplayAsNew);
++}
++SourceRebuildInput ProgramImpl::prepare_source_recovery(HistoricalSourceRef source,
++    std::uint32_t prefix, std::uint32_t reserve, kvmem::SourceRecoveryMode mode) {
+     if (!source_journal || !kvmem_options.recovery_bytes)
+         throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported, "source rebuild needs enabled S/R");
+     if (!prefix || !reserve)
+@@ -317,10 +342,11 @@ SourceRebuildInput ProgramImpl::prepare_source_rebuild(HistoricalSourceRef sourc
+     const auto state = source_journal->state(ref);
+     const kvmem::SourceRecoveryContext current{{}, state.configuration};
+     const auto extra = backend_kv_pages ? std::max(draft_window, ngram_draft_window) + draft_window : 0U;
+-    const auto output = std::max<std::uint64_t>(reserve, kvmem_options.reserve_tokens) + extra;
++    const bool replay = mode == kvmem::SourceRecoveryMode::ReplayAsNew;
++    const auto output = replay ? kvmem_options.reserve_tokens : std::max<std::uint64_t>(reserve, kvmem_options.reserve_tokens) + extra;
+     const kvmem::SourceRecoveryRequest request{ref, current, allocate_memory_identity(), prefix,
+-        kvmem::SourceRecoveryMode::RebuildAsNew,
+-        {kvmem_options.selected_tokens, output, kvmem_window_tokens, memory_retained_budget}};
++        mode, {kvmem_options.selected_tokens, output, kvmem_window_tokens, memory_retained_budget},
++        replay ? kvmem::SourceReplayBudget{prefill_chunk,std::uint64_t(reserve)+extra} : kvmem::SourceReplayBudget{}};
+     const auto plan = kvmem::plan_source_recovery(*source_journal, memory_descriptor(), current, request);
+     auto preparation = kvmem::prepare_source_recovery(plan, *source_journal, current, source_recovery_storage);
+     std::vector<TokenId> tokens(prefix);
+@@ -349,10 +375,12 @@ void ProgramImpl::capture_source(SequenceState& sequence, RequestControl& reques
+         request.source = sequence.window.source = ref;
+         source_last = state; source_last_tokens_fnv1a64 = digest;
+         if (kvmem_options.verify_transfers)
+-            std::fprintf(stderr, "KVMEM_SOURCE_REBUILD_BEGIN parent=%llu source=%llu domain=%llu prefix=%llu\n",
++            std::fprintf(stderr, "KVMEM_SOURCE_REBUILD_BEGIN parent=%llu source=%llu domain=%llu prefix=%llu mode=%s chunk=%llu\n",
+                 (unsigned long long)request.source_rebuild->plan().request().source.source.id,
+                 (unsigned long long)ref.source.id, (unsigned long long)sequence.window.stamp.session.id,
+-                (unsigned long long)state.accepted_frontier);
++                (unsigned long long)state.accepted_frontier,
++                request.source_rebuild->plan().request().mode == kvmem::SourceRecoveryMode::ReplayAsNew ? "windowed" : "full",
++                (unsigned long long)request.source_rebuild->plan().request().replay.chunk_tokens);
+         return;
+     }
+     const auto count = prompt.token_ids.size();
+@@ -388,6 +416,11 @@ void ProgramImpl::record_source_progress(SequenceState& sequence, RequestControl
+     const auto old = source_journal->state(request.source);
+     const auto end = accepted_output ? std::uint64_t(sequence.ledger_frontier) : old.accepted_frontier;
+     const auto computed = accepted_output ? sequence.execution_frontier : sequence.text_kv_valid;
++    if (!accepted_output && request.source_rebuild &&
++        request.source_rebuild->plan().request().mode == kvmem::SourceRecoveryMode::ReplayAsNew &&
++        computed > old.computed_frontier && kvmem_options.verify_transfers)
++        std::fprintf(stderr,"KVMEM_SOURCE_REPLAY_UNIT source=%llu begin=%llu end=%llu\n",
++            (unsigned long long)request.source.source.id,(unsigned long long)old.computed_frontier,(unsigned long long)computed);
+     if (end < old.accepted_frontier || end > sequence.ledger.size() || computed > end)
+         throw std::logic_error("source commit disagrees with accepted Program frontier");
+     const auto complete_rebuild = [&](const kvmem::SourceState& state) {
+diff --git a/src/runtime/engine/engine.cpp b/src/runtime/engine/engine.cpp
+index 37cb732..f34fd9f 100644
+--- a/src/runtime/engine/engine.cpp
++++ b/src/runtime/engine/engine.cpp
+@@ -802,6 +802,14 @@ void Engine::attach_historical_archive(const HistoricalArchiveOptions& options,
+     if (!impl_ || !reference.impl_) throw std::invalid_argument("archive needs a live Engine and configuration reference");
+     impl_->generation_core().attach_historical_archive(options,reference.impl_->value);
+ }
++PreparedPrompt Engine::prepare_source_replay(HistoricalSourceRef source, std::uint32_t prefix,
++                                            std::uint32_t reserve) const {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    auto prepared = impl_->generation_core().prepare_source_replay(source,prefix,reserve);
++    auto summary = prepared.summary(); auto stats = prepared.preparation_stats();
++    return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(
++        summary,stats,SamplingMode::Thinking,std::move(prepared)));
++}
+ HistoricalArchiveSave Engine::begin_historical_save(HistoricalSourceRef source) {
+     if (!impl_) throw std::logic_error("Engine is moved from");
+ #if defined(__linux__)
+diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
+index 4d04f2d..ffb4531 100644
+--- a/src/runtime/engine/engine_core.h
++++ b/src/runtime/engine/engine_core.h
+@@ -631,6 +631,15 @@ public:
+         publish_runtime_stats();
+         return prompt;
+     }
++    [[nodiscard]] PreparedPrompt prepare_source_replay(HistoricalSourceRef source,
++        std::uint32_t prefix, std::uint32_t reserve) {
++        std::scoped_lock lock(execution_mutex_);
++        ensure_resident_locked();
++        auto input = instance_.program->prepare_source_replay(source,prefix,reserve);
++        auto prompt = instance_.frontend.prepare_source_rebuild(std::move(input));
++        publish_runtime_stats();
++        return prompt;
++    }
+     [[nodiscard]] HistoricalSourceForgetResult forget_historical_source(HistoricalSourceRef source) {
+         std::scoped_lock execution_lock(execution_mutex_);
+         ensure_resident_locked();
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+index c52d309..9cef6a1 100644
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -69,6 +69,10 @@ ninfer_add_test(ninfer_engine_source_forget_real_test STANDALONE
+   LIBRARIES ninfer_engine kvmem ninfer::json)
+ set_tests_properties(ninfer_engine_source_forget_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++  ninfer_add_test(ninfer_engine_source_replay_real_test STANDALONE
++    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_replay_real.cpp"
++    LIBRARIES ninfer_engine kvmem ninfer::json)
++  set_tests_properties(ninfer_engine_source_replay_real_test PROPERTIES SKIP_RETURN_CODE 77)
+   ninfer_add_test(ninfer_engine_source_archive_real_test STANDALONE
+     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_archive_real.cpp"
+     LIBRARIES ninfer_engine kvmem ninfer::json)
+diff --git a/tests/test_engine_source_replay_real.cpp b/tests/test_engine_source_replay_real.cpp
+new file mode 100644
+index 0000000..51b8a57
+--- /dev/null
++++ b/tests/test_engine_source_replay_real.cpp
+@@ -0,0 +1,131 @@
++#include "ninfer/engine.h"
++#include "kvmem/memory_contract.hpp"
++#include <nlohmann/json.hpp>
++#include <algorithm>
++#include <atomic>
++#include <cstdlib>
++#include <fstream>
++#include <iostream>
++#include <stdexcept>
++
++namespace {
++constexpr std::uint32_t prefix=32768;
++void require(bool value,const char* message) { if (!value) throw std::runtime_error(message); }
++template<class F> void rejected(kvmem::MemoryErrorCode code,F work) {
++    try { work(); } catch(const kvmem::MemoryError& e) { require(e.code()==code,"wrong replay refusal");return; }
++    throw std::runtime_error("replay operation unexpectedly succeeded");
++}
++ninfer::RequestOptions request(std::uint32_t tokens=8) {
++    ninfer::RequestOptions r;r.execution.requested_output_tokens=tokens;
++    r.execution.sampling.temperature=0;r.execution.sampling.seed=42;
++    r.execution.thinking.loop=ninfer::ReasoningLoopAction::Off;r.stop.include_model_defaults=false;
++    r.output.raw=r.output.preserve_special_tokens=true;return r;
++}
++struct CancelAcrossWindows final : ninfer::OutputSink {
++    std::atomic<bool> cancel{false};std::uint32_t processed=0;
++    ninfer::Engine& engine;ninfer::HistoricalSourceRef source;
++    CancelAcrossWindows(ninfer::Engine& e,ninfer::HistoricalSourceRef s):engine(e),source(s){}
++    void start(ninfer::GenerationStart s) override { require(!s.reused_prompt_tokens,"cancel replay reused old state"); }
++    void progress(ninfer::PromptProgress p) override {
++        if (!cancel.load() && p.processed_prompt_tokens>=4096 && p.processed_prompt_tokens<p.total_prompt_tokens) {
++            rejected(kvmem::MemoryErrorCode::Pending,[&] { (void)engine.forget_historical_source(source); });
++            processed=p.processed_prompt_tokens;cancel.store(true,std::memory_order_release);
++        }
++    }
++    void timing(ninfer::GenerationTimingObservation) override {}
++    void publish(ninfer::OutputDelta) override {}
++};
++int run(int argc,char** argv) {
++    const char* model=std::getenv("NINFER_SOURCE_REPLAY_ARTIFACT");if (!model || !*model) return 77;
++    require(argc==3,"usage: source_replay_real write|replay|deny|r-pressure work-directory");
++    const std::string mode=argv[1];const std::filesystem::path root=argv[2];
++    const bool mtp=std::getenv("NINFER_SOURCE_REPLAY_MTP")!=nullptr;
++    const bool redundancy=std::getenv("NINFER_SOURCE_REPLAY_REDUNDANCY")!=nullptr;
++    ninfer::EngineOptions o;o.artifact_path=model;o.max_context=65536;
++    o.kv_capacity=ninfer::KvCapacityPolicy::explicit_capacity(2560);o.prefill_chunk=512;
++    o.max_concurrency=1;o.max_pending_requests=4;o.device_profile="off";o.context_cache.enabled=false;
++    o.kv_cache=ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
++    auto& m=o.kvmem;m.selected_tokens=2048;m.reserve_tokens=512;m.host_bytes=96ULL<<20;
++    m.checkpoint_bytes=2048ULL<<20;m.source_bytes=16ULL<<20;m.recovery_bytes=1ULL<<20;
++    if (mode=="r-pressure") m.recovery_bytes=160ULL<<10;
++    m.historical_gc_aux_bytes=64ULL<<20;m.retained_sessions=8;
++    m.query_meanq_cosine=m.score_agg_max=true;m.graph_alpha=0;
++    m.historical_gc_lru=!redundancy;m.historical_gc_redundancy=redundancy;m.verify_transfers=true;
++    if (mtp) {o.speculative.backend=ninfer::SpeculativeBackend::Mtp;o.speculative.draft_tokens=4;}
++    ninfer::Engine engine(o);const auto token=engine.tokenize_text(" Memory").front();
++    auto reference=engine.prepare_tokens({token});
++    ninfer::HistoricalArchiveOptions archive;archive.directory=root/"archive";
++    archive.disk_bytes=64ULL<<20;archive.metadata_bytes=1ULL<<20;archive.create=mode=="write";
++    engine.attach_historical_archive(archive,reference);
++    if (mode=="write") {
++        const auto original=engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(prefix,token)),request());
++        require(original.accepted_source && original.generated_token_ids.size()==8,"writer source incomplete");
++        require(engine.historical_sources().front().retired_native_pages>0,"writer did not retire native pages");
++        std::cerr<<"SOURCE_REPLAY_WRITER_COMPLETE"<<std::endl;
++        auto ticket=engine.begin_historical_save(*original.accepted_source);ticket.wait();engine.finish_historical_save(ticket);
++        const auto k=ticket.key();
++        std::ofstream out(root/"fixture.json");
++        out<<nlohmann::json{{"space",k.space},{"id",k.id},{"ids",original.generated_token_ids}};out.close();require(out.good(),"fixture write failed");
++        require(!mtp || original.speculative.rounds>0,"writer MTP fell back");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode},{"mtp",mtp},{"redundancy",redundancy}}<<std::endl;return 0;
++    }
++    nlohmann::json metadata;{std::ifstream in(root/"fixture.json");in>>metadata;}
++    const ninfer::HistoricalArchiveKey k{metadata.at("space").get<std::array<std::uint8_t,16>>(),metadata.at("id").get<std::uint64_t>()};
++    if (mode=="deny") {
++        rejected(kvmem::MemoryErrorCode::Stale,[&] { (void)engine.import_historical_source(k); });
++        require(engine.historical_archives().empty() && engine.historical_sources().empty(),"forgotten long source revived after restart");
++        require(engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(128,token)),request()).generated_token_ids.size()==8,"reopen denial damaged Engine");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode}}<<std::endl;return 0;
++    }
++    const auto source=engine.import_historical_source(k);
++    auto records=engine.historical_sources();
++    require(records.size()==1 && records.front().computed_tokens==0 && !records.front().parent.id && !records.front().retained_native_domains,
++        "import restored old native computation");
++    if (mode=="r-pressure") {
++        {auto held=engine.prepare_source_replay(source,prefix,32);
++         require(engine.memory_summary().kvmem.recovery_bytes==prefix*4ULL,"long R preparation not charged");
++         rejected(kvmem::MemoryErrorCode::BudgetExceeded,[&] { (void)engine.prepare_source_replay(source,prefix,32); });}
++        require(engine.memory_summary().kvmem.recovery_bytes==0 && engine.historical_sources().size()==1 && engine.is_available(),"R refusal leaked or published a source");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode},{"charged_bytes",prefix*4ULL}}<<std::endl;return 0;
++    }
++    require(mode=="replay","unknown replay mode");
++    rejected(kvmem::MemoryErrorCode::BudgetExceeded,[&] { (void)engine.prepare_source_rebuild(source,prefix,32); });
++    rejected(kvmem::MemoryErrorCode::BudgetExceeded,[&] { (void)engine.prepare_source_replay(source,prefix,65536); });
++    auto stale=source;++stale.revision;
++    rejected(kvmem::MemoryErrorCode::Stale,[&] { (void)engine.prepare_source_replay(stale,prefix,32); });
++    rejected(kvmem::MemoryErrorCode::BudgetExceeded,[&] { (void)engine.generate(engine.prepare_source_replay(source,prefix,32),request(64)); });
++    require(engine.historical_sources().size()==1 && engine.memory_summary().kvmem.recovery_bytes==0,"refused replay partially published");
++    const auto result=engine.generate(engine.prepare_source_replay(source,prefix,32),request());
++    require(!result.reused_prompt_tokens && result.computed_prompt_tokens>=prefix && result.accepted_source,"long replay skipped source computation");
++    require(result.generated_token_ids==metadata.at("ids").get<std::vector<ninfer::TokenId>>(),"long replay differs from independent fresh raw-input execution");
++    require(!mtp || result.speculative.rounds>0,"long MTP replay fell back");
++    records=engine.historical_sources();
++    const auto rebuilt=std::find_if(records.begin(),records.end(),[&](const auto& s) {return s.ref==*result.accepted_source;});
++    require(rebuilt!=records.end() && rebuilt->parent==source && rebuilt->parent_prefix_tokens==prefix &&
++        rebuilt->computed_tokens>=prefix && rebuilt->retained_native_domains==1 && rebuilt->retired_native_pages>0,"long replay did not publish a fresh retired-page domain");
++    require(engine.memory_summary().kvmem.recovery_bytes==0,"successful replay retained R");
++    CancelAcrossWindows sink(engine,source);
++    auto active=engine.submit(engine.prepare_source_replay(source,prefix,32),request(),ninfer::OutputConsumerMode::Streaming,{.prompt_progress=true});
++    const auto cancelled=active.wait(&sink,ninfer::CancellationView([&] {return sink.cancel.load(std::memory_order_acquire);}));
++    require(sink.processed>=4096 && cancelled.finish_reason==ninfer::FinishReason::Cancelled && cancelled.computed_prompt_tokens<prefix && cancelled.accepted_source,
++        "actual cancellation across windows missing");
++    records=engine.historical_sources();
++    const auto partial=std::find_if(records.begin(),records.end(),[&](const auto& s) {return s.ref==*cancelled.accepted_source;});
++    require(partial!=records.end() && partial->parent==source && partial->accepted_tokens==prefix && partial->computed_tokens<prefix && !partial->retained_native_domains,
++        "partial replay published reusable native state");
++    auto revoked=engine.prepare_source_replay(source,prefix,32);
++    const auto native_count=std::count_if(records.begin(),records.end(),[](const auto& s) {return s.retained_native_domains!=0;});
++    require(records.size()==3 && engine.memory_summary().kvmem.recovery_bytes==prefix*4ULL,"replay source/R lifecycle inconsistent");
++    const auto forgotten=engine.forget_historical_source(source);
++    require(forgotten.forgotten_sources==3 && forgotten.forgotten_archives==1 && forgotten.discarded_native_domains==native_count,"long family forget missed online or persistent owner");
++    require(engine.historical_sources().empty() && engine.memory_summary().kvmem.recovery_bytes==prefix*4ULL,"forget refunded live R early");
++    rejected(kvmem::MemoryErrorCode::Stale,[&] { (void)engine.generate(std::move(revoked),request()); });
++    require(engine.memory_summary().kvmem.recovery_bytes==0 && engine.is_available(),"revoked long preparation leaked or poisoned Engine");
++    require(engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(128,token)),request()).generated_token_ids.size()==8,"post-replay followup failed");
++    std::cout<<nlohmann::json{{"status","passed"},{"mode",mode},{"mtp",mtp},{"redundancy",redundancy},{"prefix",prefix},
++        {"output_ids",result.generated_token_ids},{"computed_prompt_tokens",result.computed_prompt_tokens},
++        {"speculative_rounds",result.speculative.rounds},{"cancel_processed",sink.processed},{"forgotten_sources",forgotten.forgotten_sources},
++        {"discarded_domains",forgotten.discarded_native_domains}}<<std::endl;return 0;
++}
++}
++int main(int argc,char** argv) {try {return run(argc,argv);}catch(const std::exception& e) {std::cerr<<"SOURCE_REPLAY_FATAL: "<<e.what()<<std::endl;return 1;}}

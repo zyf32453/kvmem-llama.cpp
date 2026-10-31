@@ -66,6 +66,10 @@ struct MemoryCapabilities {
     bool pre_rope_statistics = false;
     bool state_checkpoint = false;
     bool asynchronous_transfer = false;
+    // Explicit adapter support for recomputing accepted source rows in a new
+    // sparse domain, with per-unit window reservations and original positions.
+    // Sparse KV transfer alone does not grant this execution capability.
+    bool windowed_source_replay = false;
 };
 struct MemoryDescriptor {
     BackendIdentity identity;

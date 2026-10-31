@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "8a8c71483cb31ac675671d2f0baf34eae7b9fca3",
+    "patched_tree": "c3ac2a35ce2f6a8e95b82fe3ba5562d768184e4e",
     "patches": [
       {
         "id": "kvmem",
@@ -369,6 +369,15 @@
           "checkpoint-budget"
         ],
         "after_tree": "8a8c71483cb31ac675671d2f0baf34eae7b9fca3"
+      },
+      {
+        "id": "source-replay",
+        "path": "backends/patches/ninfer-source-replay.patch",
+        "sha256": "9a6ae6cddc82ff456ab7bfa29a2332ff4140add9d737e6bb57c0726b82aa3483",
+        "requires": [
+          "source-archive"
+        ],
+        "after_tree": "c3ac2a35ce2f6a8e95b82fe3ba5562d768184e4e"
       }
     ]
   },

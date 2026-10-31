@@ -1,5 +1,7 @@
 # C8：Engine 源归档与统一家族遗忘
 
+后续 [C9 长前缀新域重放](kv-lifecycle-source-replay.md) 已增加独立 ReplayAsNew 能力和真实模型检查；原严格短前缀入口及本页原批次结果保持原范围，不倒写成精确旧轨迹或完整生产验收。
+
 日期：2026-10-31。接续 [C6 归档组件](kv-lifecycle-source-archive.md) 和
 [C7 原子导入](kv-lifecycle-source-import.md)。本批目标是把已有机制接入真实 Engine，
 完成保存、重开、规范前缀新域推理以及持久/在线家族撤销。新增功能的 17 个独立进程模型检查和

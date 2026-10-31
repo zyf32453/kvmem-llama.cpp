@@ -1,0 +1,5166 @@
+{
+  "date": "2026-10-31",
+  "stage": "C9",
+  "status": "new_domain_full32K_windowed_replay_qualified_first_scope",
+  "full_goal_complete": false,
+  "stage_C_complete": false,
+  "production_qualified": false,
+  "contract": {
+    "path": "docs/contracts/kv-lifecycle-source-replay-candidate-v1.json",
+    "sha256": "cc1e86aa54d32acfa8b27b9d41e052a9c458ab0935e6d1ac2e11764d6f9c5b27",
+    "source_pins": 146
+  },
+  "observations": [
+    {
+      "kind": "core",
+      "root": "/home/yifan/kvmem-validation/source-replay-core-20261031-92635c04",
+      "container": "kvmem-source-replay-core-92635c04",
+      "id": "0d2aa87cf1332e1945da26859389dd62e54dad8e00bca0266ac9fbee3739cfb6",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T12:30:44.582822647Z",
+      "finished": "2026-10-31T12:31:49.204633996Z",
+      "exit_code": 0,
+      "oom": false,
+      "evidence_sha256": "4457f81b3a5ef5ad4df9574d5dd0549fe2b22da33bab4760c552a09470ddfc1a"
+    },
+    {
+      "kind": "native",
+      "root": "/home/yifan/kvmem-validation/source-replay-20261031-f026af07",
+      "container": "kvmem-source-replay-f026af07",
+      "id": "337b9173e90391ebf5cb7dbdf1234ce73853091c54fa013527e3beadf402b6a9",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T12:30:56.621463424Z",
+      "finished": "2026-10-31T12:35:05.45419096Z",
+      "exit_code": 0,
+      "oom": false,
+      "evidence_sha256": "a7ae469f3226ecd73138c1fb53c3e70cb33f1b817b96a9139afebcee5d2f8480"
+    },
+    {
+      "kind": "gpu",
+      "root": "/home/yifan/kvmem-validation/source-replay-20261031-f026af07",
+      "container": "kvmem-source-replay-gpu-f026af07",
+      "id": "5b6f6cad380396bc64ac9856cf7cc2c2b1b23fbbbde0b07a59b2be107a8ac175",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T12:33:01.705064728Z",
+      "finished": "2026-10-31T12:58:54.56662973Z",
+      "exit_code": 0,
+      "oom": false,
+      "evidence_sha256": "f45ad9f88cdad0bee5d08e5240e64ad9f2fc1e0c5ecf32f407f8ab89736a090f"
+    }
+  ],
+  "core": {
+    "passed": true,
+    "source_pins": 104,
+    "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+    "targets": [
+      "historical_gc_ninfer_core_test",
+      "memory_contract_test",
+      "native_kv_payload_test",
+      "host_kv_storage_test",
+      "spill_io_test",
+      "tiered_kv_storage_test",
+      "native_residency_test",
+      "kv_content_test",
+      "prefix_checkpoint_test",
+      "checkpoint_policy_test",
+      "checkpoint_image_test",
+      "historical_kv_boundary_mailbox_test",
+      "historical_kv_commit_conditions_test",
+      "historical_kv_range_lock_test",
+      "historical_kv_witness_lifecycle_test",
+      "historical_kv_score_evidence_test",
+      "historical_kv_auxiliary_budget_test",
+      "historical_kv_owner_budget_test",
+      "historical_kv_service_health_test",
+      "mean_key_retrieval_test",
+      "source_journal_test",
+      "source_recovery_test",
+      "source_image_test",
+      "source_archive_test"
+    ],
+    "sanitizers": "detect_leaks=1:halt_on_error=1 / halt_on_error=1:print_stacktrace=1",
+    "binaries": {
+      "build/kvmem-core/source_archive_test": "ab3c893ec26959e4b4e4ef1a988b5e75af378a398a1634ede5156ae118077f0e",
+      "build-asan/kvmem-core/source_archive_test": "7e47c9975b2ef245a2f6ae511cfb9300f5a5c05c7ad51c798ef5d66a195c3441"
+    },
+    "scope": "Linux local-filesystem archive component; no Engine/model, real power-loss, complete-backup rollback or global forgetting claim"
+  },
+  "executions": {
+    "junit.xml": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.00293037
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.00267969
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 0.00181511
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 1.17415
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 0.00213496
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.00192637
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.00162578
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.0162739
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.0073775
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.0159817
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.00173993
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.0453642
+      },
+      {
+        "name": "source_journal_test",
+        "seconds": 0.00199566
+      },
+      {
+        "name": "source_recovery_test",
+        "seconds": 0.00189025
+      },
+      {
+        "name": "source_image_test",
+        "seconds": 0.0604232
+      },
+      {
+        "name": "source_archive_test",
+        "seconds": 17.4411
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.0166442
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.00388559
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.00357495
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.0255768
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.0087119
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.00161256
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.0016206
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.00469123
+      }
+    ],
+    "asan-junit.xml": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.0219935
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.0121957
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 0.0203396
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 1.13528
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 0.018094
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.0147701
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.0152226
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.097864
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.0387693
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.0460759
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.0141191
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.0734199
+      },
+      {
+        "name": "source_journal_test",
+        "seconds": 0.0214529
+      },
+      {
+        "name": "source_recovery_test",
+        "seconds": 0.0257164
+      },
+      {
+        "name": "source_image_test",
+        "seconds": 0.299699
+      },
+      {
+        "name": "source_archive_test",
+        "seconds": 13.6216
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.0420508
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.0196383
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.0209427
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.0494118
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.0533377
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.0131375
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.00952742
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.017397
+      }
+    ],
+    "windows": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.72762
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.70269
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 1.04256
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 16.3332
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 1.00404
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.797823
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.924192
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.846625
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.923544
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 1.02762
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.749101
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 1.2895
+      },
+      {
+        "name": "source_journal_test",
+        "seconds": 1.19875
+      },
+      {
+        "name": "source_recovery_test",
+        "seconds": 0.0681417
+      },
+      {
+        "name": "source_image_test",
+        "seconds": 1.0529
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.949957
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.664657
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.851168
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.76932
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.73463
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.637429
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.524294
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.883034
+      }
+    ]
+  },
+  "native": {
+    "passed": true,
+    "binaries_before": {
+      "build-native/apps/ninfer-serve": "27dff1c4722c80ee214d1cbc3b1e7113c7368448285da86bb60d9ef69c11f72c",
+      "build-native/tests/ninfer_memory_policy_tests": "e242ddceede070d78d241419ab37f3fb838844c61481836e849078842c4d316c",
+      "build-native/tests/ninfer_query_policy_tests": "15d72125f9dd0aac15c16c176f39f58aae1a28490244a2202b5389be43e01374",
+      "build-native/tests/ninfer_engine_source_recovery_real_test": "019d51cff2edd390800bf27af153ea70aa66bdb1386511978998dd7436b8722f",
+      "build-native/tests/ninfer_engine_source_forget_real_test": "5bcafd552937fb79e1067c47c83a11843a1e99e20ea2d3d676cf12fa68cec58b",
+      "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "e3f4d3312f596162e1ded6c2f2309343c517c0e86b200015fa36ef5ed255d236",
+      "build-native/tests/ninfer_checkpoint_budget_contract_test": "63d13c0bd7e83f5d909f5092ec1f1bd45d226ca91fd1393377da9b7bf285530c",
+      "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "23b34829042a66a6d0bfacfcec088435576e046d0f97f145bbaedf3864f6c56b",
+      "build-native/tests/ninfer_engine_source_archive_real_test": "900b90867f7d8b47ad4bf89ae37d72305c2a7ce83ebe6b1246bd9ed44cdebf01"
+    },
+    "binaries_after": {
+      "build-native/apps/ninfer-serve": "8b2d98889b0ff1119daec99058285fba0358dd506eff5bfcc5c01a57771155b8",
+      "build-native/tests/ninfer_memory_policy_tests": "d2af9e32b95a5bde9ee987523059780275dd5c9ba8670624df401ffbc5404144",
+      "build-native/tests/ninfer_query_policy_tests": "af8c8a6671231b84139e6bed652e06b57adecdfce32f8bc946b5f0568a3fec77",
+      "build-native/tests/ninfer_engine_source_recovery_real_test": "23938509eab8005cc3d9262a2c66cca6b83e72d603729096528da151b0d6dbfe",
+      "build-native/tests/ninfer_engine_source_forget_real_test": "841b415cab2d11cce147428ef87e18cbbf442e1c2186bc88f9c8901fcf934eff",
+      "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "c4503ed14641667933ff39e556fa6877accc5d298c4a342ebc8ee2abf94819f0",
+      "build-native/tests/ninfer_checkpoint_budget_contract_test": "f5c956a779f78fa1baded8b4e5fb0d0411c7d368413d25420c9983b36e13932d",
+      "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "6c724058468ea86f0559e5fcae8d67a662c5809b7664f25cc947251b7f00b468",
+      "build-native/tests/ninfer_engine_source_archive_real_test": "176d737f69cf417e2808990d63400f1a108d6565c78914e4723c3dd6003d1937",
+      "build-native/tests/ninfer_engine_source_replay_real_test": "d9f71c04dfa5eb54f2f694eb4d15bc5278153498ac10f7654b740f61b1456d25"
+    },
+    "native_binaries_identical": false,
+    "native_checks": 12,
+    "components": [
+      "source_image_test",
+      "source_archive_test"
+    ],
+    "parent_root": "/home/yifan/kvmem-validation/native-archive-20261031-1727ad8a",
+    "source_pins": 3452,
+    "contract_pins": 146,
+    "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+    "scope": "C9 source replay compiled and non-model checks; actual full-history replay qualification separately required"
+  },
+  "native_binaries_changed": [
+    "build-native/apps/ninfer-serve",
+    "build-native/tests/ninfer_memory_policy_tests",
+    "build-native/tests/ninfer_query_policy_tests",
+    "build-native/tests/ninfer_engine_source_recovery_real_test",
+    "build-native/tests/ninfer_engine_source_forget_real_test",
+    "build-native/tests/ninfer_engine_checkpoint_budget_real_test",
+    "build-native/tests/ninfer_checkpoint_budget_contract_test",
+    "build-native/tests/ninfer_checkpoint_budget_sanitizer_test",
+    "build-native/tests/ninfer_engine_source_archive_real_test"
+  ],
+  "model_replay": {
+    "completed": true,
+    "binary_sha256": "d9f71c04dfa5eb54f2f694eb4d15bc5278153498ac10f7654b740f61b1456d25",
+    "model_sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+    "controller_sha256": "78345c20a3c6090511ce355ba39867124fa5342b252592f74e93300815ee07a0",
+    "cases": [
+      {
+        "config": "lru-none",
+        "mode": "write",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-86c7c2dcaf8e",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "write",
+          "/evidence/lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "a442949c0c64442c6ff242462db9e932c54a38ff912a168a409fd06069b8c362",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:36:42.638431139Z",
+          "FinishedAt": "2026-10-31T12:37:40.744767882Z"
+        },
+        "result": {
+          "mode": "write",
+          "mtp": false,
+          "redundancy": false,
+          "status": "passed"
+        },
+        "physically_released_prefix": [
+          {
+            "begin": 512,
+            "count": 64
+          },
+          {
+            "begin": 576,
+            "count": 64
+          },
+          {
+            "begin": 640,
+            "count": 64
+          },
+          {
+            "begin": 704,
+            "count": 64
+          },
+          {
+            "begin": 768,
+            "count": 64
+          },
+          {
+            "begin": 832,
+            "count": 64
+          },
+          {
+            "begin": 896,
+            "count": 64
+          },
+          {
+            "begin": 960,
+            "count": 64
+          },
+          {
+            "begin": 448,
+            "count": 64
+          },
+          {
+            "begin": 320,
+            "count": 64
+          },
+          {
+            "begin": 256,
+            "count": 64
+          },
+          {
+            "begin": 192,
+            "count": 64
+          },
+          {
+            "begin": 128,
+            "count": 64
+          },
+          {
+            "begin": 384,
+            "count": 64
+          },
+          {
+            "begin": 64,
+            "count": 64
+          }
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:36:42.638431139Z",
+          "FinishedAt": "2026-10-31T12:37:40.744767882Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "replay",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-f22248ec0d55",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "replay",
+          "/evidence/lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "8829173937fe0b4df266a353ab5df8bff5e86a14816907232a27b5746839f5e2",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:37:41.628423969Z",
+          "FinishedAt": "2026-10-31T12:38:46.974517979Z"
+        },
+        "result": {
+          "cancel_processed": 4096,
+          "computed_prompt_tokens": 32768,
+          "discarded_domains": 0,
+          "forgotten_sources": 3,
+          "mode": "replay",
+          "mtp": false,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "prefix": 32768,
+          "redundancy": false,
+          "speculative_rounds": 0,
+          "status": "passed"
+        },
+        "actual_units": [
+          [
+            0,
+            512
+          ],
+          [
+            512,
+            1024
+          ],
+          [
+            1024,
+            1536
+          ],
+          [
+            1536,
+            2048
+          ],
+          [
+            2048,
+            2560
+          ],
+          [
+            2560,
+            3072
+          ],
+          [
+            3072,
+            3584
+          ],
+          [
+            3584,
+            4096
+          ],
+          [
+            4096,
+            4608
+          ],
+          [
+            4608,
+            5120
+          ],
+          [
+            5120,
+            5632
+          ],
+          [
+            5632,
+            6144
+          ],
+          [
+            6144,
+            6656
+          ],
+          [
+            6656,
+            7168
+          ],
+          [
+            7168,
+            7680
+          ],
+          [
+            7680,
+            8192
+          ],
+          [
+            8192,
+            8704
+          ],
+          [
+            8704,
+            9216
+          ],
+          [
+            9216,
+            9728
+          ],
+          [
+            9728,
+            10240
+          ],
+          [
+            10240,
+            10752
+          ],
+          [
+            10752,
+            11264
+          ],
+          [
+            11264,
+            11776
+          ],
+          [
+            11776,
+            12288
+          ],
+          [
+            12288,
+            12800
+          ],
+          [
+            12800,
+            13312
+          ],
+          [
+            13312,
+            13824
+          ],
+          [
+            13824,
+            14336
+          ],
+          [
+            14336,
+            14848
+          ],
+          [
+            14848,
+            15360
+          ],
+          [
+            15360,
+            15872
+          ],
+          [
+            15872,
+            16384
+          ],
+          [
+            16384,
+            16896
+          ],
+          [
+            16896,
+            17408
+          ],
+          [
+            17408,
+            17920
+          ],
+          [
+            17920,
+            18432
+          ],
+          [
+            18432,
+            18944
+          ],
+          [
+            18944,
+            19456
+          ],
+          [
+            19456,
+            19968
+          ],
+          [
+            19968,
+            20480
+          ],
+          [
+            20480,
+            20992
+          ],
+          [
+            20992,
+            21504
+          ],
+          [
+            21504,
+            22016
+          ],
+          [
+            22016,
+            22528
+          ],
+          [
+            22528,
+            23040
+          ],
+          [
+            23040,
+            23552
+          ],
+          [
+            23552,
+            24064
+          ],
+          [
+            24064,
+            24576
+          ],
+          [
+            24576,
+            25088
+          ],
+          [
+            25088,
+            25600
+          ],
+          [
+            25600,
+            26112
+          ],
+          [
+            26112,
+            26624
+          ],
+          [
+            26624,
+            27136
+          ],
+          [
+            27136,
+            27648
+          ],
+          [
+            27648,
+            28160
+          ],
+          [
+            28160,
+            28672
+          ],
+          [
+            28672,
+            29184
+          ],
+          [
+            29184,
+            29696
+          ],
+          [
+            29696,
+            30208
+          ],
+          [
+            30208,
+            30720
+          ],
+          [
+            30720,
+            31232
+          ],
+          [
+            31232,
+            31744
+          ],
+          [
+            31744,
+            32256
+          ],
+          [
+            32256,
+            32768
+          ]
+        ],
+        "starts": [
+          [
+            "1",
+            "2",
+            "4"
+          ],
+          [
+            "1",
+            "3",
+            "5"
+          ]
+        ],
+        "completions": [
+          [
+            "2",
+            "4",
+            "32769",
+            "32768"
+          ]
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:37:41.628423969Z",
+          "FinishedAt": "2026-10-31T12:38:46.974517979Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "deny",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-ebb22fa347a1",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "deny",
+          "/evidence/lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "b9a530bcaeac6d0a39e0d58c531f13087a5f38d39f110f043ecc44f59d17eb14",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:38:47.929763021Z",
+          "FinishedAt": "2026-10-31T12:38:54.13057108Z"
+        },
+        "result": {
+          "mode": "deny",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:38:47.929763021Z",
+          "FinishedAt": "2026-10-31T12:38:54.13057108Z"
+        }
+      },
+      {
+        "config": "lru-mtp4",
+        "mode": "write",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-bd5d024d7aa1",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "write",
+          "/evidence/lru-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "decd18dcdd5ab8a998cf134f6d2ef054e27e990e24158df0c8fba68bfc339e3b",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:38:54.737259712Z",
+          "FinishedAt": "2026-10-31T12:39:54.538837954Z"
+        },
+        "result": {
+          "mode": "write",
+          "mtp": true,
+          "redundancy": false,
+          "status": "passed"
+        },
+        "physically_released_prefix": [
+          {
+            "begin": 512,
+            "count": 64
+          },
+          {
+            "begin": 576,
+            "count": 64
+          },
+          {
+            "begin": 640,
+            "count": 64
+          },
+          {
+            "begin": 704,
+            "count": 64
+          },
+          {
+            "begin": 768,
+            "count": 64
+          },
+          {
+            "begin": 832,
+            "count": 64
+          },
+          {
+            "begin": 896,
+            "count": 64
+          },
+          {
+            "begin": 960,
+            "count": 64
+          },
+          {
+            "begin": 448,
+            "count": 64
+          },
+          {
+            "begin": 320,
+            "count": 64
+          },
+          {
+            "begin": 256,
+            "count": 64
+          },
+          {
+            "begin": 192,
+            "count": 64
+          },
+          {
+            "begin": 128,
+            "count": 64
+          },
+          {
+            "begin": 384,
+            "count": 64
+          },
+          {
+            "begin": 64,
+            "count": 64
+          }
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:38:54.737259712Z",
+          "FinishedAt": "2026-10-31T12:39:54.538837954Z"
+        }
+      },
+      {
+        "config": "lru-mtp4",
+        "mode": "replay",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-b0997632b816",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "replay",
+          "/evidence/lru-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "648593d25f3906d1b14373ca82424400e81ed64bb47d3cfcbb16355e0960f9a4",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:39:55.83828676Z",
+          "FinishedAt": "2026-10-31T12:41:04.767025261Z"
+        },
+        "result": {
+          "cancel_processed": 4096,
+          "computed_prompt_tokens": 32768,
+          "discarded_domains": 0,
+          "forgotten_sources": 3,
+          "mode": "replay",
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "prefix": 32768,
+          "redundancy": false,
+          "speculative_rounds": 2,
+          "status": "passed"
+        },
+        "actual_units": [
+          [
+            0,
+            512
+          ],
+          [
+            512,
+            1024
+          ],
+          [
+            1024,
+            1536
+          ],
+          [
+            1536,
+            2048
+          ],
+          [
+            2048,
+            2560
+          ],
+          [
+            2560,
+            3072
+          ],
+          [
+            3072,
+            3584
+          ],
+          [
+            3584,
+            4096
+          ],
+          [
+            4096,
+            4608
+          ],
+          [
+            4608,
+            5120
+          ],
+          [
+            5120,
+            5632
+          ],
+          [
+            5632,
+            6144
+          ],
+          [
+            6144,
+            6656
+          ],
+          [
+            6656,
+            7168
+          ],
+          [
+            7168,
+            7680
+          ],
+          [
+            7680,
+            8192
+          ],
+          [
+            8192,
+            8704
+          ],
+          [
+            8704,
+            9216
+          ],
+          [
+            9216,
+            9728
+          ],
+          [
+            9728,
+            10240
+          ],
+          [
+            10240,
+            10752
+          ],
+          [
+            10752,
+            11264
+          ],
+          [
+            11264,
+            11776
+          ],
+          [
+            11776,
+            12288
+          ],
+          [
+            12288,
+            12800
+          ],
+          [
+            12800,
+            13312
+          ],
+          [
+            13312,
+            13824
+          ],
+          [
+            13824,
+            14336
+          ],
+          [
+            14336,
+            14848
+          ],
+          [
+            14848,
+            15360
+          ],
+          [
+            15360,
+            15872
+          ],
+          [
+            15872,
+            16384
+          ],
+          [
+            16384,
+            16896
+          ],
+          [
+            16896,
+            17408
+          ],
+          [
+            17408,
+            17920
+          ],
+          [
+            17920,
+            18432
+          ],
+          [
+            18432,
+            18944
+          ],
+          [
+            18944,
+            19456
+          ],
+          [
+            19456,
+            19968
+          ],
+          [
+            19968,
+            20480
+          ],
+          [
+            20480,
+            20992
+          ],
+          [
+            20992,
+            21504
+          ],
+          [
+            21504,
+            22016
+          ],
+          [
+            22016,
+            22528
+          ],
+          [
+            22528,
+            23040
+          ],
+          [
+            23040,
+            23552
+          ],
+          [
+            23552,
+            24064
+          ],
+          [
+            24064,
+            24576
+          ],
+          [
+            24576,
+            25088
+          ],
+          [
+            25088,
+            25600
+          ],
+          [
+            25600,
+            26112
+          ],
+          [
+            26112,
+            26624
+          ],
+          [
+            26624,
+            27136
+          ],
+          [
+            27136,
+            27648
+          ],
+          [
+            27648,
+            28160
+          ],
+          [
+            28160,
+            28672
+          ],
+          [
+            28672,
+            29184
+          ],
+          [
+            29184,
+            29696
+          ],
+          [
+            29696,
+            30208
+          ],
+          [
+            30208,
+            30720
+          ],
+          [
+            30720,
+            31232
+          ],
+          [
+            31232,
+            31744
+          ],
+          [
+            31744,
+            32256
+          ],
+          [
+            32256,
+            32765
+          ],
+          [
+            32765,
+            32768
+          ]
+        ],
+        "starts": [
+          [
+            "1",
+            "2",
+            "4"
+          ],
+          [
+            "1",
+            "3",
+            "5"
+          ]
+        ],
+        "completions": [
+          [
+            "2",
+            "4",
+            "32769",
+            "32768"
+          ]
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:39:55.83828676Z",
+          "FinishedAt": "2026-10-31T12:41:04.767025261Z"
+        }
+      },
+      {
+        "config": "lru-mtp4",
+        "mode": "deny",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-3ef282960a78",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "deny",
+          "/evidence/lru-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "7120fe2451646e7bcd1f3285c1f1d4deb45a8b226aed5583684ed612bf77ea47",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:41:05.419235828Z",
+          "FinishedAt": "2026-10-31T12:41:12.684417274Z"
+        },
+        "result": {
+          "mode": "deny",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:41:05.419235828Z",
+          "FinishedAt": "2026-10-31T12:41:12.684417274Z"
+        }
+      },
+      {
+        "config": "redundancy-none",
+        "mode": "write",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-4c1d1a821830",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "write",
+          "/evidence/redundancy-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "0250f44fa3ad01cc4a4aef46b12b49fe53d8e625e9591a0ee5497c09b06bccb3",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:41:13.352452729Z",
+          "FinishedAt": "2026-10-31T12:42:16.94564527Z"
+        },
+        "result": {
+          "mode": "write",
+          "mtp": false,
+          "redundancy": true,
+          "status": "passed"
+        },
+        "physically_released_prefix": [
+          {
+            "begin": 512,
+            "count": 64
+          },
+          {
+            "begin": 576,
+            "count": 64
+          },
+          {
+            "begin": 640,
+            "count": 64
+          },
+          {
+            "begin": 704,
+            "count": 64
+          },
+          {
+            "begin": 768,
+            "count": 64
+          },
+          {
+            "begin": 832,
+            "count": 64
+          },
+          {
+            "begin": 896,
+            "count": 64
+          },
+          {
+            "begin": 960,
+            "count": 64
+          },
+          {
+            "begin": 448,
+            "count": 64
+          },
+          {
+            "begin": 320,
+            "count": 64
+          },
+          {
+            "begin": 256,
+            "count": 64
+          },
+          {
+            "begin": 192,
+            "count": 64
+          },
+          {
+            "begin": 128,
+            "count": 64
+          },
+          {
+            "begin": 384,
+            "count": 64
+          },
+          {
+            "begin": 64,
+            "count": 64
+          }
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:41:13.352452729Z",
+          "FinishedAt": "2026-10-31T12:42:16.94564527Z"
+        }
+      },
+      {
+        "config": "redundancy-none",
+        "mode": "replay",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-f39782ce6d29",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "replay",
+          "/evidence/redundancy-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "f3eafb1793196ef6fc2611e67c6e2de7418a51fd4d71067d1eb17607b06c9d5b",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:42:17.738396929Z",
+          "FinishedAt": "2026-10-31T12:43:29.281193135Z"
+        },
+        "result": {
+          "cancel_processed": 4096,
+          "computed_prompt_tokens": 32768,
+          "discarded_domains": 0,
+          "forgotten_sources": 3,
+          "mode": "replay",
+          "mtp": false,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "prefix": 32768,
+          "redundancy": true,
+          "speculative_rounds": 0,
+          "status": "passed"
+        },
+        "actual_units": [
+          [
+            0,
+            512
+          ],
+          [
+            512,
+            1024
+          ],
+          [
+            1024,
+            1536
+          ],
+          [
+            1536,
+            2048
+          ],
+          [
+            2048,
+            2560
+          ],
+          [
+            2560,
+            3072
+          ],
+          [
+            3072,
+            3584
+          ],
+          [
+            3584,
+            4096
+          ],
+          [
+            4096,
+            4608
+          ],
+          [
+            4608,
+            5120
+          ],
+          [
+            5120,
+            5632
+          ],
+          [
+            5632,
+            6144
+          ],
+          [
+            6144,
+            6656
+          ],
+          [
+            6656,
+            7168
+          ],
+          [
+            7168,
+            7680
+          ],
+          [
+            7680,
+            8192
+          ],
+          [
+            8192,
+            8704
+          ],
+          [
+            8704,
+            9216
+          ],
+          [
+            9216,
+            9728
+          ],
+          [
+            9728,
+            10240
+          ],
+          [
+            10240,
+            10752
+          ],
+          [
+            10752,
+            11264
+          ],
+          [
+            11264,
+            11776
+          ],
+          [
+            11776,
+            12288
+          ],
+          [
+            12288,
+            12800
+          ],
+          [
+            12800,
+            13312
+          ],
+          [
+            13312,
+            13824
+          ],
+          [
+            13824,
+            14336
+          ],
+          [
+            14336,
+            14848
+          ],
+          [
+            14848,
+            15360
+          ],
+          [
+            15360,
+            15872
+          ],
+          [
+            15872,
+            16384
+          ],
+          [
+            16384,
+            16896
+          ],
+          [
+            16896,
+            17408
+          ],
+          [
+            17408,
+            17920
+          ],
+          [
+            17920,
+            18432
+          ],
+          [
+            18432,
+            18944
+          ],
+          [
+            18944,
+            19456
+          ],
+          [
+            19456,
+            19968
+          ],
+          [
+            19968,
+            20480
+          ],
+          [
+            20480,
+            20992
+          ],
+          [
+            20992,
+            21504
+          ],
+          [
+            21504,
+            22016
+          ],
+          [
+            22016,
+            22528
+          ],
+          [
+            22528,
+            23040
+          ],
+          [
+            23040,
+            23552
+          ],
+          [
+            23552,
+            24064
+          ],
+          [
+            24064,
+            24576
+          ],
+          [
+            24576,
+            25088
+          ],
+          [
+            25088,
+            25600
+          ],
+          [
+            25600,
+            26112
+          ],
+          [
+            26112,
+            26624
+          ],
+          [
+            26624,
+            27136
+          ],
+          [
+            27136,
+            27648
+          ],
+          [
+            27648,
+            28160
+          ],
+          [
+            28160,
+            28672
+          ],
+          [
+            28672,
+            29184
+          ],
+          [
+            29184,
+            29696
+          ],
+          [
+            29696,
+            30208
+          ],
+          [
+            30208,
+            30720
+          ],
+          [
+            30720,
+            31232
+          ],
+          [
+            31232,
+            31744
+          ],
+          [
+            31744,
+            32256
+          ],
+          [
+            32256,
+            32768
+          ]
+        ],
+        "starts": [
+          [
+            "1",
+            "2",
+            "4"
+          ],
+          [
+            "1",
+            "3",
+            "5"
+          ]
+        ],
+        "completions": [
+          [
+            "2",
+            "4",
+            "32769",
+            "32768"
+          ]
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:42:17.738396929Z",
+          "FinishedAt": "2026-10-31T12:43:29.281193135Z"
+        }
+      },
+      {
+        "config": "redundancy-none",
+        "mode": "deny",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-009b1262ae5a",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "deny",
+          "/evidence/redundancy-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "f0ffe057d47ccc2d9fd6cb7488c682b0dc202bba83c24042ffe6b6b4a73f1089",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:43:30.403204723Z",
+          "FinishedAt": "2026-10-31T12:43:37.183024923Z"
+        },
+        "result": {
+          "mode": "deny",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:43:30.403204723Z",
+          "FinishedAt": "2026-10-31T12:43:37.183024923Z"
+        }
+      },
+      {
+        "config": "redundancy-mtp4",
+        "mode": "write",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-bccb3a31bc31",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_MTP=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "write",
+          "/evidence/redundancy-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "4998a48917406f04e8ed3b5c2be24745b858ff98e8e434c6c0f541469907cf0c",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:43:38.402439256Z",
+          "FinishedAt": "2026-10-31T12:44:41.234066343Z"
+        },
+        "result": {
+          "mode": "write",
+          "mtp": true,
+          "redundancy": true,
+          "status": "passed"
+        },
+        "physically_released_prefix": [
+          {
+            "begin": 512,
+            "count": 64
+          },
+          {
+            "begin": 576,
+            "count": 64
+          },
+          {
+            "begin": 640,
+            "count": 64
+          },
+          {
+            "begin": 704,
+            "count": 64
+          },
+          {
+            "begin": 768,
+            "count": 64
+          },
+          {
+            "begin": 832,
+            "count": 64
+          },
+          {
+            "begin": 896,
+            "count": 64
+          },
+          {
+            "begin": 960,
+            "count": 64
+          },
+          {
+            "begin": 448,
+            "count": 64
+          },
+          {
+            "begin": 320,
+            "count": 64
+          },
+          {
+            "begin": 256,
+            "count": 64
+          },
+          {
+            "begin": 192,
+            "count": 64
+          },
+          {
+            "begin": 128,
+            "count": 64
+          },
+          {
+            "begin": 384,
+            "count": 64
+          },
+          {
+            "begin": 64,
+            "count": 64
+          }
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:43:38.402439256Z",
+          "FinishedAt": "2026-10-31T12:44:41.234066343Z"
+        }
+      },
+      {
+        "config": "redundancy-mtp4",
+        "mode": "replay",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-916f37448e3a",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_MTP=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "replay",
+          "/evidence/redundancy-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "283ea838ddba6e7ae1c8ab76772d666ddfd8999fef14f44b59a0fd01a464dcfd",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:44:41.773633632Z",
+          "FinishedAt": "2026-10-31T12:46:06.849884384Z"
+        },
+        "result": {
+          "cancel_processed": 4096,
+          "computed_prompt_tokens": 32768,
+          "discarded_domains": 0,
+          "forgotten_sources": 3,
+          "mode": "replay",
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "prefix": 32768,
+          "redundancy": true,
+          "speculative_rounds": 2,
+          "status": "passed"
+        },
+        "actual_units": [
+          [
+            0,
+            512
+          ],
+          [
+            512,
+            1024
+          ],
+          [
+            1024,
+            1536
+          ],
+          [
+            1536,
+            2048
+          ],
+          [
+            2048,
+            2560
+          ],
+          [
+            2560,
+            3072
+          ],
+          [
+            3072,
+            3584
+          ],
+          [
+            3584,
+            4096
+          ],
+          [
+            4096,
+            4608
+          ],
+          [
+            4608,
+            5120
+          ],
+          [
+            5120,
+            5632
+          ],
+          [
+            5632,
+            6144
+          ],
+          [
+            6144,
+            6656
+          ],
+          [
+            6656,
+            7168
+          ],
+          [
+            7168,
+            7680
+          ],
+          [
+            7680,
+            8192
+          ],
+          [
+            8192,
+            8704
+          ],
+          [
+            8704,
+            9216
+          ],
+          [
+            9216,
+            9728
+          ],
+          [
+            9728,
+            10240
+          ],
+          [
+            10240,
+            10752
+          ],
+          [
+            10752,
+            11264
+          ],
+          [
+            11264,
+            11776
+          ],
+          [
+            11776,
+            12288
+          ],
+          [
+            12288,
+            12800
+          ],
+          [
+            12800,
+            13312
+          ],
+          [
+            13312,
+            13824
+          ],
+          [
+            13824,
+            14336
+          ],
+          [
+            14336,
+            14848
+          ],
+          [
+            14848,
+            15360
+          ],
+          [
+            15360,
+            15872
+          ],
+          [
+            15872,
+            16384
+          ],
+          [
+            16384,
+            16896
+          ],
+          [
+            16896,
+            17408
+          ],
+          [
+            17408,
+            17920
+          ],
+          [
+            17920,
+            18432
+          ],
+          [
+            18432,
+            18944
+          ],
+          [
+            18944,
+            19456
+          ],
+          [
+            19456,
+            19968
+          ],
+          [
+            19968,
+            20480
+          ],
+          [
+            20480,
+            20992
+          ],
+          [
+            20992,
+            21504
+          ],
+          [
+            21504,
+            22016
+          ],
+          [
+            22016,
+            22528
+          ],
+          [
+            22528,
+            23040
+          ],
+          [
+            23040,
+            23552
+          ],
+          [
+            23552,
+            24064
+          ],
+          [
+            24064,
+            24576
+          ],
+          [
+            24576,
+            25088
+          ],
+          [
+            25088,
+            25600
+          ],
+          [
+            25600,
+            26112
+          ],
+          [
+            26112,
+            26624
+          ],
+          [
+            26624,
+            27136
+          ],
+          [
+            27136,
+            27648
+          ],
+          [
+            27648,
+            28160
+          ],
+          [
+            28160,
+            28672
+          ],
+          [
+            28672,
+            29184
+          ],
+          [
+            29184,
+            29696
+          ],
+          [
+            29696,
+            30208
+          ],
+          [
+            30208,
+            30720
+          ],
+          [
+            30720,
+            31232
+          ],
+          [
+            31232,
+            31744
+          ],
+          [
+            31744,
+            32256
+          ],
+          [
+            32256,
+            32765
+          ],
+          [
+            32765,
+            32768
+          ]
+        ],
+        "starts": [
+          [
+            "1",
+            "2",
+            "4"
+          ],
+          [
+            "1",
+            "3",
+            "5"
+          ]
+        ],
+        "completions": [
+          [
+            "2",
+            "4",
+            "32769",
+            "32768"
+          ]
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:44:41.773633632Z",
+          "FinishedAt": "2026-10-31T12:46:06.849884384Z"
+        }
+      },
+      {
+        "config": "redundancy-mtp4",
+        "mode": "deny",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-f0dc4df5f4f9",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_MTP=1",
+          "-e",
+          "NINFER_SOURCE_REPLAY_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "deny",
+          "/evidence/redundancy-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "851c166e42247ab8bbab3d351826b8075dd7e09bf2df61b27488964feb4a611c",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:46:07.724519771Z",
+          "FinishedAt": "2026-10-31T12:46:14.565351925Z"
+        },
+        "result": {
+          "mode": "deny",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:46:07.724519771Z",
+          "FinishedAt": "2026-10-31T12:46:14.565351925Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "r-pressure",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-005812c33360",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "r-pressure",
+          "/evidence/pressure-lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "61b67f4f5b47585312da8ef8421ca2e84c66860bf8111cf080b1ef7ee2aee3ca",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:46:15.614979811Z",
+          "FinishedAt": "2026-10-31T12:46:20.673534303Z"
+        },
+        "result": {
+          "charged_bytes": 131072,
+          "mode": "r-pressure",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:46:15.614979811Z",
+          "FinishedAt": "2026-10-31T12:46:20.673534303Z"
+        }
+      },
+      {
+        "config": "legacy-lru-none",
+        "mode": "r-pressure",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-source-replay-model-329cacad45c8",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_REPLAY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_replay_real_test",
+          "r-pressure",
+          "/evidence/legacy-lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "9d4ec898b59b3b227f225a4c735f829ff49944c3582977670e4f6b843221745d",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:46:21.470230517Z",
+          "FinishedAt": "2026-10-31T12:46:26.545986838Z"
+        },
+        "result": {
+          "charged_bytes": 131072,
+          "mode": "r-pressure",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:46:21.470230517Z",
+          "FinishedAt": "2026-10-31T12:46:26.545986838Z"
+        }
+      }
+    ],
+    "scope": "Full32K current-policy source replay with physical window2560, independent raw-input output and actual unit/cancel/forget bounds; not exact old sparse state, dense equivalence, checkpoint persistence or performance/Agent claim",
+    "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB"
+  },
+  "archive_regression": {
+    "completed": true,
+    "binary_sha256": "176d737f69cf417e2808990d63400f1a108d6565c78914e4723c3dd6003d1937",
+    "model_sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+    "controller_sha256": "fc932397f83cff3ec29a824c981a998326c43b1ab8d2a2798ea34a4ded0212ba",
+    "cases": [
+      {
+        "config": "lru-none",
+        "mode": "write",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-55d26ddc32c4",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "write",
+          "/evidence/lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "0c70cc48e2c81bbb51824a39f3ff6c5b0cbc34cab20729238226d0b9e14db7d0",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:47:59.630915982Z",
+          "FinishedAt": "2026-10-31T12:49:02.537888085Z"
+        },
+        "result": {
+          "archives": 3,
+          "mode": "write",
+          "mtp": false,
+          "redundancy": false,
+          "status": "passed"
+        },
+        "physically_released_prefix": [
+          {
+            "begin": 512,
+            "count": 64
+          },
+          {
+            "begin": 576,
+            "count": 64
+          },
+          {
+            "begin": 640,
+            "count": 64
+          },
+          {
+            "begin": 704,
+            "count": 64
+          },
+          {
+            "begin": 768,
+            "count": 64
+          },
+          {
+            "begin": 832,
+            "count": 64
+          },
+          {
+            "begin": 896,
+            "count": 64
+          },
+          {
+            "begin": 960,
+            "count": 64
+          },
+          {
+            "begin": 448,
+            "count": 64
+          },
+          {
+            "begin": 320,
+            "count": 64
+          },
+          {
+            "begin": 256,
+            "count": 64
+          },
+          {
+            "begin": 192,
+            "count": 64
+          },
+          {
+            "begin": 128,
+            "count": 64
+          },
+          {
+            "begin": 384,
+            "count": 64
+          },
+          {
+            "begin": 64,
+            "count": 64
+          }
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:47:59.630915982Z",
+          "FinishedAt": "2026-10-31T12:49:02.537888085Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "restore",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-6a49e3a2b0fa",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "restore",
+          "/evidence/lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "209d1a8d70dcec180325c9989f5446f2d0ee42dc5b72ddd2202db750d24478f2",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:49:03.836186389Z",
+          "FinishedAt": "2026-10-31T12:49:14.674438628Z"
+        },
+        "result": {
+          "discarded_domains": 2,
+          "forgotten_archives": 2,
+          "forgotten_sources": 4,
+          "mode": "restore",
+          "mtp": false,
+          "rebuild_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "redundancy": false,
+          "speculative_rounds": 0,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:49:03.836186389Z",
+          "FinishedAt": "2026-10-31T12:49:14.674438628Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "deny",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-8f7e2764a2bf",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "deny",
+          "/evidence/lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "be6be522db9cca3ed76f81fcde3521c4c26efe0893b7c2bfed3b02febc63db30",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:49:15.806644163Z",
+          "FinishedAt": "2026-10-31T12:49:22.396794966Z"
+        },
+        "result": {
+          "mode": "deny",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:49:15.806644163Z",
+          "FinishedAt": "2026-10-31T12:49:22.396794966Z"
+        }
+      },
+      {
+        "config": "lru-mtp4",
+        "mode": "write",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-dc522c68e23b",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "write",
+          "/evidence/lru-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "7743071d667279f4e7e4c3b8714c5d01cf119d000e4faf9ffae4437f803fd5f9",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:49:23.665605079Z",
+          "FinishedAt": "2026-10-31T12:50:28.41396037Z"
+        },
+        "result": {
+          "archives": 3,
+          "mode": "write",
+          "mtp": true,
+          "redundancy": false,
+          "status": "passed"
+        },
+        "physically_released_prefix": [
+          {
+            "begin": 512,
+            "count": 64
+          },
+          {
+            "begin": 576,
+            "count": 64
+          },
+          {
+            "begin": 640,
+            "count": 64
+          },
+          {
+            "begin": 704,
+            "count": 64
+          },
+          {
+            "begin": 768,
+            "count": 64
+          },
+          {
+            "begin": 832,
+            "count": 64
+          },
+          {
+            "begin": 896,
+            "count": 64
+          },
+          {
+            "begin": 960,
+            "count": 64
+          },
+          {
+            "begin": 448,
+            "count": 64
+          },
+          {
+            "begin": 320,
+            "count": 64
+          },
+          {
+            "begin": 256,
+            "count": 64
+          },
+          {
+            "begin": 192,
+            "count": 64
+          },
+          {
+            "begin": 128,
+            "count": 64
+          },
+          {
+            "begin": 384,
+            "count": 64
+          },
+          {
+            "begin": 64,
+            "count": 64
+          }
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:49:23.665605079Z",
+          "FinishedAt": "2026-10-31T12:50:28.41396037Z"
+        }
+      },
+      {
+        "config": "lru-mtp4",
+        "mode": "restore",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-a07889d3fa77",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "restore",
+          "/evidence/lru-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "a0118d7ed61c2e334e59e5fbade6a8de4b1823f119ecac460b7105f44e5d5586",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:50:29.032777242Z",
+          "FinishedAt": "2026-10-31T12:50:40.399610841Z"
+        },
+        "result": {
+          "discarded_domains": 2,
+          "forgotten_archives": 2,
+          "forgotten_sources": 4,
+          "mode": "restore",
+          "mtp": true,
+          "rebuild_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "redundancy": false,
+          "speculative_rounds": 2,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:50:29.032777242Z",
+          "FinishedAt": "2026-10-31T12:50:40.399610841Z"
+        }
+      },
+      {
+        "config": "lru-mtp4",
+        "mode": "deny",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-93200831e41e",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "deny",
+          "/evidence/lru-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "d90bdee3dfd31f8ce53974b266455db50936b78ce0d57fa7bf8ae7a579104edc",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:50:41.098052051Z",
+          "FinishedAt": "2026-10-31T12:50:48.563638161Z"
+        },
+        "result": {
+          "mode": "deny",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:50:41.098052051Z",
+          "FinishedAt": "2026-10-31T12:50:48.563638161Z"
+        }
+      },
+      {
+        "config": "redundancy-none",
+        "mode": "write",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-ad0ec6c5953c",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "write",
+          "/evidence/redundancy-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "09f33dfd43933a331e27aa0b84f3d9238df198dd036e8fa960f6efd9181c7a36",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:50:49.049781929Z",
+          "FinishedAt": "2026-10-31T12:51:54.568594926Z"
+        },
+        "result": {
+          "archives": 3,
+          "mode": "write",
+          "mtp": false,
+          "redundancy": true,
+          "status": "passed"
+        },
+        "physically_released_prefix": [
+          {
+            "begin": 512,
+            "count": 64
+          },
+          {
+            "begin": 576,
+            "count": 64
+          },
+          {
+            "begin": 640,
+            "count": 64
+          },
+          {
+            "begin": 704,
+            "count": 64
+          },
+          {
+            "begin": 768,
+            "count": 64
+          },
+          {
+            "begin": 832,
+            "count": 64
+          },
+          {
+            "begin": 896,
+            "count": 64
+          },
+          {
+            "begin": 960,
+            "count": 64
+          },
+          {
+            "begin": 448,
+            "count": 64
+          },
+          {
+            "begin": 320,
+            "count": 64
+          },
+          {
+            "begin": 256,
+            "count": 64
+          },
+          {
+            "begin": 192,
+            "count": 64
+          },
+          {
+            "begin": 128,
+            "count": 64
+          },
+          {
+            "begin": 384,
+            "count": 64
+          },
+          {
+            "begin": 64,
+            "count": 64
+          }
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:50:49.049781929Z",
+          "FinishedAt": "2026-10-31T12:51:54.568594926Z"
+        }
+      },
+      {
+        "config": "redundancy-none",
+        "mode": "restore",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-365e77a48204",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "restore",
+          "/evidence/redundancy-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "e1f3331b1030818dbb1ad82b9c5cd91f99b3770b5195b4b10b43b78968710636",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:51:55.460290461Z",
+          "FinishedAt": "2026-10-31T12:52:07.063254744Z"
+        },
+        "result": {
+          "discarded_domains": 2,
+          "forgotten_archives": 2,
+          "forgotten_sources": 4,
+          "mode": "restore",
+          "mtp": false,
+          "rebuild_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "redundancy": true,
+          "speculative_rounds": 0,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:51:55.460290461Z",
+          "FinishedAt": "2026-10-31T12:52:07.063254744Z"
+        }
+      },
+      {
+        "config": "redundancy-none",
+        "mode": "deny",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-edd3e4552aae",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "deny",
+          "/evidence/redundancy-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "1ced96f4c99780ea5a07dee5857433496081e8389fae954c9bfed523a966e254",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:52:07.5901007Z",
+          "FinishedAt": "2026-10-31T12:52:14.247033127Z"
+        },
+        "result": {
+          "mode": "deny",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:52:07.5901007Z",
+          "FinishedAt": "2026-10-31T12:52:14.247033127Z"
+        }
+      },
+      {
+        "config": "redundancy-mtp4",
+        "mode": "write",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-c7c8b1197464",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_MTP=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "write",
+          "/evidence/redundancy-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "526c9ef6cd572fb8a6bb38f016c733ec44f8c5c00ec18d0b48d42383d65f8dc2",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:52:15.388434142Z",
+          "FinishedAt": "2026-10-31T12:53:22.380388248Z"
+        },
+        "result": {
+          "archives": 3,
+          "mode": "write",
+          "mtp": true,
+          "redundancy": true,
+          "status": "passed"
+        },
+        "physically_released_prefix": [
+          {
+            "begin": 512,
+            "count": 64
+          },
+          {
+            "begin": 576,
+            "count": 64
+          },
+          {
+            "begin": 640,
+            "count": 64
+          },
+          {
+            "begin": 704,
+            "count": 64
+          },
+          {
+            "begin": 768,
+            "count": 64
+          },
+          {
+            "begin": 832,
+            "count": 64
+          },
+          {
+            "begin": 896,
+            "count": 64
+          },
+          {
+            "begin": 960,
+            "count": 64
+          },
+          {
+            "begin": 448,
+            "count": 64
+          },
+          {
+            "begin": 320,
+            "count": 64
+          },
+          {
+            "begin": 256,
+            "count": 64
+          },
+          {
+            "begin": 192,
+            "count": 64
+          },
+          {
+            "begin": 128,
+            "count": 64
+          },
+          {
+            "begin": 384,
+            "count": 64
+          },
+          {
+            "begin": 64,
+            "count": 64
+          }
+        ],
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:52:15.388434142Z",
+          "FinishedAt": "2026-10-31T12:53:22.380388248Z"
+        }
+      },
+      {
+        "config": "redundancy-mtp4",
+        "mode": "restore",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-2dfda793b615",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_MTP=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "restore",
+          "/evidence/redundancy-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "edd617f0fe59c2e69c44c9d1aaf7f507bc05cbac2244444d1bddc26e2ff538f6",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:23.007235418Z",
+          "FinishedAt": "2026-10-31T12:53:35.024334843Z"
+        },
+        "result": {
+          "discarded_domains": 2,
+          "forgotten_archives": 2,
+          "forgotten_sources": 4,
+          "mode": "restore",
+          "mtp": true,
+          "rebuild_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "redundancy": true,
+          "speculative_rounds": 2,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:23.007235418Z",
+          "FinishedAt": "2026-10-31T12:53:35.024334843Z"
+        }
+      },
+      {
+        "config": "redundancy-mtp4",
+        "mode": "deny",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-391557b51820",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_MTP=1",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "deny",
+          "/evidence/redundancy-mtp4"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "ffe7995bcbbb73837263b91d337de3bb80e4dde70bf23f303456d6a136ba0f88",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:36.030739462Z",
+          "FinishedAt": "2026-10-31T12:53:44.174556939Z"
+        },
+        "result": {
+          "mode": "deny",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:36.030739462Z",
+          "FinishedAt": "2026-10-31T12:53:44.174556939Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "wrong-config",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-e61605bba99f",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "wrong-config",
+          "/evidence/adverse-lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "c03fd49badb59e1542a38f4abed409810f23f16bc1df4be0e23ae295836c0a7f",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:44.950577656Z",
+          "FinishedAt": "2026-10-31T12:53:49.966782943Z"
+        },
+        "result": {
+          "mode": "wrong-config",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:44.950577656Z",
+          "FinishedAt": "2026-10-31T12:53:49.966782943Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "low-r",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-e5aa6713b269",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "low-r",
+          "/evidence/adverse-lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "57fa090f72d0552d46d05c0502f586e32402c2a67f2263eb4f76289ee5a5e77f",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:50.769962684Z",
+          "FinishedAt": "2026-10-31T12:53:57.086087616Z"
+        },
+        "result": {
+          "mode": "low-r",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:50.769962684Z",
+          "FinishedAt": "2026-10-31T12:53:57.086087616Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "quota",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-d4b62b5db89e",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "quota",
+          "/evidence/quota-lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "ba1a682fdfe143c2e08dfb04a79729a528b39e23be95bc00fb5c3e281e69afcd",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:57.613904186Z",
+          "FinishedAt": "2026-10-31T12:54:06.008671905Z"
+        },
+        "result": {
+          "mode": "quota",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:53:57.613904186Z",
+          "FinishedAt": "2026-10-31T12:54:06.008671905Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "fault",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-12755dbcfeaa",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "fault",
+          "/evidence/fault-lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "2f34e767174f6dc11e619f824f1925f4adbf331c36c738ccc3d0da581a624a6e",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:54:06.544187479Z",
+          "FinishedAt": "2026-10-31T12:54:17.649209468Z"
+        },
+        "result": {
+          "discarded_domains": 0,
+          "forgotten_archives": 0,
+          "forgotten_sources": 0,
+          "mode": "fault",
+          "mtp": false,
+          "rebuild_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "redundancy": false,
+          "speculative_rounds": 0,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:54:06.544187479Z",
+          "FinishedAt": "2026-10-31T12:54:17.649209468Z"
+        }
+      },
+      {
+        "config": "lru-none",
+        "mode": "deny-corrupt",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-native-archive-model-2dc1e7952599",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07/gpu-source-replay-archive-regression-r1:/evidence",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_ARCHIVE_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_archive_real_test",
+          "deny-corrupt",
+          "/evidence/fault-lru-none"
+        ],
+        "passed": true,
+        "terminal": true,
+        "id": "8e1f4855dac70e248da3c6078b6e17f6a9c557f5bab5a182f62f5e21a3dc8918",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:54:18.522231875Z",
+          "FinishedAt": "2026-10-31T12:54:23.500180644Z"
+        },
+        "result": {
+          "mode": "deny-corrupt",
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:54:18.522231875Z",
+          "FinishedAt": "2026-10-31T12:54:23.500180644Z"
+        }
+      }
+    ],
+    "scope": "Explicit one-Engine archive save/import/forget, canonical prefix inference and failure closure; no checkpoint persistence, long sparse replay, RSS/performance/Agent claim",
+    "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB"
+  },
+  "existing_behavior_regression": {
+    "completed": true,
+    "root": "/home/yifan/kvmem-validation/source-replay-20261031-f026af07",
+    "model": "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+    "native_inputs": {
+      "source_commit": "7b9dbefb370f4b2ac54d81ed68a7a4d217630fd2",
+      "candidate": "C9_source_replay",
+      "source_pins": {
+        "CMakeLists.txt": "e0a3465d37451182dbf7a5876b324e01bab938531e11e5a2a1d35f3d5900f5de",
+        "backends/ninfer/docs/maintainer/engine-architecture.md": "b1ef1e1d77d27e18535bce1c4ce77e13708a21fa7ce85db9843c5802401603e9",
+        "backends/ninfer/include/ninfer/engine.h": "497eb3fd5ea4418fc680849c042cc9a3db9ac8ed7414bd4676b2434170384ffa",
+        "backends/ninfer/include/ninfer/historical_source.h": "c3c10941ff90fcd503d20d873b1a0c6255cbea9b1d951d81a6f9aa0654ced51c",
+        "backends/ninfer/include/ninfer/types_fwd.h": "7fc9a42646cb0382bde004135a827b28c93583f661fe6f8d5bb5a4dfb82868dc",
+        "backends/ninfer/src/models/qwen3_5/frontend/frontend.cpp": "eeb581db56521018a586dcb91456e8c7b1eebe0dfc8b3f2ed37ab6e6a866450b",
+        "backends/ninfer/src/models/qwen3_5/frontend/frontend.h": "dc2eabd320cac914d63c329ba6eca07815eae3d43a1259c5bffde0b720edba12",
+        "backends/ninfer/src/models/qwen3_5/frontend/prepared_prompt.h": "23d683f0f28b67075b999268fb6e0ee19aeec2781c7a411e40e7739c90c445d7",
+        "backends/ninfer/src/models/qwen3_5/program/planning/request_plan.cpp": "61bf577e543a50f115567e00964ea26395ca129fddaea4b9c4fc40cd484f3974",
+        "backends/ninfer/src/models/qwen3_5/program/program.cpp": "8dc3ae20b4bf78f6ee9a5f9ad9caa866c90c7a2394798e9a582748e2a81c3e9a",
+        "backends/ninfer/src/models/qwen3_5/program/program.h": "bb9526a9f63973e79e8e9dd7540f07aed2a9bc54085757ffa9fee8d2401b20be",
+        "backends/ninfer/src/models/qwen3_5/program/program_impl.h": "56d3eee62085ffad099303ed9cc26acaccfe67d9ead24e9fa115b72927b6da2c",
+        "backends/ninfer/src/models/qwen3_5/program/storage/kvmem_window.cpp": "4f6476b6815647c47f5dc214ff322528d28607ee8510eb664f8836b5c925cb8a",
+        "backends/ninfer/src/models/qwen3_5/program/storage/source_journal.cpp": "70d809820f9522bc948ed6d5245efd8f6354c734d51b5351aaebfd79b78bfc32",
+        "backends/ninfer/src/runtime/engine/engine.cpp": "60185d351ef336790a01c8a0fdd5ddda82c068744d58c4e4ecdd7030ad70349b",
+        "backends/ninfer/src/runtime/engine/engine_core.h": "3b651a83649643acde61b9d5ba583c41c38f5fffffee363657df57c757cc9ff4",
+        "backends/ninfer/tests/cmake/RuntimeTests.cmake": "d330d6391f129450a18490f812a96d71db7813fa138e731f380f5f1ad2fe7a78",
+        "backends/ninfer/tests/models/qwen3_5/test_frontend.cpp": "5982eabd50f315eac3eb22b58b32ab7c5a9fc8a60b6b7b5172a9c6e021259c63",
+        "backends/ninfer/tests/test_engine_source_archive_real.cpp": "32d6b0e42431e424e9fbd040b35a1dacff3eb08d9f6e913b008dc6d5c077c324",
+        "backends/ninfer/tests/test_engine_source_replay_real.cpp": "3b70befb4146eb544a747feb6eb8cd9952b83efc65431cbeac41820a3db6d275",
+        "backends/patches/ninfer-checkpoint-budget.patch": "df6e97806b8249d9e0a84c9b683ef7fbd78fb49972a87aa97d64a866e55397e4",
+        "backends/patches/ninfer-historical-gc-lifecycle.patch": "77926d844af73be0ef162167666398b14dcb229cff74073816916c73a71401b6",
+        "backends/patches/ninfer-historical-gc-request-errors.patch": "a907d5191977633191de24197d43f4d85ef00d467bd0bd416f6f98b5333dfda9",
+        "backends/patches/ninfer-source-archive.patch": "409fb758344f67ba5cdf90a0cc7a19812d854cbd9408029ab68f69de85c84fde",
+        "backends/patches/ninfer-source-forget.patch": "16d787dbcfeb6020b945d22fb4b48faa27dbf21b96278eeeefcf59ce83a91aab",
+        "backends/patches/ninfer-source-journal.patch": "a05efd3d8eaa3616f32b5b328722c902e1f33ac255dd714e12490b689729a33c",
+        "backends/patches/ninfer-source-recovery.patch": "207c5c4a1f62d07fcaa1daa1e9b44a44dbb6049bc983a0aa2cd541b5b9d7c0d4",
+        "backends/patches/ninfer-source-replay.patch": "9a6ae6cddc82ff456ab7bfa29a2332ff4140add9d737e6bb57c0726b82aa3483",
+        "backends/versions.json": "d428342486373b883acaa22b49a7960d46983ffa423c84265bf0827884cf57cb",
+        "kvmem/CMakeLists.txt": "e684ac3183181ef409237f1037ee8ea6a9b1d5a7e655e77623656cc96a5db664",
+        "kvmem/include/kvmem/checkpoint_image.hpp": "78120cc8dbf2e8e6269b2d2e6c94aef10d619e1673c038becabfe785999add8a",
+        "kvmem/include/kvmem/checkpoint_policy.hpp": "e79b694bc6a72ecb021c3e52d32a36783f4207312269775c568af6c2ff03d43c",
+        "kvmem/include/kvmem/cli_options.h": "761ec131aec4a7b0cb518580b9fe0fc0f9a3498ea3cc1dee9f904b4be232cc62",
+        "kvmem/include/kvmem/graph_recall.hpp": "a3749e12187e20aec78bb57eb1d577cb0c3416c4b952d0c76a20ca6ae32e05bb",
+        "kvmem/include/kvmem/historical_kv_audit.hpp": "639f833debfa296b9bf8b241957afba109090bc83a3c0eb1e61ecdbde244a251",
+        "kvmem/include/kvmem/historical_kv_auxiliary.hpp": "e402a51205b50132937f365838d0c525d09a3778ac6aaa29f743160d16a6e442",
+        "kvmem/include/kvmem/historical_kv_gc.hpp": "dadce22f020ec3fc351dc44b94c93b14e71eafa02e9365cbec7b6c182b6a3f78",
+        "kvmem/include/kvmem/historical_kv_page_features.hpp": "7441c7d905d6b1eba0a9af7bda7cd3b44e78be94cc048c5069cb9b2d48a5f80a",
+        "kvmem/include/kvmem/historical_kv_page_gc.hpp": "3163b6c7c4c6383bc7b9db91e2a43f90b1cffc12b68bb5faf50cf79fc4278f42",
+        "kvmem/include/kvmem/historical_kv_policy.hpp": "4c2e5d5d7d23492e7bd40b2ecd6e23e071fc223c4fe35f1a5c6c620c47fdab5e",
+        "kvmem/include/kvmem/historical_kv_redundancy.hpp": "b01b5ec15d611dbeaa11e856391235ed1fb81129f9702760c9ab5e85a4a104e1",
+        "kvmem/include/kvmem/historical_kv_repository.hpp": "655d561a4932c2531a1237fdc5705bceaa4d0ea37e4ca300025dec11e99067db",
+        "kvmem/include/kvmem/host_kv_storage.hpp": "ba4aaa1e26038e610e813bd63df5a7a27430d7efbb43b0b8bb0b495788df9f78",
+        "kvmem/include/kvmem/kv_content.hpp": "9964eb11d3e8d654e833e49d5a0f0e14f6e9328e949964d18e751d4cab880080",
+        "kvmem/include/kvmem/kvmem_backend.hpp": "af9ed7c8162976db2804c1d6627ab61120248d7101dd7d46212af1a13fecc1e4",
+        "kvmem/include/kvmem/kvmem_runtime.hpp": "61fd8379f735cfa254998cb25c2427a9287b9b000d69b0f93bb92cf9a1f0d8ad",
+        "kvmem/include/kvmem/kvmem_store.hpp": "66df297b45383a0cc61ea99f58cab497f72ba86cb06c1ac46f1520f715c205fe",
+        "kvmem/include/kvmem/launch_contract.hpp": "15043a404169185fb63338deb4a8c77b1e568619399a84dcd9c762db3c685d78",
+        "kvmem/include/kvmem/lrfu.hpp": "dbc0ba8938053e78ca0572117198bbf1412fb954f0def04dad620d829f888e28",
+        "kvmem/include/kvmem/mean_key_retrieval.hpp": "5a61ca41c58d5418be91685c7c4c68ffed558b889c74cc7201928a46d28428a6",
+        "kvmem/include/kvmem/memory_contract.hpp": "4244a4348ceacab2a31681a2ba19d6842ce7c70ebbe4d5dfc9b8e26c75112807",
+        "kvmem/include/kvmem/monitor.hpp": "cc17b4318ad5890e5f1d707e35b4440ece4d1c40bf32e3d748274b9885120fab",
+        "kvmem/include/kvmem/monitor_hardware.hpp": "3c228f060c3324223a0b25cc8837314a13ba350b878cc765400f3b4d8c205e41",
+        "kvmem/include/kvmem/monitor_rate.hpp": "6897df05da6cf6761542e077b5d97dd2db22e4a92427d011d69f510fb0ae67db",
+        "kvmem/include/kvmem/native_kv_payload.hpp": "3d62791520c0dcf24ecb2dd9786074a3088a65400b442dfd571fd414a5e39b09",
+        "kvmem/include/kvmem/page_softmax_cuda.hpp": "87b359cea062ee29ad2b85efdb15099d8bc0491bdf18f7cd8978c0f2f3875978",
+        "kvmem/include/kvmem/pinned_kv_tier.hpp": "be26285a94c133b1684f888c2af4bcf355a1895781e1efa2889145e924228302",
+        "kvmem/include/kvmem/prefix_checkpoint.hpp": "caa276c1361709d10dda3091c20c710dc8dffc94e6dcd17bfe2f91e3ed2ef5cd",
+        "kvmem/include/kvmem/query_policy.hpp": "d3526d3777365b988006daeab1bf90324b0e47a7278faced47d7325e8b35b088",
+        "kvmem/include/kvmem/raw_kv_store.hpp": "595d83de4a0b6e9818b9946cd0515e4f46aae8221c1eeb9a8e9669e5a3cf0409",
+        "kvmem/include/kvmem/request_control.hpp": "6a84aa52673f7444f24a577b1e07417b7e859cb215290baec0da73638091b566",
+        "kvmem/include/kvmem/retrieval_options.hpp": "67760a81a237708ab64c9e9acd48f7fca500d3f2a31026f12790a01ebab49a77",
+        "kvmem/include/kvmem/rope.hpp": "53f6e8d082c0770d273eaccf528b03ba29ff0918af50e4b3dfd8a5055405d12c",
+        "kvmem/include/kvmem/session_memory.hpp": "f29199e0ddb24a7a5b56f922725e2f6b35ced24398abe788beb6931e5c42a2d0",
+        "kvmem/include/kvmem/snapshot.hpp": "91713cab014a87fd469c3a8d9483169ec914a1cbd1bda9d25539abdd1c5599c0",
+        "kvmem/include/kvmem/snapshot_buffer.hpp": "56617192a10d1f348b5798b9c8d3ef592d47648add0f9d42fd216402ee0fcce3",
+        "kvmem/include/kvmem/source_archive.hpp": "0924098cad138dc95617310e03c78e9201747ae1d9fe3a4e7dc5ce64ae95194d",
+        "kvmem/include/kvmem/source_image.hpp": "7faa3df80c61972139225d5e74922cce98c98346e5c3b4745f09c55b55970902",
+        "kvmem/include/kvmem/source_journal.hpp": "4e70e5e63bad3a05be5592e39a2ad761459289e36666322e8abad07e03cce53b",
+        "kvmem/include/kvmem/source_recovery.hpp": "401412adcd5386dd573a83dbee768034d2120ac9db9b8eb639afa5a3966220e0",
+        "kvmem/include/kvmem/speculative.hpp": "eeafecda631a96c783485c9b0d98a81f9a2151d71cd7f59521a93821f96b2a2c",
+        "kvmem/include/kvmem/spill_io.hpp": "9cf9b7e9946e93aa7528b5ead098620e1dbabbc0dc4e6df19330e51c82f2dcd9",
+        "kvmem/include/kvmem/token_options.hpp": "fbfb7ed3b2adb57713e02f2e160b95e764534c90e16ddaa228ba4ba078aee812",
+        "kvmem/src/cuda/page_softmax.cu": "b6ba6441aba48245290e8d7a418a3aa6c01370c935dc09b21c01ce8d47dd82d2",
+        "kvmem/src/host/checkpoint_policy.cpp": "cab66e988ad26c73ba48246ff10bcfabd642ed7a09ce91d80e02fd379ece0c5e",
+        "kvmem/src/host/graph_recall.cpp": "cd4b44e9b2900ad40240a2dbf32c8cf5b739c3d5f13470ab0622098e3b1053bb",
+        "kvmem/src/host/historical_kv_auxiliary.cpp": "ede6e597a0c07eae9d8e1be6472b4d190872916bb8e8b1e7d4da81fbfd635b9e",
+        "kvmem/src/host/historical_kv_gc.cpp": "511de1bb22e843155ee0058d61935f958ff5847c50c3c15a65023d7350b21c44",
+        "kvmem/src/host/historical_kv_page_features.cpp": "6d007941debc28029026e0c6836967c130ec7fde8aa74a7e037af1298f0c8642",
+        "kvmem/src/host/historical_kv_page_gc.cpp": "6e3c72291b0bf31078d4e8187515e1410017531aeadc776d844958aff4b9dcf8",
+        "kvmem/src/host/historical_kv_policy_lru.cpp": "beb8fb7613f0c08daea2ea4e9765e882874dc50993b60d4bbf183ce38672a36c",
+        "kvmem/src/host/historical_kv_redundancy.cpp": "d0f2157ee148514ba413a831a07788d5e699716c69946f76814e9070af7f68b1",
+        "kvmem/src/host/historical_kv_repository.cpp": "0ef60275a79e5755a8b12849c0755c7dc349104ad07aee73b36e4fa83d40ef16",
+        "kvmem/src/host/host_kv_storage.cpp": "6e13ba1bfdad998c6a6ce4817ffb197329ade27dc85b07092351fe5f472a12ad",
+        "kvmem/src/host/kv_content.cpp": "71de48c0d6df92d7a2136bb9e83716109df749f188859045c3b7f9e8384dd0c7",
+        "kvmem/src/host/kvmem_runtime.cpp": "5f2c1f6c15ba6b582afdf0f077fc47406800a279d599f448b4945a5c082dd797",
+        "kvmem/src/host/kvmem_store.cpp": "97b0af2dffb246eba254fa17373df3078b16ec4a7d94d5d9c2cb4890052b7160",
+        "kvmem/src/host/mean_key_retrieval.cpp": "79753f753a17955b7ebd6d7914f810d0c3efab993e36f7029d6acc239e8d08e3",
+        "kvmem/src/host/memory_contract.cpp": "cc571edda0552118353f5784ac2ccd9ca9754c52a72ed46f3ddd42614d42a45f",
+        "kvmem/src/host/native_kv_payload.cpp": "3ce20cf9c765444c3390c0b0b1f4cd3fd5036d47b857bb19f7fccc1adb32576c",
+        "kvmem/src/host/prefix_checkpoint.cpp": "84aff78773192af5de24c65a8e1de930a289571c68478b8ba8b59115b9161105",
+        "kvmem/src/host/raw_kv_store.cpp": "6e5bde72805eac086e1b6384e6de94a4a3b5fe0d6d21b2cd7b4c1a5044295878",
+        "kvmem/src/host/rope.cpp": "668afdd921c3c3dee770cc1e1840a028171e590975f1f991e0be9b0b663bfa16",
+        "kvmem/src/host/session_memory.cpp": "637be310d20103f13b8e8db82480c6528817cf0f629efa2e5cfd6eadfc6f9912",
+        "kvmem/src/host/source_archive.cpp": "014f3bda256bf33241ee5b7e11373c686afae66b3421382537009ce18e0c9760",
+        "kvmem/src/host/source_image.cpp": "30f647fb09f462adecd540ad90375bf115a52db31505d209145918a76c9a07c8",
+        "kvmem/src/host/source_journal.cpp": "fce45fe19d99e3ac154241141fa5961216292e5d25c82a96eb91bab51567c251",
+        "kvmem/src/host/source_recovery.cpp": "353879610766868ac332756e982235887325d019d304b182e071fb1a5d4135a8",
+        "kvmem/src/host/spill_io.cpp": "297eb0496bb3121a6bb7173006915aa011f2355af1070b5f70efe8566854c580",
+        "kvmem/tests/backend_rebind_test.cpp": "2f88db8d78fc4cd8bc700e7875155769a33e84ba2d7902a2c57a73382d846ba7",
+        "kvmem/tests/checkpoint_image_test.cpp": "c44c805d7375ab531a21c8d5a29f5d18fdfa68f7aa2d661d429364546e55c6f5",
+        "kvmem/tests/checkpoint_policy_test.cpp": "66fd201a894e6815c43002d863ae16f0017e3d4188c0f5c722d8c631ff7fde21",
+        "kvmem/tests/graph_recall_cuda_test.cpp": "33f06fb8d8a0901daa5d5f9a2d95677f2ac6100a75e8e42e3378720601ee8cad",
+        "kvmem/tests/graph_recall_test.cpp": "dd0f7cf15fafbb5ff1175a04e2f07fdf4c6902bbdc02561e9c0a7f713f8e7df4",
+        "kvmem/tests/historical_gc_ninfer_core_test.cpp": "f845700aa438d03c7b3a851c1da1b5e81ec7df2c9cb1a97c531bbf41e1fea36a",
+        "kvmem/tests/historical_kv_auxiliary_budget_test.cpp": "d35bc1e86f9acd7d3dcb17b2f555036c1a4ff986e966d062218d1e1977df79b3",
+        "kvmem/tests/historical_kv_boundary_mailbox_test.cpp": "27544e0bb4f382112fe9af64234653b9daa051690ed2d4d1d835bc0ab8b37502",
+        "kvmem/tests/historical_kv_commit_conditions_test.cpp": "5732d11b98ad81bae1bd3cdaaf174b7949c7fb9e955852bd3a603b1f1dd08a4d",
+        "kvmem/tests/historical_kv_owner_budget_test.cpp": "f3073ed99a7af3cb74de956edf0e5ee016691715e2008d4fbc2cbb6ec4afe16a",
+        "kvmem/tests/historical_kv_range_lock_test.cpp": "45bbed69c9ca0cebc2d21372e1e8002a862c6bcc1f0604b7c7ba9d300e510820",
+        "kvmem/tests/historical_kv_score_evidence_test.cpp": "71db9acc5b4c59de9832b53d0267591c1eb0f371c4cdd6c3ac994bdf72a11e7f",
+        "kvmem/tests/historical_kv_service_health_test.cpp": "0d15ed01b91b646ee048cb59f365901dde0991eae2de56596dd73228e6898e65",
+        "kvmem/tests/historical_kv_witness_lifecycle_test.cpp": "dbecff0361e10274e0816880bf80a08a41075dd625d27e864d7e2c5f74ecc008",
+        "kvmem/tests/host_kv_storage_test.cpp": "6bb913838ee20d097df8840cd240461756e2fb1e78dd7748d0aa097054cd7258",
+        "kvmem/tests/kv_content_test.cpp": "d56c09beb0c2327d0b381957562bc17807c042b3335d2ee382606155ea0320ce",
+        "kvmem/tests/kvmem_runtime_test.cpp": "75f529e9e1fb0e0406930bdf08125752afc42be675f5168f4b59e3dea7bb45e0",
+        "kvmem/tests/kvmem_store_test.cpp": "b0137f75e4c3aa9e9b3e602508f22f6839813246ce1ba485bc8aafd52f5a1da0",
+        "kvmem/tests/mean_key_retrieval_test.cpp": "8c12920c3302f47dbad5bbfd2ed146db644b56978ff300f71b9beef9108fbcf4",
+        "kvmem/tests/memory_contract_test.cpp": "2dee409fb853f9bc1cb40e54fc3f9c5f88c6f9cc1fc37fd4e96b425d8dcef2d5",
+        "kvmem/tests/memory_test_support.hpp": "6ab869a5bfe66e4c212a58005a187139387ddc0fdbdb19c4105343ffbc95b6f9",
+        "kvmem/tests/native_kv_payload_test.cpp": "d88e7b392f7c9e53af4333dad33101609c3a0c3ae9d7306ca04428a4f37e4c98",
+        "kvmem/tests/native_residency_test.cpp": "47569ea858de40a2a247bf8b2654caf27823022c3e9df412d6eba553996f9216",
+        "kvmem/tests/pinned_kv_tier_test.cpp": "5f0bf4c544002b07c7e233d251dc777269957dde08739e54b6690c672ec5a2ad",
+        "kvmem/tests/prefix_checkpoint_test.cpp": "7ee3ef40882d9749a7903427fd53c70fd398824643d905ad90b493ee59e26cf7",
+        "kvmem/tests/query_policy_test.cpp": "2a23558d270b134b38111ad74af0d3002d853510d5a7435c8311fbae5929851d",
+        "kvmem/tests/raw_kv_store_test.cpp": "9923c02c892784d0d414f2775d1b47ee5e84fc6caea3ec050dcfaed73b8c4698",
+        "kvmem/tests/source_archive_test.cpp": "2b3108a9e89c75e934371fdd4ec9509491c7ae78f9d03d9345c2408e26f27d8d",
+        "kvmem/tests/source_image_test.cpp": "c5392ce220138d389d4f9760023b73a627697b8b8ff07c415c1fa65883875e5d",
+        "kvmem/tests/source_journal_test.cpp": "51a7499b049a0b145249376fde087543e62394b38f4471f8bd592c3b46e6ba4c",
+        "kvmem/tests/source_recovery_test.cpp": "171d6b240d98b297113be73e851ab2c1bf0b30ee58f2f9693c4a6d364c839866",
+        "kvmem/tests/spill_io_test.cpp": "7136b8994e8123398cdcc554c29782ed108df26f554321ed7e996a634a36a198",
+        "kvmem/tests/tiered_kv_storage_test.cpp": "8ab3fdabfc5528c02797278a316a90185ed6404e18bcda5b6a95126e9d242ccb",
+        "kvmem/tests/token_options_test.cpp": "0d06bf407737baa850c66152e8a82590f3b556fa3b17f08120b5341616c67b4a",
+        "scripts/check_kv_lifecycle_baseline.py": "991f822d9868d92d4a81760e79f8dbd57ee166ea0b9eea5a396abdb9b6c0bdcf",
+        "scripts/ninfer_checkpoint_budget_acceptance.py": "69e1c3625bbb00b4882120a350b796c2e125dadb6302030e1b44b7777b1c1595",
+        "scripts/ninfer_gc_acceptance.py": "1a4ec965534f5f335bc8ae747fd6393eee320bae5a3d3d1f79976d057d606ee9",
+        "scripts/ninfer_gc_harbor.py": "060abd42b4ac45038f51f42c723e7b23fd5418c9c12512f27d8359ac7616a2e7",
+        "scripts/ninfer_gc_latency.py": "d492cc68e771f7ef618d47202ae4f9a34c8abdb379b85839a21fe3db7c5b4d3b",
+        "scripts/ninfer_lifecycle_service_acceptance.py": "cbe98816822315d4b3ae54dcb9af027dd73f1e3355b5486522f436ada93efb40",
+        "scripts/ninfer_source_acceptance.py": "6d9167ce414f5977f1a6b61b56a76e52233e05e0ca405b7a44dd86d3753dc4b7",
+        "scripts/ninfer_source_forget_acceptance.py": "611c6142f482c6db138a4af0b7b87adb714d2b7988ad2c2e97f1abd414767885",
+        "scripts/ninfer_source_recovery_acceptance.py": "cdf48f4b670a55945ba6ff98a5c8a865e52e379427f523f1c34a6d2ff9ef8fef",
+        "scripts/prepare-backends.py": "17b15883c347555096b66d199c3231db2bf87bda71cfae2b39a23c4f9b1c8019",
+        "tests/kv-lifecycle-compatibility-probe.cpp": "26ff6a4073f87127439244683f704872a152cc85e5d332a24308ef5208538855",
+        "tests/test_kv_lifecycle_baseline.py": "98326e52b8893a6f11f00abc12749c6bb6ea9f89754fee1a0da9ec249f83e587",
+        "tests/test_ninfer_lifecycle_service_acceptance.py": "4c35efd31fcddbb963cefe2aaa5c7f2a961bbea2ca56024b4c61dc2b80f53e28"
+      },
+      "native": {
+        "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
+        "patched_tree": "c3ac2a35ce2f6a8e95b82fe3ba5562d768184e4e",
+        "patch_count": 32
+      },
+      "parent_root": "/home/yifan/kvmem-validation/native-archive-20261031-1727ad8a",
+      "delta_sha256": "4cc0b3c61120a5e4ee915532fa2d4456657634098c5ab45a33a8d8517c226ba0"
+    },
+    "script_sha256": "69e1c3625bbb00b4882120a350b796c2e125dadb6302030e1b44b7777b1c1595",
+    "helper_sha256": "cdf48f4b670a55945ba6ff98a5c8a865e52e379427f523f1c34a6d2ff9ef8fef",
+    "image_id": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+    "cases": [
+      {
+        "config": "pinned-pool-contract",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-94fd31ef3276",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_query_policy_tests",
+          "ninfer_kvmem_checkpoint_pool_test"
+        ],
+        "binary_sha256": "af8c8a6671231b84139e6bed652e06b57adecdfce32f8bc946b5f0568a3fec77",
+        "passed": true,
+        "terminal": true,
+        "id": "80fce2faddf5b68fb70496e0a729b8b033960636b16118efe123e056512b203e",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:55:16.603596875Z",
+          "FinishedAt": "2026-10-31T12:55:17.170159028Z"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:55:16.603596875Z",
+          "FinishedAt": "2026-10-31T12:55:17.170159028Z"
+        }
+      },
+      {
+        "config": "quota-lru-none",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-2bac1a420b31",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "c4503ed14641667933ff39e556fa6877accc5d298c4a342ebc8ee2abf94819f0",
+        "passed": true,
+        "terminal": true,
+        "id": "f145caefbea62f2703efb633a08abefbebc4aca0a8081579ab0ead0dd6b82935",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:55:20.682087054Z",
+          "FinishedAt": "2026-10-31T12:55:46.137674699Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308084854,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 176246,
+          "mtp": false,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308084854,
+          "rebuild_speculative_rounds": 0,
+          "redundancy": false,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:55:20.682087054Z",
+          "FinishedAt": "2026-10-31T12:55:46.137674699Z"
+        }
+      },
+      {
+        "config": "quota-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-9ea20febca5a",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "c4503ed14641667933ff39e556fa6877accc5d298c4a342ebc8ee2abf94819f0",
+        "passed": true,
+        "terminal": true,
+        "id": "ed7e6af24202a6a740ad7bdd03606896e03ed7f2066a991194e2c9733773ee86",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:55:49.500596342Z",
+          "FinishedAt": "2026-10-31T12:56:15.632696622Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308089986,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 181378,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308089986,
+          "rebuild_speculative_rounds": 2,
+          "redundancy": false,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:55:49.500596342Z",
+          "FinishedAt": "2026-10-31T12:56:15.632696622Z"
+        }
+      },
+      {
+        "config": "quota-redundancy-none",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-68f910d8c576",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "c4503ed14641667933ff39e556fa6877accc5d298c4a342ebc8ee2abf94819f0",
+        "passed": true,
+        "terminal": true,
+        "id": "b68af7d59275cc41e6c730ab2169be6801764b67bdd28676025b5576ff142f60",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:56:19.620282497Z",
+          "FinishedAt": "2026-10-31T12:56:45.587830384Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308084854,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 176246,
+          "mtp": false,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308084854,
+          "rebuild_speculative_rounds": 0,
+          "redundancy": true,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:56:19.620282497Z",
+          "FinishedAt": "2026-10-31T12:56:45.587830384Z"
+        }
+      },
+      {
+        "config": "quota-redundancy-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-1bc6bdd33642",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_MTP=1",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "c4503ed14641667933ff39e556fa6877accc5d298c4a342ebc8ee2abf94819f0",
+        "passed": true,
+        "terminal": true,
+        "id": "870d7d6eaaf1ed4e05201f2be000b2017971c305619f0c1e09d195841ee82de2",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:56:48.936857162Z",
+          "FinishedAt": "2026-10-31T12:57:15.614496104Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308089986,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 181378,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308089986,
+          "rebuild_speculative_rounds": 2,
+          "redundancy": true,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:56:48.936857162Z",
+          "FinishedAt": "2026-10-31T12:57:15.614496104Z"
+        }
+      },
+      {
+        "config": "recovery-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-25678df66a8e",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_RECOVERY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_SOURCE_RECOVERY_MTP=1",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_recovery_real_test"
+        ],
+        "binary_sha256": "23938509eab8005cc3d9262a2c66cca6b83e72d603729096528da151b0d6dbfe",
+        "passed": true,
+        "terminal": true,
+        "id": "699a337ecd1c3b0de2a604d050b4defb54744b321a5bb14353fb4b3aa02d7cdc",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:57:19.217521518Z",
+          "FinishedAt": "2026-10-31T12:58:34.949973573Z"
+        },
+        "result": {
+          "admission_reserve_rejected": true,
+          "cancel_computed": 512,
+          "cancel_processed": 512,
+          "cancelled_source_id": 2,
+          "canonical_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "final_source_records": 12,
+          "first_token_stop": true,
+          "fresh_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "history_evictions": 6,
+          "input_tokens": 32768,
+          "mtp": true,
+          "original_speculative_rounds": 2,
+          "rebuild_prefix": 1024,
+          "rebuilt_source_id": 3,
+          "rebuilt_speculative_rounds": 2,
+          "redundancy": false,
+          "retired_pages": 480,
+          "source_id": 1,
+          "source_only_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "source_only_speculative_rounds": 2,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:57:19.217521518Z",
+          "FinishedAt": "2026-10-31T12:58:34.949973573Z"
+        }
+      },
+      {
+        "config": "forget-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-3560f6dc1e8b",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/source-replay-20261031-f026af07:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_FORGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_SOURCE_FORGET_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_forget_real_test"
+        ],
+        "binary_sha256": "841b415cab2d11cce147428ef87e18cbbf442e1c2186bc88f9c8901fcf934eff",
+        "passed": true,
+        "terminal": true,
+        "id": "583b46ae4444088f6c1765cde137ef3bca915d0d54f742be021d2cc988a07ff9",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:58:38.508552469Z",
+          "FinishedAt": "2026-10-31T12:58:54.14479283Z"
+        },
+        "result": {
+          "busy_partial_prefill": true,
+          "checkpoint_bytes_after": 924062228,
+          "checkpoint_bytes_before": 1540423578,
+          "discarded_native_domains": 3,
+          "final_staging_bytes": 0,
+          "forgotten_sources": 3,
+          "fresh_reused_tokens": 0,
+          "fresh_source_id": 6,
+          "fresh_speculative_rounds": 2,
+          "host_bytes_after": 26808320,
+          "host_bytes_before": 88954880,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "redundancy": false,
+          "revoked_staging_bytes": 8192,
+          "source_bytes_after": 53760,
+          "source_bytes_before": 79104,
+          "sources_after": 2,
+          "sources_before": 5,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T12:58:38.508552469Z",
+          "FinishedAt": "2026-10-31T12:58:54.14479283Z"
+        }
+      }
+    ],
+    "scope": "bounded checkpoint C, quota cleanup and source regressions; no RSS/performance/Agent qualification"
+  },
+  "long_replay": [
+    {
+      "config": "lru-none",
+      "actual_units": 64,
+      "maximum_unit": 512,
+      "covered_prefix": 32768,
+      "computed_prompt_tokens": 32768,
+      "cancel_processed": 4096,
+      "retained_native_domains_at_final_forget": 0,
+      "speculative_rounds": 0
+    },
+    {
+      "config": "lru-mtp4",
+      "actual_units": 65,
+      "maximum_unit": 512,
+      "covered_prefix": 32768,
+      "computed_prompt_tokens": 32768,
+      "cancel_processed": 4096,
+      "retained_native_domains_at_final_forget": 0,
+      "speculative_rounds": 2
+    },
+    {
+      "config": "redundancy-none",
+      "actual_units": 64,
+      "maximum_unit": 512,
+      "covered_prefix": 32768,
+      "computed_prompt_tokens": 32768,
+      "cancel_processed": 4096,
+      "retained_native_domains_at_final_forget": 0,
+      "speculative_rounds": 0
+    },
+    {
+      "config": "redundancy-mtp4",
+      "actual_units": 65,
+      "maximum_unit": 512,
+      "covered_prefix": 32768,
+      "computed_prompt_tokens": 32768,
+      "cancel_processed": 4096,
+      "retained_native_domains_at_final_forget": 0,
+      "speculative_rounds": 2
+    }
+  ],
+  "legacy_scope": "Genuine C8 namespace copied from readonly prior qualified root; current authorized import/full R preparation, NOT independent long inference from the old C8 file (old fixture lacks a32K output oracle).",
+  "adverse_and_limits": [
+    "Whole-prefix RebuildAsNew remains strict; ReplayAsNew is an explicit NEW current-policy sparse/recurrent/spec computation, never exact old-state or dense/full-attention equivalence. New prefix recomputation was measured only on frozen32768repeated-token fixture; not Agent/task quality.",
+    "ActualR owns the entire131072-byte prefix and prepared-input has separate request workspace. SourceReplayBudget adds16bytes/fixed plan metadata. Physical window/unit bounds do not bound whole-process RSS or reduce preparation to chunk-only RAM.",
+    "A successful long replay retains its new native domain; after a second long request was admitted then partially cancelled, the older inactive domain was absent before final forget in the recorded cohorts. No incomplete new domain was retained. Cancellation does not promise to undo earlier cache eviction or avoid future miss/rebuild cost; source data remained until explicit family forget.",
+    "Windows driver initially failed to locate cmake because childPATH is not executable search on Windows CreateProcess. Fixed explicitshutil.which(...path=...) to the existing MinGW cmake/ctest;23Debug then passed. One readonly SSH metadata query had quoting syntax error, corrected with structuredargv/shlexjoin; no model job restarted or test assertion relaxed.",
+    "All9existing binaries changed vsC8, so current14new process cases and17archive+7existing-behavior GPU regressions were rerun. Wholehost24ASANUBSAN/leak checks are not full-CUDA instrumentation; TSan remains unresolved from prior tool startup failure.",
+    "Native exported source still warns unknown build-id;146contractpins/3452exact source inputs, patch32 replay/tree and current binary identities retained. No performance/latency unchanged claim or default1GiB GPU qualification beyond existing explicit1/384/2048MiB cohorts.",
+    "Fixed Linux singleGPU/single-request text/RAM none/MTP scope, actual C9modelC2048MiB/H96MiB/R1MiB/M64MiB/S16MiB. No nativeWindows/multisession/other backend, shape-general or multimodal support proof.",
+    "Nonaligned long accepted-output-prefix continuation was not separately qualified as native replay; generic3073-row partial-tail arithmetic/copy plus32Kmodel generation are narrower evidence. Rich real prompts, long-duration/fixed-work performance and Agent quality remain required.",
+    "No verified same-owner RAM source cooldown/unbinding yet; archive binding is still once per key/owner until permanent forget/reopen. S fullness still returns bounded quota refusal rather than automatic cold-source eviction.",
+    "Checkpoint persistence, exact compatible old-trajectory restore/version closure, automatic lifetime policy, HTTP/CLI, task value, tier/multisession, complete production/Agent gates remain unfulfilled. Existing catalog/seal interruption can deny entirearchive reopen; no repair/coherent-backup rollback protection.",
+    "Host debug/NVIDIA/registry/driver settings unchanged and DeepSWE still deferred.",
+    "Post-run profile metadata initially placed only qualified LRU/redundancy in policy_modes, whose baseline schema describes all exposed off/LRU/redundancy options. Source-only gate r2 rejected this; corrected policy_modes exposure and retained qualified_policy_modes separately. No code pin, model input, assertion or inference result changed; failed source-only report retained."
+  ],
+  "next": "Implement explicit verified cold-source family eviction preserving durable records, closing old preparations/writers and enabling same-owner reimport; then checkpoint persistence and remaining C-D-F.",
+  "raw_evidence": {
+    "path": "artifacts/lifecycle-source-replay/evidence.zip",
+    "sha256": "e727c48ffc44e621e96188ba0a88cad9dbe7aa78fd3d53a51245df9db8645dad",
+    "bytes": 1634987
+  }
+}
