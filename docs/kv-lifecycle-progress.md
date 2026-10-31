@@ -1,6 +1,6 @@
 # KV 生命周期六阶段进度
 
-更新时间：2026-10-31。完整目标仍为 [总体设计](kv-lifecycle-system-design.md) 中的六个阶段；单项通过不代替完整生产验收。
+更新时间：2026-11-01。完整目标仍为 [总体设计](kv-lifecycle-system-design.md) 中的六个阶段；单项通过不代替完整生产验收。
 
 - **A 基线与契约：已完成。** NInfer 主后端、模型/源码固定身份、首批范围、动作及资源 owner、可执行契约已建立。证据：[阶段 A](kv-lifecycle-baseline.md)，提交 `ca2bbfe`。
 - **B 可靠机制与预算：首批支持档位已完成。** B1 原子交接、B2 固定提交条件、B3 精确直接代表/评分证据和 B4 GC 自有辅助预算、旧 owner 计费、worker 健康均已实现。真实线程与交叉退休、禁止新分配的前台提交、分配故障注入、版本/保护撤销及 Linux 核心 ASan/UBSan 有独立证据。TSan 因工具在进入应用前失败仍无结论；不因此宣称竞态检测通过。证据：[B1](kv-lifecycle-boundary-mailbox.md)、[B2](kv-lifecycle-commit-conditions.md)、[B3](kv-lifecycle-score-evidence.md)、[特征预算](kv-lifecycle-auxiliary-budget.md)、[owner 预算](kv-lifecycle-owner-budget.md)、[B4 原生接线](kv-lifecycle-native-budget.md)。
@@ -58,6 +58,8 @@
 
 **C11c 私有 CPU 读取准备组件已写入。** 有预算的 metadata 视图、完整依赖/目录校验、C/H 目标预约及流式私有数据读取已实现；模型侧仍未完成完整编译和实际 pinned/CUDA 验证。Windows 独立组件检查通过，含四种输入切分、6,568 个截断位置、12 个实际分配失败点及延迟退款；旧消息后缀与开放输出边界按真实 prefill/restore 语义处理。Linux sanitizer 因远程 SSH 及本地 Docker 后台不可用待补。没有 S/native 发布、GPU 上传或模型恢复结论，见 [当前 checkpoint 说明](kv-lifecycle-checkpoint-persistence.md)。
 
-下一步先在 SSH 恢复后取回旧任务结果、编译并验证最新保存及私有读取候选，再完成 typed 元数据/M/C 准备、正常模型资源预约与 Engine 新域恢复，关闭模型及版本循环。之后接自动源保留策略；C10 转冷、C9/C10 长前缀重放只按各自固定负载理解。旧快照不能复活退休身份及其余条件完成前不关闭 C，短功能检查不代替 F 的配对性能、长时间与 Agent 质量验收。
+**C11d 独立逻辑对象及 C/M 准备已实现本地组件验证。** 实际统计、selector/LRFU、图/反馈、范围/特征、原始位置及 checkpoint 逻辑数据均可独立拥有；C 在大目标分配前预约，实际 M 数组按原 allocator 计费。79 个普通堆分配失败点、7 个 M 上游失败点、C/M 少一字节拒绝、退款、wire 清空后使用和旧物理标记清除通过；扩展组件与已有 selector/RawKvStore 共三项 Windows 检查通过。仍没有可发布的原生 Window/新域、GPU 上传或 Engine 原生恢复，完整 Native 编译和 sanitizer 待连接恢复，不能用小 fixture 的预算数字代替模型或 RSS 上界。见 [C11d 证据](experiments/2026-11-01-lifecycle-checkpoint-state/summary.json)。
+
+下一步先在 SSH 恢复后取回旧任务结果、编译并验证最新保存及私有读取候选，再装配原生 Window/目录并转移 owner 计费，完成正常模型资源预约与 Engine 新域恢复，关闭模型及版本循环。之后接自动源保留策略；C10 转冷、C9/C10 长前缀重放只按各自固定负载理解。旧快照不能复活退休身份及其余条件完成前不关闭 C，短功能检查不代替 F 的配对性能、长时间与 Agent 质量验收。
 
 用户“暂不修改主机调试设置”和“DeepSWE 暂缓”的约束继续有效。SSH 当前再次中断，C5–C10 按各自范围记录；Engine 的规范前缀跨重启恢复已提供模型证据，完整系统尚未完成。

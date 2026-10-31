@@ -700,6 +700,18 @@ uint64_t RawKvStore::capacity_bytes(uint32_t tokens, uint32_t populated_layers) 
         std::min(populated_layers, cfg_.n_layer) * (cfg_.n_embd_k*sizeof(float) + uint64_t(cfg_.block_tokens) *
          (cfg_.k_gpu_row_bytes + cfg_.v_gpu_row_bytes)));
 }
+uint64_t RawKvStore::mean_snapshot_capacity_bytes(const RawKvStoreConfig& cfg, uint32_t blocks) {
+    if (!cfg.n_layer || !cfg.n_embd_k || !cfg.block_tokens || cfg.n_embd_v ||
+        cfg.k_row_bytes || cfg.k_gpu_row_bytes || cfg.v_gpu_row_bytes || !cfg.payload_storage)
+        throw std::invalid_argument("mean snapshot requires mean-only geometry and an existing payload account");
+    const uint64_t layer = sizeof(LayerBlk) + uint64_t(cfg.n_embd_k)*sizeof(float);
+    if (layer > (UINT64_MAX-sizeof(BlockRaw))/cfg.n_layer)
+        throw std::overflow_error("mean snapshot layer capacity overflow");
+    const uint64_t block = sizeof(BlockRaw) + uint64_t(cfg.n_layer)*layer;
+    if (blocks && block > (UINT64_MAX-sizeof(RawKvStore))/blocks)
+        throw std::overflow_error("mean snapshot capacity overflow");
+    return sizeof(RawKvStore) + uint64_t(blocks)*block;
+}
 uint64_t RawKvStore::payload_bytes(bool disk_only) const {
     std::lock_guard<std::mutex> lock(mu_);
     uint64_t bytes = 0;

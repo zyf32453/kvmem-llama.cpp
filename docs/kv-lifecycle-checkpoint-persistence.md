@@ -2,7 +2,8 @@
 
 更新：2026-11-01。C11a 的**归档权限组件**已验收；C11b 已实现原生编码及 Engine 保存候选，
 本地 CPU 检查通过，最新原生完整编译和真实模型检查因 SSH 再次中断尚未完成。
-后续 C11c 已补私有 CPU 读取准备组件，Engine 原生恢复入口及跨重启模型恢复仍未实现，
+后续 C11c 已补私有 CPU 读取准备组件，C11d 已补实际逻辑对象及其 C/M 准备，均只有本地组件证据；
+Engine 原生恢复入口及跨重启模型恢复仍未实现，
 阶段 C 与完整六阶段目标继续开放。
 执行范围、结果和不利发现见 [本批摘要](experiments/2026-10-31-lifecycle-checkpoint-authority/summary.json)。
 
@@ -150,11 +151,45 @@ NInfer adapter 已写入但尚未完成完整原生构建；Engine 发布、GPU 
 Docker 补跑 Linux 内存检查，但后台未就绪，未修改 WSL/驱动设置，Linux sanitizer 仍待运行。
 见 [C11c 组件与验证范围](experiments/2026-11-01-lifecycle-checkpoint-input/summary.json)。
 
+## C11d：独立逻辑状态及其 C/M 准备
+
+字节视图之外，现已增加模型专用的 `KvmemCheckpointLogicalState`：还原实际 `RawKvStore`、
+`KvMemStore`、LRFU、图、输出反馈/采样、请求与 capture plan、特征/thinking 范围，以及每个
+checkpoint 的 token、三轴位置、执行切分、resident 页、部分 Mean-K 和状态镜像索引。
+这些对象独立拥有数据；以后可移动到原生 continuation，不需要再次复制全部逻辑内容。
+该类型没有当前 SourceRef/MemoryStamp、worker、GPU 地址或执行许可，不能直接作为可运行
+Window 发布；源/目录/权限仍由外围私有 read 保留。
+
+新增无堆分配的容量计算，按实际编码中的块数、图行/边、消息、反馈和前缀长度预约 C；共享
+控制对象使用保守余量。Raw mean-only 表复用现有 H account，但不另存 packed KV。模型侧
+先为整组 typed metadata 预约 C，再申请状态镜像/H 大目标；完整文件校验后才构造逻辑对象。
+特征与范围的实际数组继续由原有 M allocator 计费，M 中途不足也整体放弃私有准备。C charge
+先声明、后析构，覆盖对象清理；没有新增线程、通用注册表或公开恢复接口。
+
+Core 增加两项必要支持：mean-only 快照的无分配容量计算，以及仅允许空私有 selector 接收的
+逻辑统计恢复。后者保留三种评分和 LRFU，验证几何、数值及 runtime budget；旧 tier slot、
+in-flight、dirty 与 working-set 标记均丢弃，拒绝覆盖已有非空 selector。
+
+Windows GNU16.2.0/C++20 下三项检查通过：扩展后的实际输入/逻辑准备组件，及现有
+`kvmem_store_test`、`raw_kv_store_test`。独立 fixture 验证所有还原字段，并在清空原始 wire
+metadata 后继续访问；沿用的 6,568 个截断、12 个输入分配失败检查保留。新覆盖 79 个实际
+普通堆分配失败点、7 个实际 M 上游分配失败点、C/M 精确与少一字节拒绝、失败退款和旧物理
+标记清除。rich/legacy 两个小 fixture 的 C 预约分别为 9,601/8,377 bytes，测得普通堆峰值
+8,201/7,217 bytes；M 数组独立计费，rich fixture 实际 M 上界为 344 bytes。这些数字只证明
+相应小 fixture 的对象准备，不代表真实模型或完整进程的内存上界。
+
+成本是 wire metadata 与 owned logical metadata 在准备期间同时存在，C 还保守保留共享控制
+及临时对象余量；逻辑解码额外遍历 metadata，延迟/RSS 未测。Linux 完整 Native adapter、
+实际 pinned pool/GPU、大模型状态、重启续算及 sanitizer 仍未验证，旧 C10 模型结果不作为
+当前代码的证明。仍需把这些私有数据装配成原生 Window/checkpoint 目录、绑定正常 graph
+和执行资源预算，重新准入并以新身份发布。
+见 [C11d 代码、结果及范围](experiments/2026-11-01-lifecycle-checkpoint-state/summary.json)。
+
 ## 下一步的完整原生链路
 
 1. SSH 恢复后先取回已启动任务的最终状态和日志，再编译最新保存候选。真实模型检查完整
    文件、退休标记、全部合法目录引用、C/H/D 边界与迟到工单拒绝，不复用旧模型二进制。
-2. 在 C11c 字节/元数据读取准备上，完成 private typed state、M/C 分配与正常执行资源预约、
+2. 在 C11c/C11d 私有准备上，装配原生 Window/目录并转移 owner 计费，完成正常执行资源预约、
    GPU 上传及最终许可复核；成功才发布新 S/native 身份，失败不暴露半恢复状态。
 3. 接通 Engine 新域恢复入口；验证普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程
    恢复及独立输出基线，旧版本、遗忘和退休不得绕过新身份许可。

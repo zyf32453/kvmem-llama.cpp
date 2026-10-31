@@ -1,0 +1,504 @@
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_read.h b/src/models/qwen3_5/program/storage/checkpoint_read.h
+index e889b2d..e9d56f6 100644
+--- a/src/models/qwen3_5/program/storage/checkpoint_read.h
++++ b/src/models/qwen3_5/program/storage/checkpoint_read.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ #include "models/qwen3_5/program/storage/checkpoint_buffer_pool.h"
+ #include "models/qwen3_5/program/storage/checkpoint_input.h"
++#include "models/qwen3_5/program/storage/checkpoint_state.h"
+ #include "kvmem/source_archive.hpp"
+ #include <optional>
+ 
+@@ -17,5 +18,6 @@ struct KvmemCheckpointRead {
+     KvmemCheckpointManifest manifest;
+     std::vector<std::shared_ptr<PinnedHostBuffer>> images;
+     std::vector<kvmem::HostKvRecord> pages;
++    std::unique_ptr<KvmemCheckpointLogicalState> logical;
+ };
+ } // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_state.cpp b/src/models/qwen3_5/program/storage/checkpoint_state.cpp
+new file mode 100644
+index 0000000..63fcff0
+--- /dev/null
++++ b/src/models/qwen3_5/program/storage/checkpoint_state.cpp
+@@ -0,0 +1,161 @@
++#include "models/qwen3_5/program/storage/checkpoint_state.h"
++#include <algorithm>
++#include <limits>
++
++namespace ninfer::models::qwen3_5::detail {
++namespace {
++void check(bool value,const char* message){if(!value)throw kvmem::SnapshotCorrupt(message);}
++std::uint64_t add(std::uint64_t a,std::uint64_t b){
++    if(b>SIZE_MAX-a)throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,"checkpoint logical metadata overflow");
++    return a+b;
++}
++std::uint64_t product(std::uint64_t a,std::uint64_t b){
++    if(b && a>SIZE_MAX/b)throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,"checkpoint logical array overflow");
++    return a*b;
++}
++struct Cursor {
++    std::span<const std::uint8_t> data;std::size_t offset=0;
++    void take(void* destination,std::size_t bytes){
++        check(bytes<=data.size()-offset,"truncated checkpoint logical metadata");
++        if(destination && bytes)std::memcpy(destination,data.data()+offset,bytes);offset+=bytes;
++    }
++    template<class T>T scalar(){T value;take(&value,sizeof(value));return value;}
++    bool flag(){const auto value=scalar<std::uint8_t>();check(value<2,"invalid checkpoint logical flag");return value!=0;}
++    std::size_t count(std::size_t maximum){const auto n=scalar<std::uint64_t>();
++        check(n<=maximum && n<=SIZE_MAX,"checkpoint logical count out of range");return std::size_t(n);}
++    template<class T>std::size_t array_size(){const auto n=count(SIZE_MAX/sizeof(T));take(nullptr,n*sizeof(T));return n;}
++    void done()const{check(offset==data.size(),"extra checkpoint logical metadata");}
++    kvmem::SnapshotReader reader(){return {[this](void* p,std::size_t n){take(p,n);},data.size()-offset};}
++};
++constexpr std::uint64_t control=64; // bounded shared_ptr control on the supported 64-bit toolchains
++std::uint64_t lrfu_bytes(Cursor& in){
++    in.take(nullptr,9);return add(4*(control+sizeof(std::vector<double>)),product(in.array_size<double>(),sizeof(double)));
++}
++std::uint64_t messages_bytes(Cursor& in){
++    if(!in.flag())return 0;const auto n=in.count(SIZE_MAX/17);in.take(nullptr,n*17);
++    return add(control+sizeof(std::vector<kvmem::GraphMessageSpan>),product(n,sizeof(kvmem::GraphMessageSpan)));
++}
++std::uint64_t edges_bytes(Cursor& in){const auto n=in.count(SIZE_MAX/16);in.take(nullptr,n*16);return product(n,sizeof(kvmem::GraphEdge));}
++std::uint64_t graph_bytes(Cursor& in){
++    in.take(nullptr,4*8+4);const auto n=in.count(SIZE_MAX/sizeof(std::shared_ptr<const std::vector<kvmem::GraphRow>>));
++    std::uint64_t bytes=product(n,sizeof(std::shared_ptr<const std::vector<kvmem::GraphRow>>));
++    for(std::size_t i=0;i<n;++i){check(in.flag(),"null checkpoint graph chunk");const auto rows=in.count(256);
++        bytes=add(bytes,add(control+sizeof(std::vector<kvmem::GraphRow>),product(rows,sizeof(kvmem::GraphRow))));
++        for(std::size_t row=0;row<rows;++row){in.take(nullptr,16);bytes=add(bytes,edges_bytes(in));}}
++    in.take(nullptr,16);bytes=add(bytes,edges_bytes(in));return add(bytes,messages_bytes(in));
++}
++std::uint64_t feedback_bytes(Cursor& in){
++    std::uint64_t bytes=0;for(unsigned i=0;i<3;++i){const auto n=in.count(SIZE_MAX/24);in.take(nullptr,n*(i==2 ? 24 : 16));
++        bytes=add(bytes,product(n,i==2 ? sizeof(std::pair<std::uint64_t,kvmem::PrefillMass>) : sizeof(std::pair<std::uint64_t,double>)));}
++    in.take(nullptr,16);return bytes;
++}
++template<class T>std::vector<T> copy(KvmemCheckpointArray<T> source){
++    std::vector<T> result(source.size());if(!source.bytes.empty())std::memcpy(result.data(),source.bytes.data(),source.bytes.size());return result;
++}
++std::vector<kvmem::GraphEdge> edges(Cursor& in){
++    std::vector<kvmem::GraphEdge> result(in.count(SIZE_MAX/sizeof(kvmem::GraphEdge)));
++    for(auto& edge:result){edge.target=in.scalar<std::uint64_t>();edge.mass=in.scalar<double>();}return result;
++}
++std::shared_ptr<const std::vector<kvmem::GraphMessageSpan>> messages(Cursor& in){
++    if(!in.flag())return {};auto result=std::make_shared<std::vector<kvmem::GraphMessageSpan>>(in.count(SIZE_MAX/sizeof(kvmem::GraphMessageSpan)));
++    for(auto& span:*result){span.begin=in.scalar<std::uint64_t>();span.end=in.scalar<std::uint64_t>();span.end_known=in.flag();}return result;
++}
++kvmem::GraphSnapshot graph(std::span<const std::uint8_t> bytes){
++    Cursor in{bytes};kvmem::GraphSnapshot g;
++    g.accepted_through=in.scalar<std::uint64_t>();g.completed_through=in.scalar<std::uint64_t>();
++    g.revision=in.scalar<std::uint64_t>();g.epoch=in.scalar<std::uint64_t>();g.block_tokens=in.scalar<std::uint32_t>();
++    g.chunks.resize(in.count(SIZE_MAX/sizeof(g.chunks[0])));
++    for(auto& chunk:g.chunks){check(in.flag(),"null checkpoint graph chunk");
++        auto rows=std::make_shared<std::vector<kvmem::GraphRow>>(in.count(256));
++        for(auto& row:*rows){row.source=in.scalar<std::uint64_t>();row.samples=in.scalar<std::uint64_t>();row.edges=edges(in);}chunk=std::move(rows);}
++    g.partial.source=in.scalar<std::uint64_t>();g.partial.samples=in.scalar<std::uint64_t>();g.partial.mass=edges(in);g.messages=messages(in);in.done();return g;
++}
++kvmem::AttentionFeedbackSnapshot feedback(std::span<const std::uint8_t> bytes){
++    Cursor in{bytes};kvmem::AttentionFeedbackSnapshot result;
++    for(auto* list:{&result.output,&result.pending_output}){list->resize(in.count(SIZE_MAX/sizeof((*list)[0])));
++        for(auto& [page,mass]:*list){page=in.scalar<std::uint64_t>();mass=in.scalar<double>();}}
++    result.prefill.resize(in.count(SIZE_MAX/sizeof(result.prefill[0])));
++    for(auto& [page,mass]:result.prefill){page=in.scalar<std::uint64_t>();mass.mass=in.scalar<double>();mass.exposure=in.scalar<double>();}
++    result.output_samples=in.scalar<std::uint64_t>();result.prefill_end=in.scalar<std::uint64_t>();in.done();return result;
++}
++kvmem::OutputSampleState scope(std::span<const std::uint8_t> bytes){Cursor in{bytes};
++    kvmem::OutputSampleState result{in.flag(),in.scalar<std::uint64_t>()};in.done();return result;}
++kvmem::LrfuState lrfu(std::span<const std::uint8_t> bytes,std::uint32_t pages){Cursor in{bytes};auto reader=in.reader();
++    auto result=kvmem::read_lrfu(reader,pages);in.done();return result;}
++template<class T>std::vector<T> array(Cursor& in){auto reader=in.reader();return reader.vector<T>(SIZE_MAX/sizeof(T));}
++void require_config(const KvmemCheckpointManifest& m,const KvmemCheckpointInputLimits& l,const kvmem::KvMemStoreConfig& cfg){
++    if(!l.maximum_tokens || !m.record_count || m.record_count>kKvmemCheckpointMaximumRecords ||
++        cfg.block_tokens!=64 || cfg.select_budget!=l.selected_tokens || !l.statistics.payload_storage)
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::InvalidPlan,"checkpoint logical state requires current selector and payload accounts");
++}
++} // namespace
++
++std::uint64_t kvmem_checkpoint_state_metadata_bytes(const KvmemCheckpointManifest& m,const KvmemCheckpointInputLimits& l,
++                                                   const kvmem::KvMemStoreConfig& cfg){
++    require_config(m,l,cfg);std::uint64_t bytes=sizeof(KvmemCheckpointLogicalState);
++    Cursor stats{m.statistics};stats.take(nullptr,44);const auto blocks=stats.count((std::uint64_t(l.maximum_tokens)+63)/64+1);
++    try{bytes=add(bytes,kvmem::RawKvStore::mean_snapshot_capacity_bytes(l.statistics,std::uint32_t(blocks)));}
++    catch(const std::overflow_error&){throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,"checkpoint mean statistics exceed C");}
++    Cursor selector{m.selector};selector.take(nullptr,8);const auto count=selector.count((std::uint64_t(l.maximum_tokens)+63)/64);
++    selector.take(nullptr,product(count,36));bytes=add(bytes,add(sizeof(kvmem::KvMemStore)+2*(cfg.numa_policy.capacity()+1),product(count,sizeof(kvmem::KvMemBlock))));
++    bytes=add(bytes,lrfu_bytes(selector));selector.done();
++    bytes=add(bytes,product(l.query_layers,sizeof(std::vector<float>)));
++    Cursor g{m.graph},f{m.feedback},request{m.request},planning{m.planning};
++    bytes=add(bytes,graph_bytes(g));g.done();bytes=add(bytes,feedback_bytes(f));f.done();
++    request.take(nullptr,4);bytes=add(bytes,messages_bytes(request));
++    planning.take(nullptr,49+4*8+2+2*4+3+4);
++    bytes=add(bytes,product(planning.array_size<std::uint32_t>(),sizeof(std::uint32_t)));
++    bytes=add(bytes,product(planning.array_size<std::uint32_t>(),sizeof(std::uint32_t)));planning.done();
++    if(!m.features.empty())bytes=add(bytes,sizeof(kvmem::HistoricalKvPageFeatures)+control);
++    if(!m.thinking.empty())bytes=add(bytes,sizeof(kvmem::HistoricalKvThinkingRanges)+control);
++    bytes=add(bytes,product(m.record_count,sizeof(KvmemCheckpointRecordState)));
++    for(std::size_t i=0;i<m.record_count;++i){const auto& record=m.records[i];
++        bytes=add(bytes,record.prefix.bytes.size());bytes=add(bytes,record.token_types.bytes.size());
++        for(const auto& axis:record.positions)bytes=add(bytes,axis.bytes.size());
++        bytes=add(bytes,record.rewrite_frontiers.bytes.size());bytes=add(bytes,record.resident_pages.bytes.size());bytes=add(bytes,record.mean_tail.bytes.size());
++        Cursor history{record.history},graph{record.graph},feedback{record.feedback};
++        bytes=add(bytes,lrfu_bytes(history));history.done();bytes=add(bytes,graph_bytes(graph));graph.done();
++        bytes=add(bytes,feedback_bytes(feedback));feedback.done();
++    }
++    return bytes;
++}
++
++std::unique_ptr<KvmemCheckpointLogicalState> prepare_kvmem_checkpoint_state(const KvmemCheckpointManifest& m,
++    const KvmemCheckpointInputLimits& l,const kvmem::KvMemStoreConfig& cfg,
++    std::shared_ptr<kvmem::HistoricalKvAuxBudget> auxiliary,const std::function<void(std::uint64_t)>& admit){
++    if(!admit || ((!m.features.empty() || !m.thinking.empty()) && !auxiliary))
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::InvalidPlan,"checkpoint logical state requires C admission and real M");
++    const auto bytes=kvmem_checkpoint_state_metadata_bytes(m,l,cfg);admit(bytes);
++    auto state=std::make_unique<KvmemCheckpointLogicalState>();state->admitted_metadata_bytes=bytes;
++    const auto pages=std::uint32_t((std::uint64_t(l.maximum_tokens)+63)/64);
++    state->statistics=std::make_unique<kvmem::RawKvStore>(l.statistics);
++    Cursor statistics{m.statistics};auto statistic_reader=statistics.reader();state->statistics->snapshot_read(statistic_reader,pages);statistics.done();
++    Cursor selector{m.selector};const auto total=selector.scalar<std::uint32_t>(),runtime=selector.scalar<std::uint32_t>();
++    std::vector<kvmem::KvMemBlock> blocks(selector.count(pages));
++    for(auto& block:blocks){block.block_id=selector.scalar<std::uint32_t>();block.orig_pos_start=selector.scalar<std::uint32_t>();
++        block.n_tokens=selector.scalar<std::uint32_t>();block.attn_score=selector.scalar<double>();block.profile_score=selector.scalar<double>();block.retrieval_score=selector.scalar<double>();}
++    auto history_reader=selector.reader();auto history=kvmem::read_lrfu(history_reader,pages);selector.done();
++    state->selector=std::make_unique<kvmem::KvMemStore>(cfg);state->selector->restore_checkpoint_statistics(total,runtime,std::move(blocks),history);
++    state->query_rows.resize(l.query_layers);state->graph=graph(m.graph);state->feedback.restore(feedback(m.feedback));state->attention_scope=scope(m.scope);
++    Cursor request{m.request};state->output_begin=request.scalar<std::uint32_t>();state->request_messages=messages(request);
++    state->think_open=request.scalar<std::int32_t>();state->think_close=request.scalar<std::int32_t>();
++    check(!request.scalar<std::uint32_t>(),"retained checkpoint has live query samples");
++    state->query_begin=request.scalar<std::uint32_t>();state->query_end=request.scalar<std::uint32_t>();request.done();
++    Cursor planning{m.planning};planning.take(nullptr,49);
++    state->capture_plan.next=planning.scalar<std::uint64_t>();state->capture_plan.interval=planning.scalar<std::uint64_t>();
++    state->capture_plan.root=planning.scalar<std::uint64_t>();state->capture_plan.tail=planning.scalar<std::uint64_t>();
++    state->capture_plan.root_done=planning.flag();state->capture_plan.tail_done=planning.flag();
++    state->reuse_anchor=planning.scalar<std::uint32_t>();state->reconstruction_frontier=planning.scalar<std::uint32_t>();
++    state->query_replayed=planning.flag();state->query_capture=planning.flag();state->query_replay_active=planning.flag();
++    state->query_probe_swaps=planning.scalar<std::uint32_t>();state->query_selected=array<std::uint32_t>(planning);state->query_required=array<std::uint32_t>(planning);planning.done();
++    if(!m.features.empty()){Cursor in{m.features};auto reader=in.reader();state->features=kvmem::HistoricalKvPageFeatures::snapshot_read(reader,pages,l.feature_dimensions,auxiliary);in.done();}
++    if(!m.thinking.empty()){Cursor in{m.thinking};auto reader=in.reader();state->thinking=kvmem::HistoricalKvThinkingRanges::snapshot_read(reader,m.origin.accepted_frontier,auxiliary);in.done();}
++    state->records.resize(m.record_count);
++    for(std::size_t i=0;i<m.record_count;++i){const auto& view=m.records[i];auto& record=state->records[i];
++        record.prefix=copy(view.prefix);record.token_types=copy(view.token_types);for(unsigned axis=0;axis<3;++axis)record.positions[axis]=copy(view.positions[axis]);
++        record.rewrite_frontiers=copy(view.rewrite_frontiers);record.resident_pages=copy(view.resident_pages);record.mean_tail=copy(view.mean_tail);
++        record.history=lrfu(view.history,pages);record.graph=graph(view.graph);record.feedback=feedback(view.feedback);record.attention_scope=scope(view.scope);record.image=view.image;
++    }
++    return state;
++}
++} // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_state.h b/src/models/qwen3_5/program/storage/checkpoint_state.h
+new file mode 100644
+index 0000000..c928b6c
+--- /dev/null
++++ b/src/models/qwen3_5/program/storage/checkpoint_state.h
+@@ -0,0 +1,53 @@
++#pragma once
++#include "models/qwen3_5/program/storage/checkpoint_input.h"
++#include "kvmem/graph_recall.hpp"
++#include "kvmem/historical_kv_page_features.hpp"
++#include "kvmem/kvmem_store.hpp"
++
++namespace ninfer::models::qwen3_5::detail {
++// Owned logical data, movable into native continuation objects. Neither this
++// type nor its records carry a current SourceRef/MemoryStamp or execution lease.
++// The surrounding private read keeps C charged until these objects are gone.
++struct KvmemCheckpointRecordState {
++    std::vector<std::int32_t> prefix;
++    std::vector<std::uint8_t> token_types;
++    std::array<std::vector<std::int32_t>,3> positions;
++    std::vector<std::uint32_t> rewrite_frontiers;
++    std::vector<std::uint64_t> resident_pages;
++    std::vector<float> mean_tail;
++    kvmem::LrfuState history;
++    kvmem::GraphSnapshot graph;
++    kvmem::AttentionFeedbackSnapshot feedback;
++    kvmem::OutputSampleState attention_scope;
++    std::uint64_t image=0;
++};
++struct KvmemCheckpointLogicalState {
++    std::uint64_t admitted_metadata_bytes=0;
++    std::unique_ptr<kvmem::RawKvStore> statistics;
++    std::unique_ptr<kvmem::KvMemStore> selector;
++    std::vector<std::vector<float>> query_rows;
++    kvmem::GraphSnapshot graph;
++    kvmem::AttentionFeedback feedback;
++    kvmem::OutputSampleState attention_scope;
++    std::uint32_t output_begin=0,query_begin=0,query_end=0;
++    std::shared_ptr<const std::vector<kvmem::GraphMessageSpan>> request_messages;
++    std::int32_t think_open=-1,think_close=-1;
++    kvmem::CheckpointCapturePlan capture_plan;
++    std::uint32_t reuse_anchor=0,reconstruction_frontier=0,query_probe_swaps=0;
++    bool query_replayed=false,query_capture=false,query_replay_active=false;
++    std::vector<std::uint32_t> query_selected,query_required;
++    std::shared_ptr<kvmem::HistoricalKvPageFeatures> features;
++    std::shared_ptr<kvmem::HistoricalKvThinkingRanges> thinking;
++    std::vector<KvmemCheckpointRecordState> records;
++};
++
++// Input is the immutable, validated manifest from read_kvmem_checkpoint_metadata.
++// The allocation-free sizing pass covers owned logical storage and temporary
++// shared-control objects. Features/ranges use the existing real M allocator.
++std::uint64_t kvmem_checkpoint_state_metadata_bytes(const KvmemCheckpointManifest&,
++    const KvmemCheckpointInputLimits&,const kvmem::KvMemStoreConfig&);
++std::unique_ptr<KvmemCheckpointLogicalState> prepare_kvmem_checkpoint_state(
++    const KvmemCheckpointManifest&,const KvmemCheckpointInputLimits&,
++    const kvmem::KvMemStoreConfig&,std::shared_ptr<kvmem::HistoricalKvAuxBudget>,
++    const std::function<void(std::uint64_t)>& admit_metadata);
++} // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/storage/historical_checkpoint.cpp b/src/models/qwen3_5/program/storage/historical_checkpoint.cpp
+index b10b136..faee36f 100644
+--- a/src/models/qwen3_5/program/storage/historical_checkpoint.cpp
++++ b/src/models/qwen3_5/program/storage/historical_checkpoint.cpp
+@@ -295,6 +295,9 @@ std::unique_ptr<KvmemCheckpointRead> ProgramImpl::read_historical_checkpoint(His
+     KvmemCheckpointInputLimits limits;
+     limits.source=&state->source->image().origin();limits.descriptor=&descriptor;
+     limits.statistics={.n_layer=model.full_attention_layers,.n_embd_k=memory_statistics->key_width,.block_tokens=64};
++    // The mean-only store reuses this H account but restores no H payload of
++    // its own. Its small shared account wrapper is covered by control above.
++    limits.statistics.payload_storage=std::make_shared<kvmem::HostKvStorage>(memory_payload_storage);
+     limits.policy=kvmem::CheckpointPolicy::environment();limits.maximum_tokens=capacity;
+     limits.device_pages=kvmem_window_tokens/64;limits.selected_tokens=kvmem_options.selected_tokens;
+     limits.query_layers=memory_statistics->layers;
+@@ -303,6 +306,11 @@ std::unique_ptr<KvmemCheckpointRead> ProgramImpl::read_historical_checkpoint(His
+     limits.maximum_metadata_bytes=memory_checkpoint_pool->stats().capacity;
+     limits.maximum_payload_bytes=source_checkpoint_max_bytes-104;
+     limits.read_tokens=[&](std::uint64_t first,std::int32_t* tokens,std::size_t count){state->source->image().read_tokens(first,tokens,count);};
++    kvmem::KvMemStoreConfig selection;
++    selection.lrfu=kvmem_options.lrfu;selection.lrfu_lambda=kvmem_options.lrfu_lambda;
++    selection.lrfu_top_fraction=kvmem_options.lrfu_top_fraction;selection.block_tokens=64;
++    selection.select_budget=kvmem_options.selected_tokens;selection.sink_blocks=kvmem_options.sink_blocks();
++    selection.recent_blocks=kvmem_options.recent_blocks();
+     KvmemCheckpointInput input(limits,{
+         .metadata=[&](std::size_t bytes){
+             state->metadata_charge.resize(add(control,bytes));state->metadata.resize(bytes);
+@@ -310,6 +318,10 @@ std::unique_ptr<KvmemCheckpointRead> ProgramImpl::read_historical_checkpoint(His
+             return std::span<std::uint8_t>(state->metadata);
+         },
+         .prepare=[&](const KvmemCheckpointManifest& manifest){
++            // Admit the complete typed logical metadata before acquiring any
++            // large image/page targets. Materialize it only after file checksum.
++            const auto logical=kvmem_checkpoint_state_metadata_bytes(manifest,limits,selection);
++            state->metadata_charge.resize(add(add(control,state->metadata.capacity()),logical));
+             // Admit the COMPLETE unpublished image set and H payload first.
+             // This control path is serialized; no other Program allocation can
+             // consume C between this check and individual pool acquisition.
+@@ -335,6 +347,9 @@ std::unique_ptr<KvmemCheckpointRead> ProgramImpl::read_historical_checkpoint(His
+     state->manifest=input.finish(state->checkpoint->payload_bytes());
+     source_archive->validate(*state->checkpoint);
+     for(auto& page:state->pages)if(page)page.seal();
++    state->logical=prepare_kvmem_checkpoint_state(state->manifest,limits,selection,historical_auxiliary,
++        [&](std::uint64_t bytes){if(add(add(control,state->metadata.capacity()),bytes)>state->metadata_charge.bytes())
++            throw std::logic_error("checkpoint logical state exceeded prior C admission");});
+     // Still PRIVATE: no S import, identity allocation, native history insertion
+     // or GPU upload. The later publisher must revalidate both permissions.
+     return state;
+diff --git a/src/models/qwen3_5/program_sources.cmake b/src/models/qwen3_5/program_sources.cmake
+index 47e72e1..3d227f6 100644
+--- a/src/models/qwen3_5/program_sources.cmake
++++ b/src/models/qwen3_5/program_sources.cmake
+@@ -21,6 +21,7 @@ target_sources(ninfer_model_runtime PRIVATE
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/source_journal.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/historical_checkpoint.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/checkpoint_input.cpp"
++  "${CMAKE_CURRENT_LIST_DIR}/program/storage/checkpoint_state.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/memory_statistics.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/disk_tier.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/session_snapshot.cpp"
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+index bca9ff4..a6e9b04 100644
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -74,6 +74,7 @@ target_include_directories(ninfer_checkpoint_export_owner_test PRIVATE "${PROJEC
+ ninfer_add_test(ninfer_checkpoint_input_test STANDALONE
+     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_input.cpp"
+       "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/storage/checkpoint_input.cpp" LIBRARIES kvmem)
++target_sources(ninfer_checkpoint_input_test PRIVATE "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/storage/checkpoint_state.cpp")
+ target_include_directories(ninfer_checkpoint_input_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+   ninfer_add_test(ninfer_engine_checkpoint_export_real_test STANDALONE
+@@ -106,6 +107,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND UNIX)
+     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_input.cpp"
+       "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/storage/checkpoint_input.cpp" LIBRARIES kvmem)
+   target_include_directories(ninfer_checkpoint_input_sanitizer_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
++  target_sources(ninfer_checkpoint_input_sanitizer_test PRIVATE "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/storage/checkpoint_state.cpp")
+   target_compile_options(ninfer_checkpoint_input_sanitizer_test PRIVATE -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
+   target_link_options(ninfer_checkpoint_input_sanitizer_test PRIVATE -fsanitize=address,undefined)
+   ninfer_add_test(ninfer_checkpoint_export_owner_sanitizer_test STANDALONE
+diff --git a/tests/test_checkpoint_input.cpp b/tests/test_checkpoint_input.cpp
+index 72dafbe..916e65c 100644
+--- a/tests/test_checkpoint_input.cpp
++++ b/tests/test_checkpoint_input.cpp
+@@ -1,4 +1,5 @@
+ #include "models/qwen3_5/program/storage/checkpoint_input.h"
++#include "models/qwen3_5/program/storage/checkpoint_state.h"
+ #include "kvmem/graph_recall.hpp"
+ #include "kvmem/historical_kv_page_features.hpp"
+ #include "kvmem/source_image.hpp"
+@@ -8,20 +9,29 @@
+ #include <iostream>
+ #include <map>
+ #include <new>
++#include <optional>
+ #include <stdexcept>
+ #include <string>
+ #include <vector>
+ 
+ namespace {
+ thread_local std::size_t fail_at=SIZE_MAX,allocations=0;
++thread_local bool track_heap=false;
++thread_local std::size_t live_heap=0,peak_heap=0;
++struct alignas(std::max_align_t) Allocation {std::size_t bytes;bool tracked;};
+ void fail_allocation(){if(fail_at!=SIZE_MAX && allocations++==fail_at){fail_at=SIZE_MAX;throw std::bad_alloc();}}
+ }
+-void* operator new(std::size_t bytes){fail_allocation();if(auto* p=std::malloc(bytes ? bytes : 1))return p;throw std::bad_alloc();}
++void* operator new(std::size_t bytes){fail_allocation();
++    if(bytes>SIZE_MAX-sizeof(Allocation))throw std::bad_alloc();
++    if(auto* p=static_cast<Allocation*>(std::malloc(sizeof(Allocation)+(bytes ? bytes : 1)))){
++        p->bytes=bytes;p->tracked=track_heap;if(track_heap){live_heap+=bytes;peak_heap=std::max(peak_heap,live_heap);}return p+1;}
++    throw std::bad_alloc();}
+ void* operator new[](std::size_t bytes){return ::operator new(bytes);}
+-void operator delete(void* p)noexcept{std::free(p);}
+-void operator delete[](void* p)noexcept{std::free(p);}
+-void operator delete(void* p,std::size_t)noexcept{std::free(p);}
+-void operator delete[](void* p,std::size_t)noexcept{std::free(p);}
++void operator delete(void* p)noexcept{if(p){auto* allocation=static_cast<Allocation*>(p)-1;
++    if(allocation->tracked)live_heap-=allocation->bytes;std::free(allocation);}}
++void operator delete[](void* p)noexcept{::operator delete(p);}
++void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
++void operator delete[](void* p,std::size_t)noexcept{::operator delete(p);}
+ 
+ using namespace ninfer::models::qwen3_5::detail;
+ namespace {
+@@ -250,6 +260,134 @@ void budgets_failures_and_lifetime(const Fixture& f){
+     }
+     require(complete && faults>=8);require(f.journal.stats().sources==1);std::cout<<"actual private decode allocation failures="<<faults<<"; C/H refunded\n";
+ }
++
++struct LogicalOwner {
++    std::optional<kvmem::HostKvReservation> charge;
++    std::unique_ptr<KvmemCheckpointLogicalState> value;
++};
++struct FaultMemory final:std::pmr::memory_resource {
++    std::size_t calls=0,failure=SIZE_MAX,live=0;
++    void* do_allocate(std::size_t bytes,std::size_t alignment)override{
++        if(calls++==failure)throw std::bad_alloc();
++        auto* pointer=std::pmr::new_delete_resource()->allocate(bytes,alignment);live+=bytes;return pointer;
++    }
++    void do_deallocate(void* pointer,std::size_t bytes,std::size_t alignment)override{
++        live-=bytes;std::pmr::new_delete_resource()->deallocate(pointer,bytes,alignment);
++    }
++    bool do_is_equal(const std::pmr::memory_resource& other)const noexcept override{return &other==this;}
++};
++kvmem::KvMemStoreConfig selector_config(){kvmem::KvMemStoreConfig cfg;
++    cfg.block_tokens=64;cfg.select_budget=128;cfg.sink_blocks=0;cfg.lrfu=true;return cfg;}
++void check_logical(const KvmemCheckpointLogicalState& state,const Fixture& f){
++    require(state.statistics && state.selector && state.query_rows.size()==2 && state.records.size()==2);
++    for(const auto& row:state.query_rows)require(row.empty());
++    for(unsigned layer=0;layer<2;++layer)for(unsigned block=0;block<3;++block){std::array<float,2> mean{};
++        state.statistics->mean_k(block,layer,mean.data());require(mean[0]==block*64+32.5f && mean[1]==layer+1);}
++    require(state.selector->total_tokens()==192 && state.selector->blocks().size()==3);
++    for(const auto& b:state.selector->blocks())require(b.attn_score==.1 && b.profile_score==.2 && b.retrieval_score==.3 &&
++        b.gpu_slot==-1 && b.cpu_slot==-1 && b.nvme_slot==-1 && !b.in_working_set && !b.in_flight);
++    require(state.selector->selection_score(0)==.2 && state.selector->selection_score(1)==-.1);
++    require(state.graph.accepted_through==192 && state.graph.completed_through==192 && state.graph.epoch==8 && state.graph.revision==4);
++    require(state.graph.messages && (*state.graph.messages)[0].end==256 && !(*state.graph.messages)[1].end_known);
++    require(state.request_messages && state.request_messages!=state.graph.messages && (*state.request_messages)[0].end==128);
++    require(state.output_begin==128 && state.query_begin==128 && state.query_end==192 && state.think_open==1 && state.think_close==2);
++    require(state.attention_scope.thinking && state.attention_scope.eligible_tokens==1);
++    require(state.feedback.snapshot().output[0].second==.5 && state.feedback.snapshot().prefill[0].second.exposure==1);
++    require(state.capture_plan.root==64 && state.capture_plan.tail==128 && state.capture_plan.root_done && state.capture_plan.tail_done &&
++        state.capture_plan.next==192+f.policy.interval && state.reuse_anchor==64 && state.reconstruction_frontier==128);
++    for(std::size_t index=0;index<2;++index){const auto& cp=state.records[index];const auto frontier=index ? 129U : 64U;
++        require(cp.prefix==std::vector<std::int32_t>(f.tokens.begin(),f.tokens.begin()+frontier) && cp.token_types.size()==frontier);
++        for(unsigned axis=0;axis<3;++axis)for(unsigned j=0;j<frontier;++j)require(cp.positions[axis][j]==std::int32_t(j));
++        require(cp.rewrite_frontiers==std::vector<std::uint32_t>({32,64}) && cp.graph.accepted_through==frontier && cp.image==index &&
++            cp.history.round==1 && cp.history.committed && (*cp.history.scores)[2]==.3 && cp.attention_scope.thinking);
++        require(cp.feedback.prefill_end==frontier && cp.resident_pages.front()==0);
++    }
++    require(state.records[1].mean_tail==std::vector<float>({1,129,1,1,129,2}));
++    if(!state.graph.chunks.empty()){
++        require(state.graph.chunks[0]->size()==3 && (*state.graph.chunks[0])[1].edges[0].mass==.6);
++        require(state.records[1].graph.partial.source==128 && state.records[1].graph.partial.mass[1].mass==.75);
++    }
++    if(state.features){require(state.features->has_page(0) && state.features->has_page(2) && !state.features->has_page(1));
++        require(state.features->score_epoch()==0 && state.features->question_epoch()==1);}
++    if(state.thinking)require(state.thinking->armed() && state.thinking->covers(32,32) && state.thinking->priority(0,16)==1 && state.thinking->priority(64,16)==2);
++}
++void logical_state_preparation(const Fixture& f){
++    auto limits=f.limits();limits.statistics.payload_storage=std::make_shared<kvmem::HostKvStorage>(0);
++    auto wire=f.metadata;const auto header=read_kvmem_checkpoint_header(std::span<const std::uint8_t>(f.packet).first(64),limits);
++    const auto manifest=read_kvmem_checkpoint_metadata(wire,header,limits);const auto cfg=selector_config();
++    fail_at=0;allocations=0;std::uint64_t bound=0;
++    try{bound=kvmem_checkpoint_state_metadata_bytes(manifest,limits,cfg);}catch(...){fail_at=SIZE_MAX;throw;}
++    fail_at=SIZE_MAX;require(!allocations && bound>sizeof(KvmemCheckpointLogicalState));
++    auto auxiliary=std::make_shared<kvmem::HistoricalKvAuxBudget>(1<<20);kvmem::HostKvStorage c(bound);
++    std::size_t observed_peak=0;
++    {
++        LogicalOwner owner;std::function<void(std::uint64_t)> admit=[&](std::uint64_t n){require(n==bound);owner.charge.emplace(c.reserve(n));};
++        require(!live_heap);track_heap=true;peak_heap=0;
++        try{owner.value=prepare_kvmem_checkpoint_state(manifest,limits,cfg,auxiliary,admit);}catch(...){track_heap=false;throw;}
++        track_heap=false;observed_peak=peak_heap;require(peak_heap<=bound && c.charged_bytes()==bound);
++        // Owned state survives loss of all source metadata; no borrowed pointer
++        // or old GC certificate may become a live model object through this path.
++        std::fill(wire.begin(),wire.end(),0);check_logical(*owner.value,f);
++        require(owner.value->statistics->allocated_bytes()<=kvmem::RawKvStore::mean_snapshot_capacity_bytes(limits.statistics,3));
++    }
++    require(!live_heap && !c.charged_bytes() && !auxiliary->stats().charged && !limits.statistics.payload_storage->charged_bytes());
++    std::cout<<"logical state C admission="<<bound<<" ordinary-heap peak="<<observed_peak<<"; owned state survives wire release\n";
++}
++void logical_failures(const Fixture& f){
++    auto limits=f.limits();limits.statistics.payload_storage=std::make_shared<kvmem::HostKvStorage>(0);
++    const auto h=read_kvmem_checkpoint_header(std::span<const std::uint8_t>(f.packet).first(64),limits);
++    const auto manifest=read_kvmem_checkpoint_metadata(f.metadata,h,limits);const auto cfg=selector_config();
++    const auto bytes=kvmem_checkpoint_state_metadata_bytes(manifest,limits,cfg);kvmem::HostKvStorage c(bytes);
++    auto auxiliary=std::make_shared<kvmem::HistoricalKvAuxBudget>(1<<20);
++    {kvmem::HostKvStorage small(bytes-1);LogicalOwner owner;
++     quota([&]{owner.value=prepare_kvmem_checkpoint_state(manifest,limits,cfg,auxiliary,[&](auto n){owner.charge.emplace(small.reserve(n));});});
++     require(!owner.value && !small.charged_bytes() && !auxiliary->stats().charged);}
++    std::uint64_t m_peak=0;
++    {LogicalOwner owner;owner.value=prepare_kvmem_checkpoint_state(manifest,limits,cfg,auxiliary,[&](auto n){owner.charge.emplace(c.reserve(n));});
++     m_peak=auxiliary->stats().peak;require(m_peak);}
++    for(const auto limit:{std::uint64_t(0),m_peak-1}){auto small=std::make_shared<kvmem::HistoricalKvAuxBudget>(limit);
++     {LogicalOwner owner;quota([&]{owner.value=prepare_kvmem_checkpoint_state(manifest,limits,cfg,small,[&](auto n){owner.charge.emplace(c.reserve(n));});});require(!owner.value);}
++     require(!c.charged_bytes() && !small->stats().charged);}
++    std::size_t faults=0;bool complete=false;
++    for(std::size_t failure=0;failure<512;++failure){LogicalOwner owner;
++        std::function<void(std::uint64_t)> admit=[&](auto n){owner.charge.emplace(c.reserve(n));};
++        fail_at=failure;allocations=0;bool failed=false;
++        try{owner.value=prepare_kvmem_checkpoint_state(manifest,limits,cfg,auxiliary,admit);}catch(const std::bad_alloc&){failed=true;}
++        fail_at=SIZE_MAX;owner.value.reset();owner.charge.reset();require(!c.charged_bytes() && !auxiliary->stats().charged);
++        if(failed)++faults;else{complete=true;break;}
++    }
++    require(complete && faults>40 && f.journal.stats().sources==1);
++    std::cout<<"actual typed-state allocation failures="<<faults<<"; C/M refunded, no source/native publication\n";
++    std::size_t m_faults=0;complete=false;
++    for(std::size_t failure=0;failure<128;++failure){FaultMemory memory;memory.failure=failure;
++        auto account=std::make_shared<kvmem::HistoricalKvAuxBudget>(m_peak,&memory);bool failed=false;
++        {LogicalOwner owner;try{owner.value=prepare_kvmem_checkpoint_state(manifest,limits,cfg,account,[&](auto n){owner.charge.emplace(c.reserve(n));});}
++         catch(const std::bad_alloc&){failed=true;}}
++        require(!memory.live && !account->stats().charged && !c.charged_bytes());
++        if(failed)++m_faults;else{complete=true;break;}
++    }
++    require(complete && m_faults>4);
++    std::cout<<"actual M upstream failures="<<m_faults<<"; exact M quota="<<m_peak<<" and one-byte-short refusal checked\n";
++}
++void selector_private_restore(){
++    auto cfg=selector_config();kvmem::KvMemStore selector(cfg);std::vector<kvmem::KvMemBlock> blocks(2);
++    for(unsigned i=0;i<2;++i){auto& b=blocks[i];b.block_id=i;b.orig_pos_start=i*64;b.n_tokens=i ? 1 : 64;
++        b.attn_score=.1;b.profile_score=.2;b.retrieval_score=.3;b.gpu_slot=77;b.cpu_slot=88;b.nvme_slot=99;
++        b.tier=kvmem::KvTier::SSD;b.in_flight=true;b.in_working_set=true;b.dirty_gpu=true;b.ssd_clean=true;}
++    kvmem::LrfuState history;history.round=1;history.committed=true;history.scores=std::make_shared<const std::vector<double>>(std::initializer_list<double>{.4,-.2});
++    for(unsigned which=0;which<3;++which){auto invalid=blocks;kvmem::KvMemStore empty(cfg);bool failed=false;
++        if(which==0)invalid[1].n_tokens=2;if(which==1)invalid[0].attn_score=INFINITY;
++        try{empty.restore_checkpoint_statistics(65,which==2 ? 192 : 0,std::move(invalid),history);}catch(const std::invalid_argument&){failed=true;}
++        require(failed && !empty.total_tokens() && empty.blocks().empty());}
++    selector.restore_checkpoint_statistics(65,128,std::move(blocks),history);
++    require(selector.runtime_select_budget_tokens()==128 && selector.selection_score(1)==-.2);
++    for(const auto& b:selector.blocks())require(b.gpu_slot==-1 && b.cpu_slot==-1 && b.nvme_slot==-1 && !b.in_flight &&
++        !b.in_working_set && !b.dirty_gpu && !b.ssd_clean && b.remap_count==0 && b.baked_pos==b.orig_pos_start);
++    bool failed=false;try{selector.restore_checkpoint_statistics(0,0,{},{});}catch(const std::logic_error&){failed=true;}
++    require(failed && selector.total_tokens()==65);
++}
+ }
+ int main(){const Fixture fixture;exact_decode(fixture);truncation_and_damage(fixture);supported_metadata_forms();metadata_walk_has_no_heap(fixture);budgets_failures_and_lifetime(fixture);
++    logical_state_preparation(fixture);logical_failures(fixture);selector_private_restore();
++    const Fixture legacy(false,false,false);logical_state_preparation(legacy);
+     std::cout<<"native private checkpoint input: exact byte/state metadata, strict closure, bounded storage; PASS (CPU only, no Engine publication)\n";}

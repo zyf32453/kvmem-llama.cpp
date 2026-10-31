@@ -84,6 +84,10 @@ public:
     uint64_t payload_bytes(bool disk_only = false) const;
     uint64_t payload_capacity_bytes(uint32_t tokens, uint32_t populated_layers = UINT32_MAX) const;
     uint64_t capacity_bytes(uint32_t tokens, uint32_t populated_layers = UINT32_MAX) const;
+    // Allocation-free admission for a mean-only snapshot with an exact block
+    // table. The caller supplies an existing payload_storage account; native
+    // packed records are admitted separately and are not restored here.
+    static uint64_t mean_snapshot_capacity_bytes(const RawKvStoreConfig &, uint32_t blocks);
     void snapshot_write(SnapshotWriter & out);
     void snapshot_read(SnapshotReader & in, uint32_t max_blocks);
     // Caller freezes the detached store until all bindings have been restored.

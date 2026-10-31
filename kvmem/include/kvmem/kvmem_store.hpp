@@ -454,6 +454,11 @@ public:
         // Its logical history can cover blocks which replay has not restored yet.
         history_.restore(state);
     }
+    // Restore logical scores into an empty private store. All physical slots,
+    // tier flags and working-set membership are fresh, regardless of input.
+    // Validation completes before replacing this store.
+    void restore_checkpoint_statistics(uint32_t tokens, uint32_t runtime_budget,
+        std::vector<KvMemBlock> blocks, const LrfuState& history);
     double selection_score(uint32_t id) const {
         return cfg_.lrfu ? history_.score(id) : blocks_[id].attn_score;
     }

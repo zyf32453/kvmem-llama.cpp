@@ -1,0 +1,106 @@
+{
+  "date": "2026-11-01",
+  "stage": "C11d_private_owned_logical_state",
+  "status": "Windows_owned_logical_state_component_passed_full_Native_pending",
+  "source_contract": "docs/contracts/kv-lifecycle-checkpoint-state-candidate-v1.json",
+  "toolchain": {
+    "os": "Windows x64",
+    "compiler": "MinGW GNU16.2.0",
+    "language": "C++20"
+  },
+  "native": {
+    "base_tree": "3cfda48ec4cb281342acf2505bc9a0879fea4063",
+    "patched_tree": "7d55553a415ae0defb06d95356693402989c8fe4",
+    "patch": "backends/patches/ninfer-checkpoint-state.patch",
+    "patch_sha256": "87b77459d6a534088b065157d0bf043c975ed462b99414716490ff0ce5820e48",
+    "native_files": [
+      "src/models/qwen3_5/program/storage/checkpoint_read.h",
+      "src/models/qwen3_5/program/storage/checkpoint_state.cpp",
+      "src/models/qwen3_5/program/storage/checkpoint_state.h",
+      "src/models/qwen3_5/program/storage/historical_checkpoint.cpp",
+      "src/models/qwen3_5/program_sources.cmake",
+      "tests/cmake/RuntimeTests.cmake",
+      "tests/test_checkpoint_input.cpp"
+    ],
+    "patch_count": 36,
+    "replay_passed": true,
+    "component_qualified": "Windows CPU owned logical-state preparation only",
+    "native_adapter_build_qualified": false,
+    "gpu_qualified": false,
+    "native_publication_implemented": false
+  },
+  "core_changes": [
+    "kvmem/include/kvmem/raw_kv_store.hpp",
+    "kvmem/src/host/raw_kv_store.cpp",
+    "kvmem/include/kvmem/kvmem_store.hpp",
+    "kvmem/src/host/kvmem_store.cpp"
+  ],
+  "tests": [
+    {
+      "name": "native_checkpoint_state_test",
+      "seconds": 1.4871,
+      "output": "all 6568 truncation boundaries and malformed dependency references rejected\nactual private decode allocation failures=12; C/H refunded\nlogical state C admission=9601 ordinary-heap peak=8201; owned state survives wire release\nactual typed-state allocation failures=79; C/M refunded, no source/native publication\nactual M upstream failures=7; exact M quota=344 and one-byte-short refusal checked\nlogical state C admission=8377 ordinary-heap peak=7217; owned state survives wire release\nnative private checkpoint input: exact byte/state metadata, strict closure, bounded storage; PASS (CPU only, no Engine publication)\n",
+      "evidence": "windows-final-junit.xml"
+    },
+    {
+      "name": "kvmem_store_test",
+      "seconds": 0.661362,
+      "evidence": "windows-core-junit.xml"
+    },
+    {
+      "name": "raw_kv_store_test",
+      "seconds": 0.724536,
+      "evidence": "windows-core-junit.xml"
+    }
+  ],
+  "checked": {
+    "local_unique_tests": 3,
+    "exact_owned_logical_fields": true,
+    "wire_storage_independence": true,
+    "no_current_source_or_native_identity": true,
+    "no_heap_sizing_pass": true,
+    "ordinary_heap_failure_points": 79,
+    "actual_M_upstream_failure_points": 7,
+    "exact_M_bytes": 344,
+    "C_M_one_byte_short": true,
+    "physical_slot_reset": true,
+    "legacy_and_coverage": true,
+    "original_input_truncations": 6568,
+    "original_input_allocation_failures": 12,
+    "linux_sanitizers": false,
+    "full_native_adapter_build": false,
+    "pinned_pool_or_GPU": false,
+    "engine_restore_implemented": false,
+    "performance_or_process_RSS": false,
+    "production_qualified": false
+  },
+  "small_fixture_C": [
+    {
+      "admission_bytes": 9601,
+      "ordinary_heap_peak_bytes": 8201
+    },
+    {
+      "admission_bytes": 8377,
+      "ordinary_heap_peak_bytes": 7217
+    }
+  ],
+  "costs": [
+    "wire metadata and owned typed metadata coexist under C through private preparation",
+    "C admission conservatively includes shared controls and temporary objects; only small fixtures measured",
+    "logical metadata parsing adds CPU work; end-to-end latency/throughput and RSS are unmeasured",
+    "actual pinned pool may retain idle images, unrelated to the measured ordinary heap fixture bytes"
+  ],
+  "gaps": [
+    "SSH remains unavailable after user also failed; retrieve existing remote jobs before replacements",
+    "Full Native adapter build, Linux memory checks and real pinned pool/model/GPU qualification remain pending",
+    "native Window/CP directory assembly, normal graph/execution resource admission and owner transfer remain",
+    "fresh S/native identity, final publication fences, rollback and Engine native restore entry point remain",
+    "actual model/restart/retirement/forget, long-run performance and later six-stage requirements remain"
+  ],
+  "evidence": {
+    "path": "C:\\Users\\25468\\.codex\\worktrees\\d87d\\kvmem-llama.cpp\\artifacts\\kv-lifecycle-checkpoint-resume\\artifacts\\lifecycle-checkpoint-state\\evidence-local.zip",
+    "sha256": "c4881949d2982b00168d1501d9790d040aa0ab2db3bfc49fea82023047a28182",
+    "bytes": 592275,
+    "scope": "local actual CPU logical-state and affected Core checks only; no full Native adapter, pinned/GPU or Engine publication"
+  }
+}

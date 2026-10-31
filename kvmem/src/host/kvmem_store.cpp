@@ -223,6 +223,32 @@ void KvMemStore::register_append(uint32_t n_new_tokens) {
     }
 }
 
+void KvMemStore::restore_checkpoint_statistics(uint32_t tokens, uint32_t runtime_budget,
+        std::vector<KvMemBlock> blocks, const LrfuState& history) {
+    if (total_tokens_ || !blocks_.empty())
+        throw std::logic_error("checkpoint statistics require an empty private selector");
+    if (!cfg_.block_tokens || blocks.size() != (uint64_t(tokens)+cfg_.block_tokens-1)/cfg_.block_tokens)
+        throw std::invalid_argument("checkpoint selector block count mismatch");
+    for (size_t i=0; i<blocks.size(); ++i) {
+        const auto& b=blocks[i];
+        const auto begin=uint64_t(i)*cfg_.block_tokens;
+        const auto count=uint32_t(std::min<uint64_t>(cfg_.block_tokens, tokens-begin));
+        if (b.block_id!=i || b.orig_pos_start!=begin || b.n_tokens!=count ||
+            !std::isfinite(b.attn_score) || !std::isfinite(b.profile_score) || !std::isfinite(b.retrieval_score))
+            throw std::invalid_argument("checkpoint selector logical statistics mismatch");
+        KvMemBlock clean;
+        clean.block_id=uint32_t(i); clean.orig_pos_start=uint32_t(begin); clean.n_tokens=count;
+        clean.baked_pos=int64_t(begin);
+        clean.attn_score=b.attn_score; clean.profile_score=b.profile_score; clean.retrieval_score=b.retrieval_score;
+        blocks[i]=clean;
+    }
+    KvMemStore next(cfg_);
+    next.set_runtime_select_budget(runtime_budget);
+    next.history_.restore(history);
+    next.total_tokens_=tokens; next.blocks_=std::move(blocks);
+    *this=std::move(next);
+}
+
 std::vector<KvMemDroppedBlock> KvMemStore::truncate_to(uint32_t token_pos) {
     std::vector<KvMemDroppedBlock> dropped;
     if (token_pos >= total_tokens_) return dropped;
