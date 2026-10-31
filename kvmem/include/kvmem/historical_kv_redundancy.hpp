@@ -2,6 +2,7 @@
 
 #include "kvmem/historical_kv_policy.hpp"
 #include "kvmem/historical_kv_auxiliary.hpp"
+#include "kvmem/snapshot.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -45,6 +46,9 @@ public:
     // overlapping edits and reply-tier changes revoke such certificates.
     bool prepare_commit(uint64_t begin, uint32_t tokens, unsigned allowed_tiers,
                         HistoricalKvCommitConditions &) const noexcept;
+    void snapshot_write(SnapshotWriter &) const;
+    static std::shared_ptr<HistoricalKvThinkingRanges> snapshot_read(SnapshotReader &,
+        uint64_t token_frontier, std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {});
 private:
     friend struct HistoricalKvThinkingRangesTestAccess;
     unsigned priority_locked(uint64_t begin, uint64_t end) const noexcept;

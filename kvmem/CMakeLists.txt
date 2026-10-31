@@ -97,6 +97,7 @@ endfunction()
 
 kvmem_add_test(backend_rebind_test)
 kvmem_add_test(historical_gc_ninfer_core_test)
+kvmem_add_test(historical_kv_snapshot_test)
 kvmem_add_test(historical_kv_boundary_mailbox_test)
 set_tests_properties(historical_kv_boundary_mailbox_test PROPERTIES TIMEOUT 60)
 kvmem_add_test(historical_kv_commit_conditions_test)

@@ -7,6 +7,53 @@
 
 namespace kvmem {
 
+void HistoricalKvPageFeatures::snapshot_write(SnapshotWriter & out) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    out.scalar(uint32_t(1));
+    out.scalar(uint64_t(pages_.size())); out.scalar(uint64_t(dimensions_));
+    for (const auto & page : pages_) {
+        out.scalar(uint64_t(page.size()));
+        out.write(page.data(), page.size()*sizeof(float));
+    }
+    out.scalar(uint64_t(question_scores_.size()));
+    out.write(question_scores_.data(), question_scores_.size()*sizeof(double));
+    out.write(output_peaks_.data(), output_peaks_.size()*sizeof(double));
+}
+
+std::shared_ptr<HistoricalKvPageFeatures> HistoricalKvPageFeatures::snapshot_read(
+    SnapshotReader & in, uint32_t logical_pages, size_t dimensions,
+    std::shared_ptr<HistoricalKvAuxBudget> auxiliary) {
+    in.expect(uint32_t(1));
+    in.expect(uint64_t(logical_pages)); in.expect(uint64_t(dimensions));
+    // Before the fixed page table is allocated, prove that even the smallest
+    // representation fits the caller's bounded input.
+    if (!logical_pages || !dimensions || uint64_t(logical_pages) > in.remaining()/16)
+        throw SnapshotCorrupt("invalid historical feature geometry");
+    auto result = std::make_shared<HistoricalKvPageFeatures>(logical_pages, dimensions, std::move(auxiliary));
+    for (auto & page : result->pages_) {
+        const auto count = in.scalar<uint64_t>();
+        if ((count && count != dimensions) || count > in.remaining()/sizeof(float))
+            throw SnapshotCorrupt("invalid historical descriptor length");
+        page.resize(static_cast<size_t>(count));
+        in.read(page.data(), count*sizeof(float));
+        for (float value : page) if (!std::isfinite(value))
+            throw SnapshotCorrupt("nonfinite historical descriptor");
+    }
+    const auto count = in.scalar<uint64_t>();
+    if (count > logical_pages || count > in.remaining()/sizeof(double))
+        throw SnapshotCorrupt("invalid historical question length");
+    result->question_scores_.resize(static_cast<size_t>(count));
+    in.read(result->question_scores_.data(), count*sizeof(double));
+    for (double value : result->question_scores_) if (!std::isfinite(value))
+        throw SnapshotCorrupt("nonfinite historical question score");
+    in.read(result->output_peaks_.data(), uint64_t(logical_pages)*sizeof(double));
+    for (double value : result->output_peaks_)
+        if (!(value == -std::numeric_limits<double>::infinity() || (std::isfinite(value) && value >= 0)))
+            throw SnapshotCorrupt("invalid historical output peak");
+    // begin_round() takes a new frozen view and produces fresh certificates.
+    return result;
+}
+
 HistoricalKvPageFeatures::HistoricalKvPageFeatures(uint32_t logical_pages, size_t dimensions,
     std::shared_ptr<HistoricalKvAuxBudget> auxiliary)
     : dimensions_(dimensions),

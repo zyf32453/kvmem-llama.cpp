@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kvmem/historical_kv_redundancy.hpp"
+#include "kvmem/snapshot.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -49,6 +50,13 @@ public:
     // Only complete pages before this token frontier remain immutable.
     // A partial tail must be recomputed when new tokens seal it again.
     void truncate_to(uint64_t token_frontier, uint32_t page_tokens);
+
+    // Logical foreground state only. Decode creates a private, independently
+    // charged owner; worker snapshots and epoch certificates never cross it.
+    void snapshot_write(SnapshotWriter &) const;
+    static std::shared_ptr<HistoricalKvPageFeatures> snapshot_read(SnapshotReader &,
+        uint32_t logical_pages, size_t dimensions,
+        std::shared_ptr<HistoricalKvAuxBudget> auxiliary = {});
 
 private:
     void advance_question_epoch() noexcept;

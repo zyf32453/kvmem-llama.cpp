@@ -28,6 +28,40 @@ void HistoricalKvThinkingRanges::arm() noexcept {
     if (!armed_) advance(classification_revision_);
     armed_ = true;
 }
+
+void HistoricalKvThinkingRanges::snapshot_write(SnapshotWriter & out) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    out.scalar(uint32_t(1)); out.scalar(uint8_t(armed_)); out.scalar(uint8_t(tiered_));
+    for (const auto * spans : {&spans_, &completed_replies_}) {
+        out.scalar(uint64_t(spans->size()));
+        for (const auto & span : *spans) { out.scalar(span.begin); out.scalar(span.end); }
+    }
+}
+
+std::shared_ptr<HistoricalKvThinkingRanges> HistoricalKvThinkingRanges::snapshot_read(
+    SnapshotReader & in, uint64_t token_frontier, std::shared_ptr<HistoricalKvAuxBudget> auxiliary) {
+    in.expect(uint32_t(1));
+    const auto armed = in.scalar<uint8_t>(), tiered = in.scalar<uint8_t>();
+    if (armed > 1 || tiered > 1) throw SnapshotCorrupt("invalid thinking flags");
+    auto result = std::make_shared<HistoricalKvThinkingRanges>(std::move(auxiliary));
+    result->armed_ = armed; result->tiered_ = tiered;
+    for (auto * spans : {&result->spans_, &result->completed_replies_}) {
+        const auto count = in.scalar<uint64_t>();
+        if (count > token_frontier || count > in.remaining()/16 || count > SIZE_MAX/sizeof(Span))
+            throw SnapshotCorrupt("invalid thinking span count");
+        spans->reserve(static_cast<size_t>(count));
+        for (uint64_t i = 0; i < count; ++i) {
+            Span span{in.scalar<uint64_t>(), in.scalar<uint64_t>()};
+            if (span.begin >= span.end || span.end > token_frontier ||
+                (spans == &result->completed_replies_ && !spans->empty() && span.begin < spans->back().end))
+                throw SnapshotCorrupt("invalid thinking span");
+            spans->push_back(span);
+        }
+    }
+    for (const auto & span : result->spans_)
+        result->thinking_frontier_ = std::max(result->thinking_frontier_, span.end);
+    return result;
+}
 void HistoricalKvThinkingRanges::disarm() noexcept {
     std::lock_guard<std::mutex> lock(mu_);
     if (armed_) advance(classification_revision_);

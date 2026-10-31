@@ -1,0 +1,116 @@
+{
+  "schema": "kv-lifecycle-native-checkpoint-export-candidate-v1",
+  "date": "2026-11-01",
+  "stage": "C11b_candidate_local_CPU_only",
+  "local_toolchain": {
+    "platform": "Windows x64",
+    "compiler": "MinGW-w64 GNU C++ 16.2.0",
+    "target_requirement": "C++17",
+    "gpu_executed": false
+  },
+  "based_on": "docs/contracts/kv-lifecycle-checkpoint-authority-v1.json",
+  "source_files": {
+    "kvmem/CMakeLists.txt": "41e09b4cc2faaf2c3325b43ab833587bfa3dce5ba99abea46230fd654c19ae4b",
+    "kvmem/include/kvmem/historical_kv_page_features.hpp": "7ae0ec04adbefdf002c703843fe309ddc6711d4fde9f79ecc2dde22190d4aee9",
+    "kvmem/include/kvmem/historical_kv_redundancy.hpp": "73347dd1460725427b66b67d5b2ef00e7ee6e74a77ccb71d4ca6df325c148b82",
+    "kvmem/src/host/historical_kv_page_features.cpp": "0d643b7aeabbe66b162546c6716e96ccc55300c0e900cdac63b34c21bd409a1e",
+    "kvmem/src/host/historical_kv_redundancy.cpp": "a2b4bc81788f1afeeecc4387f6c32bb97345de5302733859678baacdfcf5bc40",
+    "kvmem/tests/historical_kv_snapshot_test.cpp": "b714db9b7b11bc1b8b6b6a1a3b4c1713de050f2b29624efc10e16b0b5aa8f0f5",
+    "backends/ninfer/include/ninfer/engine.h": "60cc40d5c9f7f22bee3eafbfb0881e96cd68edcfb0e5c4e8a4747fdec5eaae47",
+    "backends/ninfer/include/ninfer/historical_source.h": "13753c0048df29c19bf97ed0857297513e9cb429d0bc2da89f7635646c703c43",
+    "backends/ninfer/src/models/qwen3_5/program/program.cpp": "8e1a55a4399d5f1687706750494580a1d571accc240e770f96c111a6dee0284b",
+    "backends/ninfer/src/models/qwen3_5/program/program.h": "69cfa139bf73a2ff40d59c1f941bf11caa1b413c389a3270bfacdd2011013276",
+    "backends/ninfer/src/models/qwen3_5/program/program_impl.cpp": "cc0bd177fdf108077f7c2ec9c8b0dc0d05f6a62906c6e9a161b5f7bcf2ce8d04",
+    "backends/ninfer/src/models/qwen3_5/program/program_impl.h": "d9a831f7aebce355abf8fa6eb29eff419dc74c385c57df4923b39f653d4ac026",
+    "backends/ninfer/src/models/qwen3_5/program/storage/checkpoint_export_lease.h": "4d5678e190daf3f9d00bd9ccdd5f100b4419314a012a93d167c4575887cf8d9b",
+    "backends/ninfer/src/models/qwen3_5/program/storage/historical_checkpoint.cpp": "5b94bf445c233ce676def013b14375dd83363ecc519b227df735af7d420401c1",
+    "backends/ninfer/src/models/qwen3_5/program/storage/kvmem_window.cpp": "e05145a75975949495cc4da50730185d70d0e5948ead7b53f649a3f00832d83c",
+    "backends/ninfer/src/models/qwen3_5/program/storage/source_journal.cpp": "143f253c9a58c1d4868f20a493900f6644685b0acb0bcd57744d8f48402cfeb2",
+    "backends/ninfer/src/models/qwen3_5/program_sources.cmake": "376ea4f4c737c5dc2b077b522a71e352c98f6ef383f3990ecbb807e935399535",
+    "backends/ninfer/src/runtime/engine/engine.cpp": "7a4bf0a82e91f53647cc9708d54d260e16fefd0d15f8cd50ff5eba546adf3dfd",
+    "backends/ninfer/src/runtime/engine/engine_core.h": "b68e5de37412d21139a628e3254fbf9b4670038deca66e651aa0c8273a13b716",
+    "backends/ninfer/tests/cmake/RuntimeTests.cmake": "7dec4d37f726f18f1efc45d1b4ab000fe63769bfe867707d8fa63c3f03ca9ba2",
+    "backends/ninfer/tests/test_checkpoint_export_owner.cpp": "0bb4b66111e44b416d3cb60be580e245eb7ef544c32bf7dd503988ef64fecc29",
+    "backends/ninfer/tests/test_engine_checkpoint_export_real.cpp": "951cea1c6c7fd52ea1bd770eea9fdd87cfc3370d44a9c4ef06bf35e5226b679f",
+    "backends/patches/ninfer-checkpoint-export.patch": "7a022e3bb0739eec22a813860b16d0dd6b73a872fae845700ebb29438e9ce53c",
+    "backends/versions.json": "9fa41c4b2df723c58976d385872b9545920cf99a023f17339d3090a9bebc3386"
+  },
+  "native": {
+    "base_tree": "a7716a4a5b1b9684a6c35b6b57202d14cb858a47",
+    "patched_tree": "3c4909904c856fc190b2822f0558bc489284f3c7",
+    "patch_count": 34,
+    "full_build_qualified": false,
+    "actual_model_qualified": false
+  },
+  "entry": [
+    "Engine::begin_historical_checkpoint_save",
+    "Engine::finish_historical_save",
+    "Engine::retire_historical_checkpoint"
+  ],
+  "support_candidate": {
+    "os": "Linux",
+    "gpu_count": 1,
+    "max_concurrency": 1,
+    "media": "text only",
+    "tier": "RAM",
+    "spec": [
+      "none",
+      "MTP"
+    ],
+    "legacy_context_cache": false
+  },
+  "format": {
+    "outer": "SourceArchive checkpoint v1, 104+payload",
+    "native_magic": "NINKVCP1",
+    "native_version": 1,
+    "payload": "bounded CPU metadata + distinct complete StateImages + legal native Host page bytes/scales",
+    "schema": "source/model/frontend/execution configuration, native identity/layout/state bytes, finite checkpoint policy and endian",
+    "identity": "old SourceRef/MemoryStamp are provenance only, never a current native/source capability"
+  },
+  "resources": {
+    "metadata": "C reservation before immutable metadata copy",
+    "payload": "original shared H and C owners",
+    "io": "existing queue, complete actual retained C/H/R ceiling; one Program export lease; no new pool/thread",
+    "release": "queued owner drops producer/payload before signalling; final pinned/metadata release on Engine owner; queue joins before lease shutdown"
+  },
+  "qualification": {
+    "local_tests": [
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "passed": true,
+        "seconds": 0.908229,
+        "evidence": "windows-current-junit.xml",
+        "output": ""
+      },
+      {
+        "name": "historical_kv_snapshot_test",
+        "passed": true,
+        "seconds": 0.592704,
+        "evidence": "windows-current-junit.xml",
+        "output": "historical logical snapshots: PASS\n"
+      },
+      {
+        "name": "native_checkpoint_export_owner_test",
+        "passed": true,
+        "seconds": 1.64853,
+        "evidence": "windows-owner-final-junit.xml",
+        "output": "export owner actual allocation failures=5\ncheckpoint export: success/error/cancel payload destruction stays on Engine owner; PASS\n"
+      }
+    ],
+    "native_build": false,
+    "gpu_save": false,
+    "native_decode": false,
+    "native_restore": false,
+    "cross_process_model_restore": false,
+    "production_qualified": false,
+    "pending_reason": "SSH recovered initially, then repeatedly reset during handshake; user also cannot log in. Latest owner fix has not been uploaded."
+  },
+  "obligations": [
+    "retrieve existing jobs/logs before starting replacements",
+    "build latest complete native candidate",
+    "actual model save/large payload/retired-page and full directory closure checks",
+    "real C/H/D boundary and stale/late writer checks",
+    "private bounded native decode, fresh source/native identities, final authority checks and failure rollback",
+    "matched continuation oracle and version/retirement/forget checks before C closure"
+  ]
+}

@@ -1,7 +1,8 @@
-# Checkpoint 持久恢复：源快照权限与发布组件（C11a）
+# Checkpoint 持久恢复：权限组件与原生保存候选
 
-日期：2026-10-31。当前完成的是持久恢复所需的**归档权限组件**，尚未完成原生状态编码、
-Engine 恢复入口或跨重启模型恢复。阶段 C 与完整六阶段目标继续开放。
+更新：2026-11-01。C11a 的**归档权限组件**已验收；C11b 已实现原生编码及 Engine 保存候选，
+本地 CPU 检查通过，最新原生完整编译和真实模型检查因 SSH 再次中断尚未完成。
+Engine 原生解码/恢复入口及跨重启模型恢复仍未实现，阶段 C 与完整六阶段目标继续开放。
 执行范围、结果和不利发现见 [本批摘要](experiments/2026-10-31-lifecycle-checkpoint-authority/summary.json)。
 
 ## 为什么不能直接复用普通 session 保存
@@ -13,7 +14,7 @@ identity 不是跨进程恢复许可。二者都不能直接作为 GC 历史的�
 
 本批先把恢复权限落实到既有 `SourceArchive`，继续复用目录锁、source namespace/key、已提交
 源 blob 序号、固定对象表、共享 M/D 计费及 `StorageIoQueue`。没有另建 checkpoint 数据库、
-存储池或后台线程。后续的模型状态编码仍归 NInfer Program 负责。
+存储池或后台线程。模型状态编码由 NInfer Program 负责；C11b 候选尚未完成原生验收。
 
 ## 一份 checkpoint 绑定什么
 
@@ -55,8 +56,8 @@ D 总额度，不占新的无限目录。新增对象字段按实际 `sizeof(Obj
 
 Core 不分配完整 checkpoint staging。调用方必须实际保留并计费不可变 C/H/M 载荷，声明真实
 `retained_bytes`，队列按它做完整准入；这个声明不能代替后续 native adapter 的真实预算。
-读取目标也由调用方先取得预算并保持私有。当前只验证小型组件载荷，尚未验证真实数百 MB/
-GB 原生状态的预算、复制与恢复成本。
+读取目标也由调用方先取得预算并保持私有。已验收的归档组件仍只覆盖小型载荷；C11b 的
+数百 MB/GB 原生保存候选尚待模型验收，不能将实现或本地持有关系测试当作大载荷验证。
 
 写入失败或队列拒绝留下有界未发布 claim，待 collect 清理；未完成文件不能读取。发布发生
 rename/目录同步错误会使该 owner 不健康并返回未确认失败。重新打开时，已完整 rename 的
@@ -82,13 +83,50 @@ Debug/内存检查中重跑；其余 23 项的相关代码未变化，沿用对�
 重新运行；原错误 overlay、实际旧源码、日志和作废标记保留。另修正了“配置上限变小”被误报
 为文件损坏的问题，现以 BudgetExceeded 拒绝并保留合法源数据。
 
+## C11b：原生保存候选与本地验证
+
+候选增加 `Engine::begin_historical_checkpoint_save`，由已有
+`finish_historical_save` 分辨工单类型后完成 owner 发布；
+`retire_historical_checkpoint` 只撤销归档附件，保留规范源，不把它当作 RAM 页 GC。
+`HistoricalArchiveOptions::max_checkpoint_bytes` 默认 0，须显式启用；首批实现限定 Linux、
+单 GPU/单请求、文本/RAM、none/MTP，以及关闭旧 context cache 的 KVMem 路径。
+这些是实现范围，当前没有新的生产或模型验收结论。
+
+Program 在空闲 owner 下冻结 retained history：复制原始位置、退休/保护标记、Host 版本、
+Mean-K、selector/LRFU、图/反馈/thinking 状态和有限 checkpoint 目录；共享仍合法的 Host
+KV/scale 与去重后的完整 main/MTP/recurrent StateImage。已退休但尚有物理读者的页不进入
+新载荷；引用缺失或已退休 resident 页的旧 checkpoint 不作为合法恢复点写出。
+这不修改在线目录，也不把文件内旧 SourceRef/MemoryStamp 当作未来恢复许可。
+
+不可变 metadata 的内存副本先进入 C 配额，H 和 pinned image 保留原有真实 owner。
+队列按完整 C/H/R 持有上限准入，修正原先只够单批 KV 搬运的队列上限；没有新增存储池或
+I/O 线程。保存有同步元数据复制、前缀核对和额外 D 写入成本，未测性能。
+
+生命周期检查发现，单把 pinned image 的 shared owner 交给 worker，可能让最后释放在文件
+线程上间接执行 CUDA。现以一个有界 Program export lease 持有冻结对象；worker 释放全部引用
+后才发信号，Engine 的既有维护/控制路径再释放最终 owner。Program 关闭时先 join 队列。
+真实 C/H 占用会保留到实际完成及 owner 清理，I/O 完成不能冒充所有资源已退款。
+
+逻辑快照读取器只构造独立、付费的私有特征/范围对象，不保存旧 worker 的冻结视图和 epoch
+certificate。Windows 上逻辑快照、既有 native-page GC、真实 export lease 三项通过；后者覆盖
+成功/错误/取消及 5 个真实分配失败点，证明相同持有关系的最后销毁发生在 owner 线程。
+该证据使用 CPU 跟踪对象，不能代替 CUDA 固定页或真实模型验证。
+
+本地首次构建修正了测试声明问题；owner 检查又碰到 Windows 路径过长，改用同一 workspace
+内较短构建路径后通过。远程已观察到相关 9 项公共组件及同 9 项内存检查完成，首次原生构建
+发现新工单类型缺少前置声明并已修正；重跑期间 SSH 握手持续重置，用户也确认无法登录。
+最新 owner 修正尚未上传，新原生完整构建/模型结果均不作通过处理。
+
+代码、补丁回放、本地证据与未验收项见
+[C11b 候选摘要](experiments/2026-11-01-lifecycle-native-checkpoint/summary.json)。
+
 ## 下一步的完整原生链路
 
-1. 在 Program 内编码完整 checkpoint 依赖：main/draft/recurrent StateImage、原始位置与稀疏映射、
-   仍合法的 Host KV/scale、统计和检索/图/反馈状态、退休标记及相关有限 checkpoint 目录。
+1. SSH 恢复后先取回已启动任务的最终状态和日志，再编译最新保存候选。真实模型检查完整
+   文件、退休标记、全部合法目录引用、C/H/D 边界与迟到工单拒绝，不复用旧模型二进制。
 2. schema 绑定实际模型、执行配置、载荷布局及状态语义版本。准备、解码、C/H/M 分配、上传都
    先保持私有；完成并复核当前许可后才发布新 S/native 身份，失败不能暴露半恢复状态。
-3. 接入 Engine 保存和恢复入口；验证普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程
+3. 接通 Engine 私有解码、上传与新域恢复入口；验证普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程
    恢复及独立输出基线，旧版本、遗忘和退休不得绕过新身份许可。
 4. 再完成自动源保留策略及任务价值、分层/多会话、长期资源/性能/Agent 验收。当前组件不能
    证明任意旧稀疏轨迹精确回放、全进程 RSS 上界或完整生产 GC。
