@@ -2,7 +2,8 @@
 
 更新：2026-11-01。C11a 的**归档权限组件**已验收；C11b 已实现原生编码及 Engine 保存候选，
 本地 CPU 检查通过，最新原生完整编译和真实模型检查因 SSH 再次中断尚未完成。
-Engine 原生解码/恢复入口及跨重启模型恢复仍未实现，阶段 C 与完整六阶段目标继续开放。
+后续 C11c 已补私有 CPU 读取准备组件，Engine 原生恢复入口及跨重启模型恢复仍未实现，
+阶段 C 与完整六阶段目标继续开放。
 执行范围、结果和不利发现见 [本批摘要](experiments/2026-10-31-lifecycle-checkpoint-authority/summary.json)。
 
 ## 为什么不能直接复用普通 session 保存
@@ -120,13 +121,42 @@ certificate。Windows 上逻辑快照、既有 native-page GC、真实 export le
 代码、补丁回放、本地证据与未验收项见
 [C11b 候选摘要](experiments/2026-11-01-lifecycle-native-checkpoint/summary.json)。
 
+## C11c：有预算的私有读取准备组件
+
+已补 NInfer 模型专用的 `KvmemCheckpointInput`：沿用 C11b 文件格式，先读取固定头，申请实际
+metadata 目标，再以无堆分配的只读视图校验完整元数据。检查源快照身份、模型/布局、原始位置、
+退休标记、Host 版本、统计/图/反馈、特征与 thinking 范围，以及所有 checkpoint/目录/镜像引用。
+非法或缺失依赖在准备大载荷目标之前拒绝；出错的输入不能继续接收或报告成功。
+
+之后先预约整组状态镜像和实际 H 页，流式数据直接进入私有目标，不构造另一份完整 opaque
+checkpoint。模型侧 `read_historical_checkpoint` 使用原有 C pool 与 H reservation；在完整外层
+校验及当前 SourceArchive 权限复核成功后，才返回私有准备对象。它没有导入 S、分配新 native
+身份、创建在线 history 或上传 GPU。后续发布者必须再次复核许可，并落实私有 typed 元数据的
+M/C 准备与正常执行资源准入，因此不能把该组件称为完整恢复入口。
+
+沿现有 prefill/restore 代码核对了两项易误判语义：开放输出的结束位置使用模型容量；旧
+checkpoint 的图消息边界可能包含已丢弃后缀，正常恢复会重新绑定当前请求。读取按容量约束
+这些边界，不把它们当作当前源的读取许可。另校验尾页 Mean-K 的有效行数，避免损坏数值
+进入后续 float-to-token-count 恢复。
+
+独立固定数据与实际 canonical source、RawKvStore、C/H storage 的 Windows C++20 测试通过：
+逐字节/7-byte/8-KiB/整块四种输入一致，6,568 个截断位置均拒绝，覆盖错误模型/位置/退休引用、
+默认与 coverage 目录、空图、缺省特征、共享镜像、配额边界、失败后退款和持有读者的延迟退款。
+12 个真实分配失败点也退款；已用禁止堆分配的检查确认元数据遍历不分配堆内存。
+
+该证据使用小型已知状态字节，不是实际 StateImage 数学或 CUDA pool 的恢复验证。私有
+NInfer adapter 已写入但尚未完成完整原生构建；Engine 发布、GPU 上传、新域身份和模型续算
+均未完成。没有性能或全进程 RSS 结论；C pool 的实际空闲镜像仍可能保留。尝试本机已有
+Docker 补跑 Linux 内存检查，但后台未就绪，未修改 WSL/驱动设置，Linux sanitizer 仍待运行。
+见 [C11c 组件与验证范围](experiments/2026-11-01-lifecycle-checkpoint-input/summary.json)。
+
 ## 下一步的完整原生链路
 
 1. SSH 恢复后先取回已启动任务的最终状态和日志，再编译最新保存候选。真实模型检查完整
    文件、退休标记、全部合法目录引用、C/H/D 边界与迟到工单拒绝，不复用旧模型二进制。
-2. schema 绑定实际模型、执行配置、载荷布局及状态语义版本。准备、解码、C/H/M 分配、上传都
-   先保持私有；完成并复核当前许可后才发布新 S/native 身份，失败不能暴露半恢复状态。
-3. 接通 Engine 私有解码、上传与新域恢复入口；验证普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程
+2. 在 C11c 字节/元数据读取准备上，完成 private typed state、M/C 分配与正常执行资源预约、
+   GPU 上传及最终许可复核；成功才发布新 S/native 身份，失败不暴露半恢复状态。
+3. 接通 Engine 新域恢复入口；验证普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程
    恢复及独立输出基线，旧版本、遗忘和退休不得绕过新身份许可。
 4. 再完成自动源保留策略及任务价值、分层/多会话、长期资源/性能/Agent 验收。当前组件不能
    证明任意旧稀疏轨迹精确回放、全进程 RSS 上界或完整生产 GC。

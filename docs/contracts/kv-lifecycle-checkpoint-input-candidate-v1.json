@@ -1,0 +1,104 @@
+{
+  "schema": "kv-lifecycle-checkpoint-input-candidate-v1",
+  "date": "2026-11-01",
+  "stage": "C11c_private_CPU_input_component",
+  "based_on": {
+    "path": "docs/contracts/kv-lifecycle-native-checkpoint-export-candidate-v1.json",
+    "sha256": "87bab23629e2c6540286a63c0f7118286fbbeaa3dedffbe9d41165f22bd84288"
+  },
+  "source_files": {
+    "backends/ninfer/include/ninfer/engine.h": "60cc40d5c9f7f22bee3eafbfb0881e96cd68edcfb0e5c4e8a4747fdec5eaae47",
+    "backends/ninfer/include/ninfer/historical_source.h": "13753c0048df29c19bf97ed0857297513e9cb429d0bc2da89f7635646c703c43",
+    "backends/ninfer/src/models/qwen3_5/program/program.cpp": "8e1a55a4399d5f1687706750494580a1d571accc240e770f96c111a6dee0284b",
+    "backends/ninfer/src/models/qwen3_5/program/program.h": "69cfa139bf73a2ff40d59c1f941bf11caa1b413c389a3270bfacdd2011013276",
+    "backends/ninfer/src/models/qwen3_5/program/program_impl.cpp": "cc0bd177fdf108077f7c2ec9c8b0dc0d05f6a62906c6e9a161b5f7bcf2ce8d04",
+    "backends/ninfer/src/models/qwen3_5/program/program_impl.h": "6feadc870f06cb46f91ed8380ba50aea007f74bc74d2c4310ce49dead3e0f300",
+    "backends/ninfer/src/models/qwen3_5/program/storage/checkpoint_export_lease.h": "4d5678e190daf3f9d00bd9ccdd5f100b4419314a012a93d167c4575887cf8d9b",
+    "backends/ninfer/src/models/qwen3_5/program/storage/checkpoint_input.cpp": "7c587aa0956ddeb54f857e02d46b7f03b58b09a50c1a4e2aaf1d9c99b8ba9aa6",
+    "backends/ninfer/src/models/qwen3_5/program/storage/checkpoint_input.h": "ffd05534e1b9c7547a373883d6eb365e53624408cac6b62e1b18ff1fa5d7aa19",
+    "backends/ninfer/src/models/qwen3_5/program/storage/checkpoint_read.h": "c55bbd8c000d19658bc9a544a3e058e384d234ca709255973a130154d3749c95",
+    "backends/ninfer/src/models/qwen3_5/program/storage/historical_checkpoint.cpp": "e75e3a18a95b4a0d28f57ed79a6854252cbc7eb866b0f9d0e5eb0e80f9571943",
+    "backends/ninfer/src/models/qwen3_5/program/storage/kvmem_window.cpp": "e05145a75975949495cc4da50730185d70d0e5948ead7b53f649a3f00832d83c",
+    "backends/ninfer/src/models/qwen3_5/program/storage/source_journal.cpp": "143f253c9a58c1d4868f20a493900f6644685b0acb0bcd57744d8f48402cfeb2",
+    "backends/ninfer/src/models/qwen3_5/program_sources.cmake": "f0745c7377ec1d1e01bd24ad22a6b6e642dc0c7d8619f24c468209c187468e0b",
+    "backends/ninfer/src/runtime/engine/engine.cpp": "7a4bf0a82e91f53647cc9708d54d260e16fefd0d15f8cd50ff5eba546adf3dfd",
+    "backends/ninfer/src/runtime/engine/engine_core.h": "b68e5de37412d21139a628e3254fbf9b4670038deca66e651aa0c8273a13b716",
+    "backends/ninfer/tests/cmake/RuntimeTests.cmake": "a520f4048b16cbc5875e87a7dd039306646a553b182c7f5724040bbcb36211d8",
+    "backends/ninfer/tests/test_checkpoint_export_owner.cpp": "0bb4b66111e44b416d3cb60be580e245eb7ef544c32bf7dd503988ef64fecc29",
+    "backends/ninfer/tests/test_checkpoint_input.cpp": "b8096329e87ee88985b5ce83fa568cb2b9089e02b5438a9f591066c7916513f4",
+    "backends/ninfer/tests/test_engine_checkpoint_export_real.cpp": "951cea1c6c7fd52ea1bd770eea9fdd87cfc3370d44a9c4ef06bf35e5226b679f",
+    "backends/patches/ninfer-checkpoint-export.patch": "7a022e3bb0739eec22a813860b16d0dd6b73a872fae845700ebb29438e9ce53c",
+    "backends/patches/ninfer-checkpoint-input.patch": "4f5390e1e98046c2579cc9450cf9f22252815cd83427489e3c7c352a85015fa6",
+    "backends/versions.json": "f9eacd10deadc50dd4071b695dc0bde291c778d9cb1292da0385f3458bd2f05a",
+    "kvmem/CMakeLists.txt": "41e09b4cc2faaf2c3325b43ab833587bfa3dce5ba99abea46230fd654c19ae4b",
+    "kvmem/include/kvmem/historical_kv_page_features.hpp": "7ae0ec04adbefdf002c703843fe309ddc6711d4fde9f79ecc2dde22190d4aee9",
+    "kvmem/include/kvmem/historical_kv_redundancy.hpp": "73347dd1460725427b66b67d5b2ef00e7ee6e74a77ccb71d4ca6df325c148b82",
+    "kvmem/src/host/historical_kv_page_features.cpp": "0d643b7aeabbe66b162546c6716e96ccc55300c0e900cdac63b34c21bd409a1e",
+    "kvmem/src/host/historical_kv_redundancy.cpp": "a2b4bc81788f1afeeecc4387f6c32bb97345de5302733859678baacdfcf5bc40",
+    "kvmem/tests/historical_kv_snapshot_test.cpp": "b714db9b7b11bc1b8b6b6a1a3b4c1713de050f2b29624efc10e16b0b5aa8f0f5"
+  },
+  "native": {
+    "base_tree": "3c4909904c856fc190b2822f0558bc489284f3c7",
+    "patched_tree": "3cfda48ec4cb281342acf2505bc9a0879fea4063",
+    "patch": "backends/patches/ninfer-checkpoint-input.patch",
+    "patch_sha256": "4f5390e1e98046c2579cc9450cf9f22252815cd83427489e3c7c352a85015fa6",
+    "native_files": [
+      "src/models/qwen3_5/program/program_impl.h",
+      "src/models/qwen3_5/program/storage/checkpoint_input.cpp",
+      "src/models/qwen3_5/program/storage/checkpoint_input.h",
+      "src/models/qwen3_5/program/storage/checkpoint_read.h",
+      "src/models/qwen3_5/program/storage/historical_checkpoint.cpp",
+      "src/models/qwen3_5/program_sources.cmake",
+      "tests/cmake/RuntimeTests.cmake",
+      "tests/test_checkpoint_input.cpp"
+    ],
+    "patch_count": 35,
+    "replay_passed": true,
+    "component_qualified": "Windows CPU codec only",
+    "native_adapter_build_qualified": false,
+    "gpu_qualified": false,
+    "native_publication_implemented": false
+  },
+  "local_toolchain": {
+    "os": "Windows x64",
+    "compiler": "MinGW GNU16.2.0",
+    "language": "C++20"
+  },
+  "format": "C11b NINKVCP1 unchanged; fixed header, charged metadata view, then complete state images and legal Host pages",
+  "invariants": [
+    "Source origin/configuration and model/layout/statistic/coverage identities match explicit current inputs",
+    "canonical prefix and original positions; no retired/missing Host resident or unreferenced state/directory data",
+    "metadata walk performs no heap allocation; bounded arrays borrow only the charged immutable metadata storage",
+    "real C/H targets prepared only after structural validation; stream directly into private destinations; failed sink cannot resume",
+    "SourceArchive full checksum/current receipt validation precedes private return; private return itself is not native publication",
+    "no S import, fresh native identity, GPU upload or online history insertion in this component"
+  ],
+  "qualification": {
+    "local_component_passed": true,
+    "truncation_boundaries": 6568,
+    "actual_allocation_failure_points": 12,
+    "input_chunks": [
+      1,
+      7,
+      8192,
+      "whole"
+    ],
+    "legacy_and_coverage": true,
+    "empty_graph_and_optional_features": true,
+    "shared_image": true,
+    "canonical_statistics_oracle": "exact independently known arithmetic sums/means",
+    "linux_sanitizers": false,
+    "native_adapter_build": false,
+    "pinned_pool_execution": false,
+    "gpu_or_restart_restore": false,
+    "engine_restore_implemented": false,
+    "production_qualified": false
+  },
+  "gaps": [
+    "Remote SSH still unavailable after user confirmed; retrieve old jobs before restarting any",
+    "Local Docker Desktop did not become available; no WSL/driver settings changed; Linux sanitizer remains pending",
+    "Model-specific adapter not yet compiled/qualified with complete Native toolchain",
+    "typed state M/C preparation, normal model resource admission, fresh S/native publication and final fencing remain",
+    "actual large checkpoint/model continuation, reset/restart/retirement/forget and performance/long-run gates remain"
+  ]
+}

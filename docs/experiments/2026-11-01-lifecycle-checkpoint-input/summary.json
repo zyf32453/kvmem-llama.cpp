@@ -1,0 +1,85 @@
+{
+  "date": "2026-11-01",
+  "stage": "C11c_private_CPU_input_component",
+  "status": "Windows_CPU_component_passed_full_Native_and_GPU_pending",
+  "production_qualified": false,
+  "engine_restore_implemented": false,
+  "source_contract": "docs/contracts/kv-lifecycle-checkpoint-input-candidate-v1.json",
+  "local_toolchain": {
+    "os": "Windows x64",
+    "compiler": "MinGW GNU16.2.0",
+    "language": "C++20"
+  },
+  "native": {
+    "base_tree": "3c4909904c856fc190b2822f0558bc489284f3c7",
+    "patched_tree": "3cfda48ec4cb281342acf2505bc9a0879fea4063",
+    "patch": "backends/patches/ninfer-checkpoint-input.patch",
+    "patch_sha256": "4f5390e1e98046c2579cc9450cf9f22252815cd83427489e3c7c352a85015fa6",
+    "native_files": [
+      "src/models/qwen3_5/program/program_impl.h",
+      "src/models/qwen3_5/program/storage/checkpoint_input.cpp",
+      "src/models/qwen3_5/program/storage/checkpoint_input.h",
+      "src/models/qwen3_5/program/storage/checkpoint_read.h",
+      "src/models/qwen3_5/program/storage/historical_checkpoint.cpp",
+      "src/models/qwen3_5/program_sources.cmake",
+      "tests/cmake/RuntimeTests.cmake",
+      "tests/test_checkpoint_input.cpp"
+    ],
+    "patch_count": 35,
+    "replay_passed": true,
+    "component_qualified": "Windows CPU codec only",
+    "native_adapter_build_qualified": false,
+    "gpu_qualified": false,
+    "native_publication_implemented": false
+  },
+  "component_test": {
+    "name": "native_checkpoint_input_test",
+    "seconds": 1.39853,
+    "output": "all 6568 truncation boundaries and malformed dependency references rejected\nactual private decode allocation failures=12; C/H refunded\nnative private checkpoint input: exact byte/state metadata, strict closure, bounded storage; PASS (CPU only, no Engine publication)\n",
+    "evidence": "windows-final-junit.xml"
+  },
+  "checked": {
+    "local_component_passed": true,
+    "truncation_boundaries": 6568,
+    "actual_allocation_failure_points": 12,
+    "input_chunks": [
+      1,
+      7,
+      8192,
+      "whole"
+    ],
+    "legacy_and_coverage": true,
+    "empty_graph_and_optional_features": true,
+    "shared_image": true,
+    "canonical_statistics_oracle": "exact independently known arithmetic sums/means",
+    "linux_sanitizers": false,
+    "native_adapter_build": false,
+    "pinned_pool_execution": false,
+    "gpu_or_restart_restore": false,
+    "engine_restore_implemented": false,
+    "production_qualified": false
+  },
+  "gaps": [
+    "Remote SSH still unavailable after user confirmed; retrieve old jobs before restarting any",
+    "Local Docker Desktop did not become available; no WSL/driver settings changed; Linux sanitizer remains pending",
+    "Model-specific adapter not yet compiled/qualified with complete Native toolchain",
+    "typed state M/C preparation, normal model resource admission, fresh S/native publication and final fencing remain",
+    "actual large checkpoint/model continuation, reset/restart/retirement/forget and performance/long-run gates remain"
+  ],
+  "corrections": [
+    "Open output spans use capacity, and old checkpoint message suffixes are rebound by normal restore; validated as provenance within capacity",
+    "Partial mean token counts must be finite integers within the actual prefix tail before later typed restore",
+    "Resource-bound refusal stays BudgetExceeded; malformed structure stays SnapshotCorrupt"
+  ],
+  "costs": [
+    "separate C metadata wire buffer plus bounded fixed manifest; large image/Host payload copied once from disk into private C/H",
+    "serialized control call includes complete file read and canonical-prefix checking; throughput and RSS unmeasured",
+    "actual Native C pool may retain idle pinned images after preparation failure/owner release; CPU test heap refunds do not prove immediate pinned-byte refund"
+  ],
+  "evidence": {
+    "path": "C:\\Users\\25468\\.codex\\worktrees\\d87d\\kvmem-llama.cpp\\artifacts\\kv-lifecycle-checkpoint-resume\\artifacts\\lifecycle-checkpoint-input\\evidence-local.zip",
+    "sha256": "cae8f5e708e4a2bfbe8675c04e3ad53af8b228ce8c1214a788f223c1f0c23cdc",
+    "bytes": 574087,
+    "scope": "local exact CPU codec/storage checks and sources only; no native adapter/CUDA/engine/restart qualification"
+  }
+}
