@@ -1,0 +1,872 @@
+{
+  "date": "2026-10-31",
+  "stage": "C5_checkpoint_owner_budget",
+  "status": "frozen_checkpoint_owner_budget_functionally_qualified",
+  "full_goal_complete": false,
+  "stage_C_complete": false,
+  "production_qualified": false,
+  "based_on_commit": "57a2f514baf73d7b6b5a08fca5bdd2b27aa67739",
+  "native_patched_tree": "ca0ce1b40686185f1020f8be9910ae523d2871d9",
+  "native_patch_count": 30,
+  "manifest_sha256": "f5bb49a523c8aac682014469b32b3cc2774481696192a58745a2e5ccad14a301",
+  "source_checks": {
+    "count": 108,
+    "status": "passed",
+    "full_archive_files_verified_before_and_after": 3440,
+    "native_patched_tree": "ca0ce1b40686185f1020f8be9910ae523d2871d9"
+  },
+  "native_build": {
+    "root": "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c",
+    "container": "kvmem-checkpoint-resume-828a2d0c",
+    "container_id": "843aca99b94f43844433a2c143db27622ccb3283c8675660261259d86982ecc6",
+    "launch_confirmed": true,
+    "terminal_state": "exited",
+    "parallelism": 4,
+    "full_source_archive": {
+      "sha256": "f3b9350b7fab4d56aa1423a0056dfa39517cae747ed6125d2c646219166d946b",
+      "bytes": 17461063,
+      "files": 3440,
+      "native_tree": "ca0ce1b40686185f1020f8be9910ae523d2871d9",
+      "candidate_changed": false,
+      "old_container_exit": 1,
+      "old_failure": "OSError Errno 5 Input/output error writing /work/native-logs/build.exit; compiler result unavailable",
+      "old_OOMKilled": false,
+      "placement": "new unique persistent /home/yifan/kvmem-validation directory; no inherited build cache"
+    },
+    "state": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-10-31T07:27:50.762578365Z",
+      "FinishedAt": "2026-10-31T08:57:41.111291567Z"
+    },
+    "exit": 0,
+    "OOMKilled": false,
+    "scope": "Cold Release sm86 build, GCC13.3/CUDA13.2/Python3.11.18, parallel4, all873 steps complete"
+  },
+  "native_checks_result": [
+    {
+      "name": "ninfer_cli_options_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_serve_options_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_kv_capacity_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_context_cache_defaults_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_unique_strings_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_qwen3_5_frontend_test",
+      "exit": 0
+    },
+    {
+      "name": "source_journal_test",
+      "exit": 0
+    },
+    {
+      "name": "source_recovery_test",
+      "exit": 0
+    },
+    {
+      "name": "public_include_boundaries",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_kvmem_checkpoint_metadata_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_checkpoint_budget_contract_test",
+      "exit": 0
+    },
+    {
+      "name": "ninfer_checkpoint_budget_sanitizer_test",
+      "exit": 0
+    }
+  ],
+  "gpu_qualification_started": true,
+  "local_pool_check": {
+    "status": "passed",
+    "scope": "exact pool header, CPU stand-in for pinned buffer, GCC16.2/C++20; counter/alias/idle/cross-thread owner; no CUDA or full model claim",
+    "result": "local pool owner/counter syntax and lifetime checks passed with CPU stand-in; no CUDA/model claim"
+  },
+  "host_coverage_reuse": {
+    "host_report": "artifacts/lifecycle-stage-c-native-forget/host-run/report.json",
+    "host_report_sha256": "d3a5d725f3ddd800b20f0d24ec9ba67845d4223cba0447eaa4afde0e9a904795",
+    "reason": "Every frozen public core and host-test source is byte-identical; new native checkpoint budget has independent native contracts, sanitizer target and model qualification.",
+    "host_tests": 22,
+    "verified_input_count": 89,
+    "report_local_path": "artifacts/lifecycle-stage-c-checkpoint-budget/reused-host-report.json"
+  },
+  "remaining": [
+    "Durable archive/retirement/forget authority and Engine import are not implemented.",
+    "Long/sparse source replay, complete restore transactions and remaining C-F work are incomplete.",
+    "No new TSan/GPU sanitizer, long-run/performance or Agent qualification. DeepSWE remains deferred."
+  ],
+  "user_input": "SSH restored; no additional information needed for next archive implementation. No debugger/registry/driver/host-settings changes.",
+  "native_build_attempts": [
+    {
+      "root": "/tmp/kvmem-lifecycle-checkpoint-budget-20261031-6bgmmmix",
+      "container": "kvmem-checkpoint-build-6bgmmmix",
+      "container_id": "3fcc48dd5e2267f5cd48c25473fc21b790b3a499869eccfd2b718ece70d6a644",
+      "launch_confirmed": true,
+      "terminal_state": "exited",
+      "reason": "Retained Docker log: Errno5 Input/output error writing build.exit. Compiler result unavailable; old temporary workspace lost. No inferred OOM/code failure.",
+      "exit": 1,
+      "OOMKilled": false,
+      "finished_at": "2026-10-31T01:25:36.380138763Z"
+    },
+    {
+      "root": "/home/yifan/kvmem-validation/checkpoint-budget-20261031-8161ecd2",
+      "container": "kvmem-checkpoint-resume-8161ecd2",
+      "exit": 1,
+      "phase": "verifying_frozen_inputs",
+      "reason": "Recovery package omitted three root contract-probe files. Corrected before compilation; native candidate unchanged."
+    }
+  ],
+  "gpu_controller": {
+    "container": "kvmem-c5-gpu-controller-828a2d0c-longwait",
+    "state": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-10-31T08:37:44.192155666Z",
+      "FinishedAt": "2026-10-31T09:02:14.628162266Z"
+    },
+    "status": "completed",
+    "prior_wait_controller": "exited1 after its one-hour compile wait; zero GPU cases had started; wait extended only, not per-cohort1800s timeout"
+  },
+  "resource_scope": "C accounts checkpoint image/owned dynamic metadata plus fixed read-staging reservation, including retained aliases and unpublished captures. Fixed model-layout planning descriptors/control/allocator/runtime and other backend workspaces remain outside C; no RSS/performance qualification.",
+  "qualified_at": "2026-10-31T17:07:34.573451+08:00",
+  "native_binary_sha256": {
+    "build-native/apps/ninfer-serve": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+    "build-native/tests/ninfer_memory_policy_tests": "16dc5c288296f511b528179da5f615a93adcf7f7ee8dd4d36a83fc85c45bb742",
+    "build-native/tests/ninfer_query_policy_tests": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+    "build-native/tests/ninfer_engine_source_recovery_real_test": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+    "build-native/tests/ninfer_engine_source_forget_real_test": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+    "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+    "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+    "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "56c5d961a5a0930a49191ca4cae4c13acca34916ca2fce209167863dd74cac13"
+  },
+  "sanitizer": {
+    "passed": true,
+    "checks": "ASan/UBSan with detect_leaks=1 and halt_on_error=1",
+    "actual_allocation_failure_points": 3,
+    "linkage": [
+      "libasan.so.8",
+      "libubsan.so.1"
+    ],
+    "instrumented": "Standalone checkpoint-owner metadata test and inline owner paths; other native library code not globally instrumented; no CUDA execution in sanitizer target"
+  },
+  "gpu_qualification": {
+    "passed": true,
+    "cases": [
+      {
+        "config": "pinned-pool-contract",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-7e8a89e28821",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_query_policy_tests",
+          "ninfer_kvmem_checkpoint_pool_test"
+        ],
+        "binary_sha256": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+        "passed": true,
+        "terminal": true,
+        "id": "f70fad8e404c05d3bd5d870cc892f1261c5a472f872f0353759850e60a599049",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T08:58:38.556430954Z",
+          "FinishedAt": "2026-10-31T08:58:39.251721252Z"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T08:58:38.556430954Z",
+          "FinishedAt": "2026-10-31T08:58:39.251721252Z"
+        }
+      },
+      {
+        "config": "quota-lru-none",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-113b67de21bc",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+        "passed": true,
+        "terminal": true,
+        "id": "736928d64bd610b28eb9a31fcd7a3f705f21caadc13917d4c8d20d5f93f715ee",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T08:58:42.174144659Z",
+          "FinishedAt": "2026-10-31T08:59:07.290070665Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308084854,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 176246,
+          "mtp": false,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308084854,
+          "rebuild_speculative_rounds": 0,
+          "redundancy": false,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T08:58:42.174144659Z",
+          "FinishedAt": "2026-10-31T08:59:07.290070665Z"
+        }
+      },
+      {
+        "config": "quota-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-d8160276bf6f",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+        "passed": true,
+        "terminal": true,
+        "id": "d02cc8e909d047b526caee50580040d950721ddf30a4bb01e7aa4aea601e1425",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T08:59:10.599931581Z",
+          "FinishedAt": "2026-10-31T08:59:36.570372057Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308089986,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 181378,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308089986,
+          "rebuild_speculative_rounds": 2,
+          "redundancy": false,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T08:59:10.599931581Z",
+          "FinishedAt": "2026-10-31T08:59:36.570372057Z"
+        }
+      },
+      {
+        "config": "quota-redundancy-none",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-556ed761ed4e",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+        "passed": true,
+        "terminal": true,
+        "id": "b2ae413186d9243e32579b3d9cb97a6757e8d85429f0a23b0e5a318276578d26",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T08:59:39.53849289Z",
+          "FinishedAt": "2026-10-31T09:00:05.742307679Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308084854,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 176246,
+          "mtp": false,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308084854,
+          "rebuild_speculative_rounds": 0,
+          "redundancy": true,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T08:59:39.53849289Z",
+          "FinishedAt": "2026-10-31T09:00:05.742307679Z"
+        }
+      },
+      {
+        "config": "quota-redundancy-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-2d9da6d4d87d",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_MTP=1",
+          "-e",
+          "NINFER_CHECKPOINT_BUDGET_REDUNDANCY=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_checkpoint_budget_real_test"
+        ],
+        "binary_sha256": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+        "passed": true,
+        "terminal": true,
+        "id": "9fa70a8da1225ad851aaa561374cfc185c183d10533e04c93db35f5bff3cdd21",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T09:00:09.33712882Z",
+          "FinishedAt": "2026-10-31T09:00:35.868821595Z"
+        },
+        "result": {
+          "budget_bytes": 402653184,
+          "charged_bytes": 308089986,
+          "followup_after_refusal": true,
+          "history_evictions": 8,
+          "idle_bytes": 0,
+          "image_bytes": 307908608,
+          "mandatory_quota_refused": true,
+          "metadata_bytes": 181378,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "peak_bytes": 308089986,
+          "rebuild_speculative_rounds": 2,
+          "redundancy": true,
+          "small_quota_denied": 1,
+          "status": "passed"
+        },
+        "checkpoint_evictions": 8,
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T09:00:09.33712882Z",
+          "FinishedAt": "2026-10-31T09:00:35.868821595Z"
+        }
+      },
+      {
+        "config": "recovery-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-8d7a720a8c59",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_RECOVERY_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_SOURCE_RECOVERY_MTP=1",
+          "-e",
+          "KVMEM_GC_AUDIT=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_recovery_real_test"
+        ],
+        "binary_sha256": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+        "passed": true,
+        "terminal": true,
+        "id": "29b02492576ddad99ea366e30679c35ad87ee449d7b86b456e9add5b402d812b",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T09:00:39.378675297Z",
+          "FinishedAt": "2026-10-31T09:01:54.266811532Z"
+        },
+        "result": {
+          "admission_reserve_rejected": true,
+          "cancel_computed": 512,
+          "cancel_processed": 512,
+          "cancelled_source_id": 2,
+          "canonical_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "final_source_records": 12,
+          "first_token_stop": true,
+          "fresh_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "history_evictions": 6,
+          "input_tokens": 32768,
+          "mtp": true,
+          "original_speculative_rounds": 2,
+          "rebuild_prefix": 1024,
+          "rebuilt_source_id": 3,
+          "rebuilt_speculative_rounds": 2,
+          "redundancy": false,
+          "retired_pages": 480,
+          "source_id": 1,
+          "source_only_output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "source_only_speculative_rounds": 2,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T09:00:39.378675297Z",
+          "FinishedAt": "2026-10-31T09:01:54.266811532Z"
+        }
+      },
+      {
+        "config": "forget-lru-mtp4",
+        "argv": [
+          "docker",
+          "run",
+          "-d",
+          "--name",
+          "kvmem-checkpoint-budget-7c75ceff6d2e",
+          "--gpus",
+          "all",
+          "-v",
+          "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c:/work:ro",
+          "-v",
+          "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3:/models:ro",
+          "-v",
+          "/usr/local/cuda-13.2:/usr/local/cuda-13.2:ro",
+          "-v",
+          "/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro",
+          "-e",
+          "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/lib:/usr/local/cuda-13.2/lib64",
+          "-e",
+          "NINFER_SOURCE_FORGET_ARTIFACT=/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+          "-e",
+          "NINFER_SOURCE_FORGET_MTP=1",
+          "kvmem-lifecycle-builder:20261031-d311d1b",
+          "/work/build-native/tests/ninfer_engine_source_forget_real_test"
+        ],
+        "binary_sha256": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+        "passed": true,
+        "terminal": true,
+        "id": "2e9a4813707658674ac50963723716f58e2c4ff2bb6f2ab9656faeaa945c1cf6",
+        "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB",
+        "terminal_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T09:01:58.774811685Z",
+          "FinishedAt": "2026-10-31T09:02:14.230840004Z"
+        },
+        "result": {
+          "busy_partial_prefill": true,
+          "checkpoint_bytes_after": 924062228,
+          "checkpoint_bytes_before": 1540423578,
+          "discarded_native_domains": 3,
+          "final_staging_bytes": 0,
+          "forgotten_sources": 3,
+          "fresh_reused_tokens": 0,
+          "fresh_source_id": 6,
+          "fresh_speculative_rounds": 2,
+          "host_bytes_after": 26808320,
+          "host_bytes_before": 88954880,
+          "mtp": true,
+          "output_ids": [
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453,
+            13453
+          ],
+          "redundancy": false,
+          "revoked_staging_bytes": 8192,
+          "source_bytes_after": 53760,
+          "source_bytes_before": 79104,
+          "sources_after": 2,
+          "sources_before": 5,
+          "status": "passed"
+        },
+        "final_container_state": {
+          "Status": "exited",
+          "Running": false,
+          "Paused": false,
+          "Restarting": false,
+          "OOMKilled": false,
+          "Dead": false,
+          "Pid": 0,
+          "ExitCode": 0,
+          "Error": "",
+          "StartedAt": "2026-10-31T09:01:58.774811685Z",
+          "FinishedAt": "2026-10-31T09:02:14.230840004Z"
+        }
+      }
+    ],
+    "image_id": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+    "scope": "bounded checkpoint C, quota cleanup and source regressions; no RSS/performance/Agent qualification",
+    "physical_releases_inside_rebuild_prefix": [
+      {
+        "begin": 512,
+        "tokens": 64
+      },
+      {
+        "begin": 576,
+        "tokens": 64
+      },
+      {
+        "begin": 640,
+        "tokens": 64
+      },
+      {
+        "begin": 704,
+        "tokens": 64
+      },
+      {
+        "begin": 768,
+        "tokens": 64
+      },
+      {
+        "begin": 832,
+        "tokens": 64
+      },
+      {
+        "begin": 896,
+        "tokens": 64
+      },
+      {
+        "begin": 960,
+        "tokens": 64
+      },
+      {
+        "begin": 448,
+        "tokens": 64
+      },
+      {
+        "begin": 320,
+        "tokens": 64
+      },
+      {
+        "begin": 256,
+        "tokens": 64
+      },
+      {
+        "begin": 192,
+        "tokens": 64
+      },
+      {
+        "begin": 128,
+        "tokens": 64
+      },
+      {
+        "begin": 384,
+        "tokens": 64
+      },
+      {
+        "begin": 64,
+        "tokens": 64
+      }
+    ],
+    "model_sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750"
+  },
+  "adverse_findings": [
+    "Original task exited1 with filesystem I/O error recording build.exit; original compiler outcome unavailable and old /tmp workspaces gone. Preserved state/log; no OOM cause inferred.",
+    "First recovery package lacked three root contract probes and was rejected before compile; corrected package without product-code/assertion changes.",
+    "One-hour compile-wait controller expired during healthy cold build. Preserved timeout, then continued the same build with a two-hour wait; model1800s cohort limits unchanged.",
+    "Cold build took approximately90min at parallel4, chosen from prior same-host peak61914112000bytes. Mid-build peak5331038208bytes/zero OOM is only a sample, not final peak or inference RSS.",
+    "Existing unused CUDA template warnings remained; no unrelated arithmetic/compiler-warning cleanup was made.",
+    "C caps managed checkpoint payload/dynamic metadata, not entire process RSS. Fixed model-layout planning descriptor is built before C reservation and remains outside C.",
+    "Bounded C legitimately evicts cache owners; four384MiB cohorts each evicted8 domains. Default1GiB can retain fewer domains than the old unbounded pool; throughput/latency/Agent impact not measured.",
+    "After the2GiB forget regression, checkpoint charge still924062228bytes for unrelated retained owners/idle images. Forget is not all-CPU-memory-zero or global/secure erasure.",
+    "GPU tests cover explicit384MiB pressure and2GiB source regressions, plus1MiB refusal; no separate default1GiB GPU cohort or other config qualification."
+  ],
+  "evidence": {
+    "local_path": "artifacts/lifecycle-stage-c-checkpoint-budget/evidence.zip",
+    "sha256": "a28f8dd6910ac281aa2ee5c7a53f278a46122258dd8c630028c0cbf8d86bf592",
+    "bytes": 51313056,
+    "native_archive_sha256": "f165ea66635abb09a82321c642f958fdcb650eaf4563f9bc8af5910886d4e185",
+    "gpu_archive_sha256": "987780ac9e238961a941a471a857258c7edcbceaacd526196074bc1dfd1146f6"
+  }
+}

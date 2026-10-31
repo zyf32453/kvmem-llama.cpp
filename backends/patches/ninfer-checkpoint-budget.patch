@@ -1,0 +1,906 @@
+diff --git a/docs/cli.md b/docs/cli.md
+--- a/docs/cli.md
++++ b/docs/cli.md
+@@ -438,6 +438,23 @@
+ 
+ ## KVMem historical GC in the integrated server
+ 
++`--kvmem-checkpoint-mib N` sets the aggregate checkpoint budget C for one Program
++(positive MiB; default 1024 whenever KVMem is enabled). It is separate from Host
++KV payload H, source S, source-preparation R and GC auxiliary M. C charges pinned
++images (including idle pool buffers and execution leases), checkpoint metadata
++capacities and construction/rollback reservations. Removing a directory entry
++does not refund an object still held by another owner. The optional spread policy's
++`KVMEM_CHECKPOINT_HOST_MIB` remains an additional cap, never permission to exceed C.
++For disk history, C reserves its one existing read-staging buffer before images
++are admitted. C is an account of these owners/reservations, not a process RSS cap.
++
++Required captures first trim idle buffers and reclaim eligible older cache
++domains, protecting the admitted restore source. If the required state still
++does not fit, the request ends with an explicit unavailable quota error; optional
++captures may be skipped. Raising C can retain more reuse opportunities. `/stats`
++reports the effective budget, image/metadata/idle charges, peak, denied operations
++and separate actual/reserved read-staging bytes.
++
+ The KVMem integration in `ninfer-serve` provides `--kvmem-gc-lru` and
+ `--kvmem-gc-redundancy` (the latter requires `--kvmem-query-scorer meanq-cosine`).
+ Both currently require one GPU, one running request and RAM history; GC with SSD
+diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
+--- a/docs/maintainer/engine-architecture.md
++++ b/docs/maintainer/engine-architecture.md
+@@ -757,6 +757,27 @@
+ unchanged; target p is constrained and normalized before the existing p/q and residual calculation.
+ Existing KV, recurrence replay, token-count, and terminal-prefix commit rules remain authoritative.
+ 
++### Checkpoint owner budget
++
++All KVMem checkpoint images share the existing `KvmemCheckpointBufferPool` and
++the Program-wide C budget (default 1024 MiB). Each checkpoint carries a move-only
++metadata charge through construction and its final alias; pinned images remain
++charged while live or idle in the pool. MTP's private rewrite rollback image and
++copied metadata use the same account. Required admission consults pool owner
++charges rather than allocating/scanning a directory-based usage estimate. Optional
++LRFU history growth reserves before replacing the snapshot and revokes an
++unaffordable alias instead of publishing stale retrieval state. Metadata charges
++use capacity bounds (including conservative shared attachments), with bounded
++account/control/allocator overhead outside C. This is not an all-process bound.
++
++The existing checkpoint-reclaim path trims idle images and evicts optional older
++owners while retaining the current restore lease. Required quota exhaustion is a
++typed `MemoryError::BudgetExceeded` and follows ordered request-local cleanup;
++optional cache capture may be skipped. The pool caps actual images plus metadata
++charges even for private or unpublished owners that are absent from directories.
++An ephemeral disk read has a fixed reservation inside C and a separate actual
++staging gauge; its worker may finish after cancellation without an early refund.
++
+ ### Accepted-source rebuild ownership
+ 
+ The opt-in KVMem source rebuild enters through `Engine::prepare_source_rebuild`, serialized with Engine units. Program reads its own SourceJournalStore, mints a fresh identity with the existing window allocator and prepares an independently charged immutable source copy. Frontend constructs ordinary linear raw-token rows without rendering a chat template again. Program and SourceJournalStore remain exclusive to the immutable model instance; cross-Program/store receipts fail incarnation validation. This is not a tokenizer/model migration mechanism.
+diff --git a/include/ninfer/engine_options.h b/include/ninfer/engine_options.h
+--- a/include/ninfer/engine_options.h
++++ b/include/ninfer/engine_options.h
+@@ -434,6 +434,9 @@
+     std::uint32_t sink_tokens = 0;
+     std::uint32_t recent_tokens = 64;
+     std::uint64_t host_bytes = 0;      // H; hard bound on archived native payload
++    // Aggregate checkpoint C for this Program, including image pool and owned
++    // metadata. Zero resolves to 1024 MiB when KVMem is enabled; never unlimited.
++    std::uint64_t checkpoint_bytes = 0;
+     // Opt-in native Host-page retirement. First NInfer adapter supports LRU;
+     // the existing working-set retrieval strategy remains independent.
+     bool historical_gc_lru = false;
+diff --git a/include/ninfer/observability/resources.h b/include/ninfer/observability/resources.h
+--- a/include/ninfer/observability/resources.h
++++ b/include/ninfer/observability/resources.h
+@@ -105,7 +105,12 @@
+     std::uint64_t disk_payload_budget_bytes = 0, disk_payload_bytes = 0;
+     std::uint64_t retained_payload_budget_bytes = 0;
+     std::uint64_t disk_read_bytes = 0, disk_written_bytes = 0;
++    // C charge includes construction metadata and the fixed disk-read promise;
++    // actual disk staging is separately observed. This is not process RSS.
+     std::uint64_t statistics_bytes = 0, checkpoint_bytes = 0;
++    std::uint64_t checkpoint_budget_bytes = 0, checkpoint_image_bytes = 0, checkpoint_metadata_bytes = 0;
++    std::uint64_t checkpoint_idle_bytes = 0, checkpoint_peak_bytes = 0, checkpoint_denied = 0;
++    std::uint64_t checkpoint_staging_reserved_bytes = 0, checkpoint_staging_bytes = 0;
+     std::uint64_t transfer_staging_bytes = 0;
+     std::uint64_t statistics_staging_bytes = 0;
+     std::uint32_t mtp_resident_pages = 0;
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -980,9 +980,17 @@
+                 const auto columns = target - pending.base_E;
+                 const auto selectors = state_selectors(sequence);
+                 const auto bytes = state_images->host_layout().image_bytes;
++                const auto& statistics = sequence.window.statistics->config();
++                const auto mean_bytes = pending.base_E % statistics.block_tokens
++                    ? size_t(statistics.n_layer) * (size_t(statistics.n_embd_k) + 1) * sizeof(float) : 0;
++                const auto rollback_metadata = sequence.prefix_identity.allocated_bytes() +
++                    sequence.prefix_digests.image().capacity()*sizeof(std::array<std::uint64_t, 2>) +
++                    mean_bytes + sequence.window.graph.bytes() + sequence.window.feedback.snapshot().bytes();
++                KvmemCheckpointBufferPool::MetadataCharge rollback_charge;
+                 std::shared_ptr<PinnedHostBuffer> original_state;
+                 try {
+-                    checkpoint_memory_room(sequence.window, bytes);
++                    checkpoint_memory_room(sequence.window, bytes + rollback_metadata);
++                    rollback_charge = memory_checkpoint_pool->reserve_metadata(rollback_metadata);
+                     original_state = memory_checkpoint_pool->acquire(bytes);
+                 } catch (const std::exception& error) {
+                     std::fprintf(stderr, "KVMEM_REWRITE capture skipped: %s\n", error.what());
+@@ -1775,9 +1783,22 @@
+             if(committed) {
+                 // Prefixes containing the entire accepted user input may carry its
+                 // logical history even if their native capture preceded prefill completion.
+-                for(const auto kind:checkpoint_kinds(window)) {
+-                    auto& checkpoint=memory_checkpoint_slot(window,kind);
+-                    if(checkpoint && checkpoint->prefix.size()>=input_end) checkpoint->history=history;
++                const auto update = [&](std::shared_ptr<KvmemPrefixCheckpoint>& checkpoint) {
++                    if (!checkpoint || checkpoint->prefix.size() < input_end) return;
++                    try { checkpoint->replace_history(history); }
++                    catch (const kvmem::MemoryError& error) {
++                        if (error.code() != kvmem::MemoryErrorCode::BudgetExceeded) throw;
++                        // The active selector already owns the committed round.
++                        // Revoke this optional stale checkpoint rather than
++                        // publishing old retrieval state or failing generation.
++                        checkpoint.reset();
++                        std::fprintf(stderr, "KVMEM_LRFU checkpoint metadata quota; alias revoked\n");
++                    }
++                };
++                for (auto& record : window.checkpoints) update(record.data);
++                for (auto& entry : window.coverage) if (entry.info.identity) {
++                    update(entry.record.data);
++                    if (!entry.record.data) entry = {};
+                 }
+             }
+             if (kvmem_options.verify_transfers) std::fprintf(stderr,"KVMEM_LRFU round=%llu committed=%d blocks=%zu input_end=%u\n",
+diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
+--- a/src/models/qwen3_5/program/program_impl.cpp
++++ b/src/models/qwen3_5/program/program_impl.cpp
+@@ -508,11 +508,14 @@
+     }
+     if (kvmem_window_tokens) {
+         const auto policy=kvmem::CheckpointPolicy::environment();
+-        if(policy.enabled) {
+-            const auto budget=policy.host_bytes*max_concurrency;
+-            const auto staging=kvmem_options.disk_bytes ? state_images->host_layout().image_bytes : 0;
+-            memory_checkpoint_pool->configure(budget>staging ? budget-staging : 0,1);
+-        }
++        memory_checkpoint_budget = kvmem_options.checkpoint_bytes ? kvmem_options.checkpoint_bytes : 1024ULL << 20;
++        if (policy.enabled)
++            memory_checkpoint_budget = std::min(memory_checkpoint_budget, policy.host_bytes*max_concurrency);
++        memory_checkpoint_staging_reserve = kvmem_options.disk_bytes ? state_images->host_layout().image_bytes : 0;
++        if (memory_checkpoint_staging_reserve > memory_checkpoint_budget)
++            throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded, "checkpoint budget cannot reserve its disk read staging");
++        memory_checkpoint_pool->configure(memory_checkpoint_budget - memory_checkpoint_staging_reserve,
++            policy.enabled ? 1 : 2);
+     }
+     if (kvmem_options.disk_bytes) {
+         const auto page_bytes = text_host_kv_page_stride + backend_host_kv_page_stride;
+@@ -1084,7 +1087,16 @@
+         memory.statistics_staging_bytes =
+             (memory_statistics_host ? memory_statistics_host->size() : 0) +
+             (memory_candidate_host ? memory_candidate_host->size() : 0);
+-        memory.checkpoint_bytes += memory_checkpoint_pool->allocated_bytes();
++        const auto checkpoints = memory_checkpoint_pool->stats();
++        memory.checkpoint_budget_bytes = memory_checkpoint_budget;
++        memory.checkpoint_image_bytes = checkpoints.images;
++        memory.checkpoint_metadata_bytes = checkpoints.metadata;
++        memory.checkpoint_idle_bytes = checkpoints.idle;
++        memory.checkpoint_staging_reserved_bytes = memory_checkpoint_staging_reserve;
++        memory.checkpoint_staging_bytes = memory_state_staging.charged_bytes();
++        memory.checkpoint_bytes = checkpoints.charged + memory_checkpoint_staging_reserve;
++        memory.checkpoint_peak_bytes = checkpoints.peak + memory_checkpoint_staging_reserve;
++        memory.checkpoint_denied = checkpoints.denied;
+         memory.resident_pages = text_kv_pages->physical_pool().allocated_pages();
+         memory.mtp_resident_pages = backend_kv_pages
+             ? backend_kv_pages->physical_pool().allocated_pages() : 0;
+@@ -1101,7 +1113,6 @@
+         memory.disk_payload_budget_bytes = kvmem_options.disk_bytes;
+         memory.retained_payload_budget_bytes = memory_retained_budget;
+         for (const auto& request : requests) memory.active_payload_reservation_bytes += request.memory_payload_reservation;
+-        std::vector<const KvmemPrefixCheckpoint*> seen;
+         const auto collect = [&](const KvmemWindowState& window) {
+             // Moves into the history directory leave scalar fields behind until lane
+             // retirement. Ownership of statistics identifies the live history.
+@@ -1111,15 +1122,14 @@
+             memory.history_swaps += window.swaps;
+             memory.history_spilled_bytes += window.spilled_bytes;
+             memory.history_restored_bytes += window.restored_bytes;
+-            for (const auto kind : checkpoint_kinds(window)) {
+-                if (const auto* checkpoint = memory_checkpoint(window, kind);
+-                    checkpoint && std::find(seen.begin(), seen.end(), checkpoint) == seen.end()) {
+-                    seen.push_back(checkpoint);
+-                    memory.checkpoint_bytes += checkpoint->metadata_bytes();
++            const auto frontier = [&](const KvmemCheckpointRecord& record) {
++                if (const auto* checkpoint = record.data.get()) {
+                     memory.checkpoint_tokens = std::max(memory.checkpoint_tokens,
+                         static_cast<std::uint32_t>(checkpoint->prefix.size()));
+                 }
+-            }
++            };
++            for (const auto& record : window.checkpoints) frontier(record);
++            for (const auto& entry : window.coverage) frontier(entry.record);
+         };
+         for (const auto& sequence : continuation_states) collect(sequence.window);
+         for (const auto& history : memory_histories) {
+@@ -1127,8 +1137,6 @@
+             ++memory.retained_sessions;
+             collect(*history);
+         }
+-        if(memory_coverage_transfer && std::find(seen.begin(),seen.end(),memory_coverage_transfer->checkpoint.get())==seen.end())
+-            memory.checkpoint_bytes+=memory_coverage_transfer->checkpoint->metadata_bytes();
+         memory.host_payload_bytes = memory_payload_storage.charged_bytes();
+         if (historical_auxiliary) {
+             const auto auxiliary = historical_auxiliary->stats();
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -517,6 +517,8 @@
+ // request which produced it has finished, so it is deliberately separate from request lifecycle,
+ // output, sampling, and round-control state.
+ struct KvmemPrefixCheckpoint {
++    // First member: charged until every metadata field below has been destroyed.
++    KvmemCheckpointBufferPool::MetadataCharge metadata_charge;
+     kvmem::LrfuState history;
+     kvmem::GraphSnapshot graph;
+     kvmem::AttentionFeedbackSnapshot feedback;
+@@ -542,6 +544,13 @@
+             mean_tail.capacity()*sizeof(float) + history.scores->capacity()*sizeof(double) + graph.bytes() + feedback.bytes();
+     }
+     std::uint64_t state_bytes() const noexcept { return state ? state->size() : cold_tag ? cold_payload_bytes : cold_state.size(); }
++    void replace_history(kvmem::LrfuState next) {
++        const auto bytes = metadata_bytes() - history.scores->capacity()*sizeof(double) +
++            next.scores->capacity()*sizeof(double);
++        if (bytes > metadata_charge.bytes()) metadata_charge.resize(bytes);
++        history = std::move(next);
++        metadata_charge.resize(bytes);
++    }
+     void read_state(void* destination, size_t bytes) const {
+         if (bytes != state_bytes()) throw std::logic_error("checkpoint state size mismatch");
+         if (cold_tag) kvmem::read_checkpoint_image(cold_state, cold_tag, {{destination, bytes}});
+@@ -1297,6 +1306,7 @@
+     std::unique_ptr<PinnedHostBuffer> memory_statistics_host;
+     std::shared_ptr<KvmemCheckpointBufferPool> memory_checkpoint_pool =
+         std::make_shared<KvmemCheckpointBufferPool>();
++    std::uint64_t memory_checkpoint_budget = 0, memory_checkpoint_staging_reserve = 0;
+     std::unique_ptr<kvmem::PageSoftmaxCuda> memory_query_scorer;
+     std::shared_ptr<kvmem::GraphStatisticsBudget> memory_graph_budget=
+         std::make_shared<kvmem::GraphStatisticsBudget>(256u<<20);
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_buffer_pool.h b/src/models/qwen3_5/program/storage/checkpoint_buffer_pool.h
+--- a/src/models/qwen3_5/program/storage/checkpoint_buffer_pool.h
++++ b/src/models/qwen3_5/program/storage/checkpoint_buffer_pool.h
+@@ -1,28 +1,96 @@
+ #pragma once
+ #include "core/arena.h"
++#include "kvmem/memory_contract.hpp"
++#include <algorithm>
+ #include <memory>
+ #include <mutex>
+ #include <array>
+ #include <limits>
+-#include <stdexcept>
++#include <utility>
+ 
+ namespace ninfer::models::qwen3_5::detail {
+ 
+-// Only released StateImages may enter the cache. Live checkpoints keep exclusive
+-// buffer leases; the pool can outlive Program while a lease is still referenced.
++// The account follows actual owners, including unpublished checkpoints, pinned
++// execution leases and idle images. Directory removal alone never refunds C.
+ class KvmemCheckpointBufferPool : public std::enable_shared_from_this<KvmemCheckpointBufferPool> {
+ public:
++    struct Stats {
++        std::size_t capacity = 0, images = 0, metadata = 0, idle = 0;
++        std::size_t charged = 0, peak = 0;
++        std::uint64_t denied = 0;
++    };
++    class MetadataCharge {
++    public:
++        MetadataCharge() noexcept = default;
++        ~MetadataCharge() { reset(); }
++        MetadataCharge(const MetadataCharge&) = delete;
++        MetadataCharge& operator=(const MetadataCharge&) = delete;
++        MetadataCharge(MetadataCharge&& other) noexcept
++            : pool_(std::move(other.pool_)), bytes_(std::exchange(other.bytes_, 0)) {}
++        MetadataCharge& operator=(MetadataCharge&& other) noexcept {
++            if (this != &other) {
++                reset(); pool_ = std::move(other.pool_); bytes_ = std::exchange(other.bytes_, 0);
++            }
++            return *this;
++        }
++        std::size_t bytes() const noexcept { return bytes_; }
++        void resize(std::size_t bytes) {
++            if (!pool_) throw std::logic_error("checkpoint metadata has no owner account");
++            std::lock_guard lock(pool_->mutex_);
++            if (bytes > bytes_) pool_->require_available_locked(bytes - bytes_);
++            pool_->metadata_ -= bytes_;
++            pool_->metadata_ += bytes;
++            bytes_ = bytes;
++            pool_->observe_peak_locked();
++        }
++    private:
++        friend class KvmemCheckpointBufferPool;
++        MetadataCharge(std::shared_ptr<KvmemCheckpointBufferPool> pool, std::size_t bytes) noexcept
++            : pool_(std::move(pool)), bytes_(bytes) {}
++        void reset() noexcept {
++            if (pool_) {
++                { std::lock_guard lock(pool_->mutex_); pool_->metadata_ -= bytes_; }
++                bytes_ = 0; pool_.reset();
++            }
++        }
++        std::shared_ptr<KvmemCheckpointBufferPool> pool_;
++        std::size_t bytes_ = 0;
++    };
+     void configure(std::size_t limit, std::size_t idle_count) {
+         std::lock_guard lock(mutex_);
++        if (allocated_ > limit || metadata_ > limit - allocated_)
++            throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,
++                "checkpoint budget is below its current owners");
+         limit_ = limit; idle_count_ = std::min(idle_count, idle_.size());
++    }
++    bool can_accommodate(std::size_t bytes) const {
++        std::lock_guard lock(mutex_); return fits_locked(bytes);
++    }
++    void require_available(std::size_t bytes) {
++        std::lock_guard lock(mutex_); require_available_locked(bytes);
++    }
++    MetadataCharge reserve_metadata(std::size_t bytes) {
++        auto pool = shared_from_this();
++        std::lock_guard lock(mutex_);
++        require_available_locked(bytes);
++        metadata_ += bytes; observe_peak_locked();
++        return MetadataCharge(std::move(pool), bytes);
+     }
+     void trim() {
+         std::lock_guard lock(mutex_);
+-        for (auto& idle : idle_) if (idle) { allocated_ -= idle->size(); idle.reset(); }
++        for (auto& idle : idle_) if (idle) {
++            const auto bytes = idle->size(); idle.reset(); allocated_ -= bytes;
++        }
+     }
+-    std::size_t allocated_bytes() const {
+-        std::lock_guard lock(mutex_); return allocated_;
++    Stats stats() const {
++        std::lock_guard lock(mutex_);
++        Stats result{limit_, allocated_, metadata_};
++        for (const auto& idle : idle_) if (idle) result.idle += idle->size();
++        result.charged = allocated_ + metadata_; result.peak = peak_; result.denied = denied_;
++        return result;
+     }
++    std::size_t allocated_bytes() const { return stats().images; }
++    std::size_t idle_bytes() const { return stats().idle; }
+     std::shared_ptr<PinnedHostBuffer> acquire(std::size_t bytes) {
+         auto pool = shared_from_this();
+         std::unique_ptr<PinnedHostBuffer> buffer;
+@@ -31,13 +99,11 @@
+             for (auto& idle : idle_) if (idle && idle->size() == bytes) {
+                 buffer = std::move(idle); break;
+             }
+-        }
+-        if (!buffer) {
+-            std::lock_guard lock(mutex_);
+-            if (allocated_ > limit_ || bytes > limit_ - allocated_)
+-                throw std::runtime_error("checkpoint pinned Host budget exhausted");
+-            buffer = std::make_unique<PinnedHostBuffer>(bytes);
+-            allocated_ += bytes;
++            if (!buffer) {
++                require_available_locked(bytes);
++                buffer = std::make_unique<PinnedHostBuffer>(bytes);
++                allocated_ += bytes; observe_peak_locked();
++            }
+         }
+         return {buffer.release(), [pool = std::move(pool)](PinnedHostBuffer* value) noexcept {
+             std::unique_ptr<PinnedHostBuffer> released(value);
+@@ -46,21 +112,27 @@
+                 for (std::size_t i=0; i<pool->idle_count_; ++i) if (!pool->idle_[i]) {
+                     pool->idle_[i] = std::move(released); break;
+                 }
+-                if (released) pool->allocated_ -= released->size();
++                if (released) {
++                    const auto bytes = released->size(); released.reset(); pool->allocated_ -= bytes;
++                }
+             } catch (...) {} // Releasing a checkpoint must remain noexcept.
+         }};
+     }
+-    std::size_t idle_bytes() const {
+-        std::lock_guard lock(mutex_);
+-        std::size_t bytes = 0;
+-        for (const auto& idle : idle_) if (idle) bytes += idle->size();
+-        return bytes;
++private:
++    bool fits_locked(std::size_t bytes) const noexcept {
++        return allocated_ <= limit_ && metadata_ <= limit_ - allocated_ &&
++            bytes <= limit_ - allocated_ - metadata_;
+     }
+-private:
++    void observe_peak_locked() noexcept { peak_ = std::max(peak_, allocated_ + metadata_); }
++    void require_available_locked(std::size_t bytes) {
++        if (fits_locked(bytes)) return;
++        if (denied_ != UINT64_MAX) ++denied_;
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded, "checkpoint owner budget exhausted");
++    }
+     mutable std::mutex mutex_;
+-    std::size_t allocated_ = 0, limit_ = std::numeric_limits<std::size_t>::max(), idle_count_ = 2;
+-    // A restored anchor can release both its input and endpoint snapshots.
+-    // Keep that pair; live snapshots can never enter these slots.
++    std::size_t allocated_ = 0, metadata_ = 0, peak_ = 0;
++    std::size_t limit_ = std::numeric_limits<std::size_t>::max(), idle_count_ = 2;
++    std::uint64_t denied_ = 0;
+     std::array<std::unique_ptr<PinnedHostBuffer>, 2> idle_;
+ };
+ } // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1129,15 +1129,9 @@
+ }
+ 
+ void ProgramImpl::checkpoint_memory_room(KvmemWindowState& window,size_t bytes,bool optional) {
+-    const auto& policy=window.coverage.policy();
+-    if(!policy.enabled) return;
+-    const auto budget=policy.host_bytes*max_concurrency;
+-    // Reserve the single bounded worker read buffer even before it starts.
+-    const auto staging=kvmem_options.disk_bytes ? state_images->host_layout().image_bytes : 0;
+-    const auto fits=[&] {
+-        const auto used=memory_summary().kvmem.checkpoint_bytes+staging;
+-        return used<=budget && bytes<=budget-used;
+-    };
++    // The existing pool is the authority, including owners no longer in a
++    // directory. Its limit already excludes the shared disk-read reservation.
++    const auto fits=[&] { return memory_checkpoint_pool->can_accommodate(bytes); };
+     if(fits()) return;
+     memory_checkpoint_pool->trim();
+     if(!optional) {
+@@ -1188,11 +1182,15 @@
+                     memory_histories[i]->stamp.session.id!=restoring && (!victim ||
+                     memory_histories[i]->publication_order<memory_histories[*victim]->publication_order)) victim=i;
+             if(!victim) break;
++            const auto evicted_domain = memory_histories[*victim]->stamp.session.id;
+             memory_histories[*victim].reset(); ++memory_history_evictions;
+             memory_checkpoint_pool->trim();
+-        }
+-    }
+-    if(!fits()) throw std::runtime_error("checkpoint Host budget exhausted");
++            if (kvmem_options.verify_transfers)
++                std::fprintf(stderr, "KVMEM_CHECKPOINT_EVICT domain=%llu charged_bytes=%zu\n",
++                    (unsigned long long)evicted_domain, memory_checkpoint_pool->stats().charged);
++        }
++    }
++    if(!fits()) memory_checkpoint_pool->require_available(bytes);
+ }
+ 
+ bool ProgramImpl::skip_memory_coverage(const SequenceState& sequence) const {
+@@ -1281,7 +1279,9 @@
+     // Copying then truncating identity retains its full allocation. Admit that
+     // capacity, all attachments and the native image before constructing them.
+     checkpoint_memory_room(sequence.window,(optional ? 2*bytes : bytes)+metadata,optional);
++    auto metadata_charge = memory_checkpoint_pool->reserve_metadata(metadata);
+     auto checkpoint = std::make_unique<KvmemPrefixCheckpoint>();
++    checkpoint->metadata_charge = std::move(metadata_charge);
+     checkpoint->identity = std::move(identity);
+     checkpoint->prefix.assign(sequence.ledger.begin(), sequence.ledger.begin() + frontier);
+     checkpoint->prefix_identity = sequence.prefix_identity;
+@@ -1296,6 +1296,7 @@
+     for (auto id : window.pages) if (id < pages) checkpoint->resident_pages.push_back(id);
+     if (checkpoint->metadata_bytes() > metadata)
+         throw std::logic_error("checkpoint metadata exceeded admission");
++    checkpoint->metadata_charge.resize(checkpoint->metadata_bytes());
+     checkpoint->state = memory_checkpoint_pool->acquire(bytes);
+     std::memset(checkpoint->state->data(), 0, bytes);
+     archive_memory_window(sequence);
+@@ -1306,14 +1307,9 @@
+     if (kvmem_options.verify_transfers) {
+         std::fprintf(stderr, "KVMEM_PREFIX_CHECKPOINT frontier=%u state_bytes=%zu metadata_bytes=%llu admitted_metadata_bytes=%zu\n",
+             frontier, bytes, (unsigned long long)checkpoint->metadata_bytes(), metadata);
+-        if (window.coverage.policy().enabled) {
+-            const auto staging = kvmem_options.disk_bytes ? bytes : 0;
+-            // The image is already in the pool; its unpublished metadata is not
+-            // yet reachable through the retained/active checkpoint directories.
+-            const auto charged = memory_summary().kvmem.checkpoint_bytes + checkpoint->metadata_bytes() + staging;
+-            std::fprintf(stderr, "KVMEM_CHECKPOINT_HOST charged_bytes=%llu budget_bytes=%llu\n",
+-                (unsigned long long)charged, (unsigned long long)(window.coverage.policy().host_bytes*max_concurrency));
+-        }
++        const auto charged = memory_checkpoint_pool->stats().charged + memory_checkpoint_staging_reserve;
++        std::fprintf(stderr, "KVMEM_CHECKPOINT_HOST charged_bytes=%llu budget_bytes=%llu\n",
++            (unsigned long long)charged, (unsigned long long)memory_checkpoint_budget);
+     }
+     return checkpoint;
+ }
+diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
+--- a/src/runtime/engine/model_instance.cpp
++++ b/src/runtime/engine/model_instance.cpp
+@@ -321,7 +321,7 @@
+     if ((options.kvmem.lrfu || options.kvmem.score_agg_max || options.kvmem.query_meanq_cosine || options.kvmem.graph_alpha != 0.2) && !options.kvmem.selected_tokens)
+         throw std::invalid_argument("KVMem retrieval options require selected_tokens");
+     if (!options.kvmem.selected_tokens &&
+-        (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers || options.kvmem.source_bytes ||
++        (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.checkpoint_bytes || options.kvmem.verify_transfers || options.kvmem.source_bytes ||
+          options.kvmem.historical_gc_enabled() ||
+          !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes)) {
+         throw std::invalid_argument("KVMem auxiliary budgets require selected_tokens");
+@@ -347,6 +347,7 @@
+         (options.speculative.backend != SpeculativeBackend::None && options.speculative.backend != SpeculativeBackend::Mtp)))
+         throw std::invalid_argument("NInfer source recording currently requires single-GPU RAM, one lane and none/MTP");
+     if (options.kvmem.selected_tokens != 0) {
++        if (!options.kvmem.checkpoint_bytes) options.kvmem.checkpoint_bytes = 1024ULL << 20;
+         if (options.expert_residency != ExpertResidency::Device) {
+             throw std::invalid_argument("KVMem does not support host/disk routed expert residency");
+         }
+diff --git a/src/serve/kvmem_status_json.h b/src/serve/kvmem_status_json.h
+--- a/src/serve/kvmem_status_json.h
++++ b/src/serve/kvmem_status_json.h
+@@ -22,6 +22,11 @@
+         {"retained_payload_budget_bytes", m.retained_payload_budget_bytes},
+         {"disk_read_bytes", m.disk_read_bytes}, {"disk_written_bytes", m.disk_written_bytes},
+         {"checkpoint_bytes", m.checkpoint_bytes}, {"evaluated_tokens", m.evaluated_tokens},
++        {"checkpoint_budget_bytes", m.checkpoint_budget_bytes}, {"checkpoint_image_bytes", m.checkpoint_image_bytes},
++        {"checkpoint_metadata_bytes", m.checkpoint_metadata_bytes}, {"checkpoint_idle_bytes", m.checkpoint_idle_bytes},
++        {"checkpoint_peak_bytes", m.checkpoint_peak_bytes}, {"checkpoint_denied", m.checkpoint_denied},
++        {"checkpoint_staging_reserved_bytes", m.checkpoint_staging_reserved_bytes},
++        {"checkpoint_staging_bytes", m.checkpoint_staging_bytes},
+         {"transfer_staging_bytes", m.transfer_staging_bytes},
+         {"statistics_staging_bytes", m.statistics_staging_bytes},
+         {"mtp_resident_pages", m.mtp_resident_pages},
+diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
+--- a/src/serve/serve_options.cpp
++++ b/src/serve/serve_options.cpp
+@@ -107,6 +107,7 @@
+            "  --kvmem-query-max-tokens N  cap per-token Query capture to its tail (default 512)\n"
+             "  --kvmem-gen-reserve N         positive append workspace R (default 1024), rounded down to 64\n"
+            "  --kvmem-host-mib N            positive Host native KV payload budget H, MiB (default 16384)\n"
++             "  --kvmem-checkpoint-mib N      positive aggregate checkpoint budget C, MiB (default 1024)\n"
+            "  --kvmem-gc-lru               retire cold sealed Host pages between decode rounds (default off)\n"
+            "  --kvmem-gc-redundancy        retire similar sealed Host pages, then capacity fallback (experimental)\n"
+            "  --kvmem-gc-aux-mib N         positive shared GC metadata/features budget, MiB (default 1024)\n"
+@@ -746,12 +747,13 @@
+             options.kvmem.historical_gc_aux_bytes = mib << 20;
+             continue;
+         }
+-        if (arg == "--kvmem-source-mib" || arg == "--kvmem-recovery-mib") {
++        if (arg == "--kvmem-source-mib" || arg == "--kvmem-recovery-mib" || arg == "--kvmem-checkpoint-mib") {
+             const auto mib = parse_u64(require_value(arg.c_str()), arg.c_str()+2);
+             if (!mib || mib > UINT64_MAX / (1ULL << 20))
+                 throw std::invalid_argument(arg + " must be positive and fit bytes");
+             if (arg == "--kvmem-source-mib") options.kvmem.source_bytes = mib << 20;
+-            else options.kvmem.recovery_bytes = mib << 20;
++            else if (arg == "--kvmem-recovery-mib") options.kvmem.recovery_bytes = mib << 20;
++            else options.kvmem.checkpoint_bytes = mib << 20;
+             continue;
+         }
+         if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
+@@ -1975,6 +1977,7 @@
+         throw std::invalid_argument("--sleep-idle-seconds requires --model-suspend");
+     }
+     if (options.kvmem.selected_tokens) {
++        if (!options.kvmem.checkpoint_bytes) options.kvmem.checkpoint_bytes = 1024ULL << 20;
+         if (options.speculative.lookup_ngram != 0) {
+             throw std::invalid_argument(
+                 "KVMem disables legacy --lookup-ngram; use --ngram-draft-tokens and --ngram-min-match");
+@@ -2049,7 +2052,7 @@
+         // --no-prefix-reuse still controls request reuse. Only the native catalog
+         // is disabled here; KVMem owns the current session's trusted checkpoint.
+         options.context_cache.enabled = false;
+-    } else if (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers || options.kvmem.source_bytes ||
++    } else if (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.checkpoint_bytes || options.kvmem.verify_transfers || options.kvmem.source_bytes ||
+          options.kvmem.historical_gc_enabled() ||
+          !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes) {
+         throw std::invalid_argument("KVMem auxiliary options require --kvmem-budget");
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -68,3 +68,18 @@
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_forget_real.cpp"
+   LIBRARIES ninfer_engine kvmem ninfer::json)
+ set_tests_properties(ninfer_engine_source_forget_real_test PROPERTIES SKIP_RETURN_CODE 77)
++
++ninfer_add_test(ninfer_checkpoint_budget_contract_test STANDALONE
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../models/qwen3_5/test_checkpoint_budget_contract.cpp"
++  LIBRARIES ninfer_core ninfer_model_runtime kvmem)
++ninfer_add_test(ninfer_engine_checkpoint_budget_real_test STANDALONE
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_budget_real.cpp"
++  LIBRARIES ninfer_engine kvmem ninfer::json)
++set_tests_properties(ninfer_engine_checkpoint_budget_real_test PROPERTIES SKIP_RETURN_CODE 77)
++if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND UNIX)
++  ninfer_add_test(ninfer_checkpoint_budget_sanitizer_test STANDALONE
++    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../models/qwen3_5/test_checkpoint_budget_contract.cpp"
++    LIBRARIES ninfer_core ninfer_model_runtime kvmem)
++  target_compile_options(ninfer_checkpoint_budget_sanitizer_test PRIVATE -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
++  target_link_options(ninfer_checkpoint_budget_sanitizer_test PRIVATE -fsanitize=address,undefined)
++endif()
+diff --git a/tests/models/qwen3_5/test_checkpoint_budget_contract.cpp b/tests/models/qwen3_5/test_checkpoint_budget_contract.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/models/qwen3_5/test_checkpoint_budget_contract.cpp
+@@ -0,0 +1,105 @@
++#include "models/qwen3_5/program/program_impl.h"
++#include <cstdlib>
++#include <cstdio>
++#include <limits>
++#include <new>
++#include <stdexcept>
++
++namespace {
++thread_local std::size_t fail_at = SIZE_MAX, allocations = 0;
++void fail_allocation() {
++    if (fail_at != SIZE_MAX && allocations++ == fail_at) {
++        fail_at = SIZE_MAX; throw std::bad_alloc();
++    }
++}
++}
++void* operator new(std::size_t bytes) {
++    fail_allocation();
++    if (auto* p = std::malloc(bytes ? bytes : 1)) return p;
++    throw std::bad_alloc();
++}
++void* operator new[](std::size_t bytes) { return ::operator new(bytes); }
++void operator delete(void* p) noexcept { std::free(p); }
++void operator delete[](void* p) noexcept { std::free(p); }
++void operator delete(void* p, std::size_t) noexcept { std::free(p); }
++void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
++
++#define CHECK(x) do { if (!(x)) throw std::runtime_error(#x); } while (false)
++using namespace ninfer::models::qwen3_5::detail;
++template<class F> void quota(F action) {
++    try { action(); }
++    catch (const kvmem::MemoryError& error) {
++        CHECK(error.code() == kvmem::MemoryErrorCode::BudgetExceeded); return;
++    }
++    throw std::runtime_error("checkpoint quota unexpectedly accepted");
++}
++void shared_quota_and_moves() {
++    auto pool = std::make_shared<KvmemCheckpointBufferPool>(); pool->configure(4096, 0);
++    auto first = pool->reserve_metadata(3072), other = pool->reserve_metadata(1024);
++    CHECK(pool->stats().charged == 4096 && !pool->can_accommodate(1));
++    quota([&] { (void)pool->reserve_metadata(1); });
++    quota([&] { first.resize(3073); });
++    CHECK(first.bytes() == 3072 && pool->stats().charged == 4096);
++    quota([&] { pool->configure(4095, 0); });
++    CHECK(pool->stats().capacity == 4096);
++    other = std::move(first);
++    CHECK(first.bytes() == 0 && other.bytes() == 3072 && pool->stats().charged == 3072);
++    other.resize(1024);
++    CHECK(pool->stats().charged == 1024 && pool->stats().peak == 4096 && pool->stats().denied == 2);
++    other = {};
++    CHECK(pool->stats().charged == 0);
++    pool->configure(SIZE_MAX, 0);
++    auto huge = pool->reserve_metadata(SIZE_MAX - 1);
++    quota([&] { (void)pool->reserve_metadata(2); });
++    CHECK(huge.bytes() == SIZE_MAX - 1);
++}
++void detached_alias_and_metadata_growth() {
++    auto pool = std::make_shared<KvmemCheckpointBufferPool>();
++    auto checkpoint = std::make_shared<KvmemPrefixCheckpoint>();
++    const auto base = checkpoint->metadata_bytes();
++    pool->configure(base + 8*sizeof(double), 0);
++    checkpoint->metadata_charge = pool->reserve_metadata(base);
++    checkpoint->replace_history({std::make_shared<const std::vector<double>>(4), 1, true});
++    CHECK(pool->stats().metadata == checkpoint->metadata_bytes());
++    auto old = checkpoint->history;
++    quota([&] { checkpoint->replace_history({std::make_shared<const std::vector<double>>(9), 2, true}); });
++    CHECK(checkpoint->history.scores == old.scores && checkpoint->history.round == 1);
++    auto alias = checkpoint;
++    const auto charged = pool->stats().charged;
++    checkpoint.reset();
++    CHECK(pool->stats().charged == charged); // directory removal cannot refund a live restore alias
++    alias.reset();
++    CHECK(pool->stats().charged == 0);
++    auto lifetime = pool->reserve_metadata(16);
++    std::weak_ptr<KvmemCheckpointBufferPool> weak = pool;
++    pool.reset(); CHECK(!weak.expired());
++    lifetime = {}; CHECK(weak.expired());
++}
++void real_allocation_failures() {
++    std::size_t faults = 0;
++    bool completed = false;
++    for (std::size_t failure = 0; failure < 32; ++failure) {
++        auto pool = std::make_shared<KvmemCheckpointBufferPool>(); pool->configure(16384, 0);
++        fail_at = failure; allocations = 0;
++        bool failed = false;
++        try {
++            auto charge = pool->reserve_metadata(8192);
++            auto checkpoint = std::make_shared<KvmemPrefixCheckpoint>();
++            checkpoint->metadata_charge = std::move(charge);
++            checkpoint->prefix.assign(32, 7);
++            checkpoint->metadata_charge.resize(checkpoint->metadata_bytes());
++        } catch (const std::bad_alloc&) { failed = true; }
++        fail_at = SIZE_MAX;
++        CHECK(pool->stats().charged == 0 && pool->stats().peak <= pool->stats().capacity);
++        if (failed) ++faults;
++        else { completed = true; break; }
++    }
++    CHECK(completed && faults >= 3);
++    std::printf("checkpoint metadata allocation failures checked: %zu\n", faults);
++}
++int main() {
++    shared_quota_and_moves();
++    detached_alias_and_metadata_growth();
++    real_allocation_failures();
++    std::puts("checkpoint owner budget contracts passed (CPU metadata; no CUDA execution)");
++}
+diff --git a/tests/models/qwen3_5/test_checkpoint_buffer_pool.cpp b/tests/models/qwen3_5/test_checkpoint_buffer_pool.cpp
+--- a/tests/models/qwen3_5/test_checkpoint_buffer_pool.cpp
++++ b/tests/models/qwen3_5/test_checkpoint_buffer_pool.cpp
+@@ -92,5 +92,21 @@
+     CHECK(bounded->allocated_bytes()==4096 && bounded->idle_bytes()==4096);
+     bounded->trim();
+     CHECK(bounded->allocated_bytes()==0);
++    auto combined = std::make_shared<KvmemCheckpointBufferPool>();
++    combined->configure(8192, 1);
++    auto metadata = combined->reserve_metadata(1024);
++    auto image = combined->acquire(4096), image_alias = image;
++    rejected = false;
++    try { (void)combined->acquire(4096); }
++    catch (const kvmem::MemoryError& error) { rejected = error.code() == kvmem::MemoryErrorCode::BudgetExceeded; }
++    CHECK(rejected && combined->stats().charged == 5120);
++    image.reset(); combined->trim();
++    CHECK(combined->stats().images == 4096 && combined->stats().charged == 5120);
++    image_alias.reset();
++    CHECK(combined->stats().idle == 4096 && combined->stats().charged == 5120);
++    combined->trim();
++    CHECK(combined->stats().images == 0 && combined->stats().charged == 1024);
++    metadata = {};
++    CHECK(combined->stats().charged == 0 && combined->stats().peak <= 8192);
+     return 0;
+ }
+diff --git a/tests/test_engine_checkpoint_budget_real.cpp b/tests/test_engine_checkpoint_budget_real.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/test_engine_checkpoint_budget_real.cpp
+@@ -0,0 +1,123 @@
++#include "ninfer/engine.h"
++#include "kvmem/memory_contract.hpp"
++#include <nlohmann/json.hpp>
++#include <algorithm>
++#include <cstdlib>
++#include <iostream>
++#include <stdexcept>
++
++namespace {
++void require(bool condition, const char* message) {
++    if (!condition) throw std::runtime_error(message);
++}
++ninfer::EngineOptions options(const char* artifact, bool mtp, bool redundancy, std::uint64_t budget) {
++    ninfer::EngineOptions result;
++    result.artifact_path = artifact;
++    result.max_context = 65536;
++    result.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(2560);
++    result.prefill_chunk = 512;
++    result.max_concurrency = 1;
++    result.max_pending_requests = 4;
++    result.device_profile = "off";
++    result.context_cache.enabled = false;
++    result.kv_cache = ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
++    auto& memory = result.kvmem;
++    memory.selected_tokens = 2048; memory.reserve_tokens = 512;
++    memory.host_bytes = 96ULL << 20; memory.checkpoint_bytes = budget;
++    memory.source_bytes = 16ULL << 20; memory.recovery_bytes = 8192;
++    memory.retained_sessions = 8;
++    memory.query_meanq_cosine = memory.score_agg_max = true;
++    memory.graph_alpha = 0;
++    memory.historical_gc_lru = !redundancy; memory.historical_gc_redundancy = redundancy;
++    memory.verify_transfers = true;
++    if (mtp) { result.speculative.backend = ninfer::SpeculativeBackend::Mtp; result.speculative.draft_tokens = 4; }
++    return result;
++}
++ninfer::RequestOptions request(bool reuse = true) {
++    ninfer::RequestOptions result;
++    result.execution.requested_output_tokens = 8;
++    result.execution.allow_prefix_reuse = reuse;
++    result.execution.sampling.temperature = 0;
++    result.execution.sampling.seed = 42;
++    result.execution.thinking.loop = ninfer::ReasoningLoopAction::Off;
++    result.stop.include_model_defaults = false;
++    result.output.raw = result.output.preserve_special_tokens = true;
++    return result;
++}
++void bound(const ninfer::KvmemMemorySummary& memory, std::uint64_t budget) {
++    require(memory.checkpoint_budget_bytes == budget && memory.checkpoint_bytes <= budget &&
++        memory.checkpoint_peak_bytes <= budget, "checkpoint owners exceeded the aggregate C budget");
++    require(memory.checkpoint_bytes == memory.checkpoint_image_bytes + memory.checkpoint_metadata_bytes +
++        memory.checkpoint_staging_reserved_bytes, "checkpoint charge does not reconcile");
++    require(memory.checkpoint_idle_bytes <= memory.checkpoint_image_bytes &&
++        memory.checkpoint_staging_bytes <= memory.checkpoint_staging_reserved_bytes, "checkpoint components disagree");
++}
++int run() {
++    const char* artifact = std::getenv("NINFER_CHECKPOINT_BUDGET_ARTIFACT");
++    if (!artifact || !*artifact) return 77;
++    const bool mtp = std::getenv("NINFER_CHECKPOINT_BUDGET_MTP") != nullptr;
++    const bool redundancy = std::getenv("NINFER_CHECKPOINT_BUDGET_REDUNDANCY") != nullptr;
++    nlohmann::json report{{"mtp", mtp}, {"redundancy", redundancy}};
++    {
++        ninfer::Engine engine(options(artifact, mtp, redundancy, 1ULL << 20));
++        const auto encoded = engine.tokenize_text(" Memory"); require(!encoded.empty(), "fixture token empty");
++        const std::vector<ninfer::TokenId> ids(1024, encoded.front());
++        bool quota = false;
++        try { (void)engine.generate(engine.prepare_tokens(ids, true, true), request()); }
++        catch (const ninfer::RequestError& error) { quota = error.kind() == ninfer::RequestErrorKind::Unavailable; }
++        require(quota && engine.is_available(), "mandatory checkpoint quota failure was not request-local");
++        auto failed = engine.memory_summary().kvmem; bound(failed, 1ULL << 20);
++        require(failed.checkpoint_denied > 0 && failed.checkpoint_image_bytes == 0 && failed.checkpoint_metadata_bytes == 0 &&
++            failed.retained_sessions == 0 && failed.resident_pages == 0 && failed.mtp_resident_pages == 0,
++            "failed checkpoint capture leaked a partial native owner");
++        const auto fresh = engine.generate(engine.prepare_tokens(ids, false), request(false));
++        require(fresh.generated_token_ids.size() == 8 && engine.is_available(), "no-cache followup failed after quota refusal");
++        bound(engine.memory_summary().kvmem, 1ULL << 20);
++        report["mandatory_quota_refused"] = true; report["followup_after_refusal"] = true;
++        report["small_quota_denied"] = failed.checkpoint_denied;
++    }
++    {
++        constexpr std::uint64_t budget = 384ULL << 20;
++        ninfer::Engine engine(options(artifact, mtp, redundancy, budget));
++        const auto encoded = engine.tokenize_text(" Memory"); require(!encoded.empty(), "fixture token empty");
++        const std::vector<ninfer::TokenId> original_ids(1024, encoded.front());
++        std::vector<ninfer::TokenId> expected;
++        ninfer::HistoricalSourceRef source;
++        for (int turn = 0; turn < 8; ++turn) {
++            auto ids = original_ids;
++            if (turn) {
++                const auto changed = engine.tokenize_text(std::string(1, char('a'+turn)));
++                require(!changed.empty() && changed.front() != encoded.front(), "fixture prefixes are not distinct");
++                ids.front() = changed.front();
++            }
++            const auto result = engine.generate(engine.prepare_tokens(std::move(ids), true, true), request());
++            require(result.generated_token_ids.size() == 8 && result.accepted_source, "bounded checkpoint generation failed");
++            require(!mtp || result.speculative.rounds > 0, "MTP pressure used only ordinary fallback");
++            if (!turn) { source = *result.accepted_source; expected = result.generated_token_ids; }
++            bound(engine.memory_summary().kvmem, budget);
++        }
++        const auto records = engine.historical_sources();
++        require(std::any_of(records.begin(), records.end(), [&](const auto& r) {
++            return r.ref == source && r.retained_native_domains == 0;
++        }), "checkpoint pressure did not actually evict the old native domain");
++        require(engine.memory_summary().kvmem.history_evictions > 0, "bounded C did not reclaim old domains");
++        const auto rebuilt = engine.generate(engine.prepare_source_rebuild(source, 1024, 32), request());
++        require(rebuilt.reused_prompt_tokens == 0 && rebuilt.computed_prompt_tokens == 1024 &&
++            rebuilt.generated_token_ids == expected, "source-only rebuild changed under checkpoint pressure");
++        require(!mtp || rebuilt.speculative.rounds > 0, "MTP rebuild ran no speculative round");
++        const auto memory = engine.memory_summary().kvmem; bound(memory, budget);
++        require(memory.recovery_bytes == 0 && engine.is_available(), "bounded checkpoint recovery did not settle");
++        report.update({{"budget_bytes", budget}, {"charged_bytes", memory.checkpoint_bytes},
++            {"peak_bytes", memory.checkpoint_peak_bytes}, {"image_bytes", memory.checkpoint_image_bytes},
++            {"metadata_bytes", memory.checkpoint_metadata_bytes}, {"idle_bytes", memory.checkpoint_idle_bytes},
++            {"history_evictions", memory.history_evictions}, {"rebuild_speculative_rounds", rebuilt.speculative.rounds},
++            {"output_ids", rebuilt.generated_token_ids}, {"status", "passed"}});
++    }
++    std::cout << report.dump() << std::endl;
++    return 0;
++}
++}
++int main() {
++    try { return run(); }
++    catch (const std::exception& error) { std::cerr << "CHECKPOINT_BUDGET_FATAL: " << error.what() << std::endl; return 1; }
++}
+diff --git a/tests/test_engine_source_forget_real.cpp b/tests/test_engine_source_forget_real.cpp
+--- a/tests/test_engine_source_forget_real.cpp
++++ b/tests/test_engine_source_forget_real.cpp
+@@ -61,6 +61,8 @@
+     options.kvmem.selected_tokens = 2048;
+     options.kvmem.reserve_tokens = 512;
+     options.kvmem.host_bytes = 96ULL << 20;
++    // Five simultaneously retained domains are the precondition of this test.
++    options.kvmem.checkpoint_bytes = 2048ULL << 20;
+     options.kvmem.source_bytes = 16ULL << 20;
+     options.kvmem.recovery_bytes = 8192;
+     options.kvmem.retained_sessions = 8;
+diff --git a/tests/test_engine_source_recovery_real.cpp b/tests/test_engine_source_recovery_real.cpp
+--- a/tests/test_engine_source_recovery_real.cpp
++++ b/tests/test_engine_source_recovery_real.cpp
+@@ -59,6 +59,9 @@
+     options.kvmem.selected_tokens = 2048;
+     options.kvmem.reserve_tokens = 512;
+     options.kvmem.host_bytes = 96ULL << 20;
++    // This regression intentionally retains several checkpoint domains. Its C
++    // is explicit; separate pressure tests qualify the bounded default.
++    options.kvmem.checkpoint_bytes = 2048ULL << 20;
+     options.kvmem.source_bytes = 16ULL << 20;
+     options.kvmem.recovery_bytes = 8192;
+     options.kvmem.query_meanq_cosine = options.kvmem.score_agg_max = true;
+diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
+--- a/tests/test_serve_options.cpp
++++ b/tests/test_serve_options.cpp
+@@ -161,6 +161,25 @@
+         "--kvmem-budget", "384", "--kvmem-gen-reserve", "128", "--kvmem-host-mib", "16384"};
+     const auto kvmem = parse(memory_args);
+     const auto kvmem_engine = make_engine_options(kvmem);
++    {
++        failures += check(kvmem_engine.kvmem.checkpoint_bytes == (1024ULL << 20),
++                          "KVMem default checkpoint budget is not bounded");
++        auto args = memory_args; args.insert(args.end(), {"--kvmem-checkpoint-mib", "768"});
++        failures += check(make_engine_options(parse(args)).kvmem.checkpoint_bytes == (768ULL << 20),
++                          "explicit aggregate checkpoint budget was lost");
++        for (const auto& suffix : std::vector<std::vector<std::string>>{
++            {"--kvmem-checkpoint-mib", "0"}, {"--kvmem-checkpoint-mib", "18446744073709551615"},
++            {"--kvmem-checkpoint-mib"}}) {
++            auto bad = memory_args; bad.insert(bad.end(), suffix.begin(), suffix.end());
++            bool rejected = false;
++            try { (void)parse(bad); } catch (const std::invalid_argument&) { rejected = true; }
++            failures += check(rejected, "invalid checkpoint quota accepted");
++        }
++        bool rejected = false;
++        try { (void)parse({"ninfer-serve", "model.ninfer", "--kvmem-checkpoint-mib", "1"}); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        failures += check(rejected, "checkpoint quota accepted without KVMem");
++    }
+     {
+         auto args = memory_args;
+         args.insert(args.end(), {"--kvmem-source-mib", "1"});

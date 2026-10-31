@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "5570676d1e0145b413116877b96b0034f3762644",
+    "patched_tree": "ca0ce1b40686185f1020f8be9910ae523d2871d9",
     "patches": [
       {
         "id": "kvmem",
@@ -350,6 +350,16 @@
         ],
         "after_tree": "5570676d1e0145b413116877b96b0034f3762644",
         "source": "Quiescent Engine-local source-family forget revokes retained native checkpoint aliases and prepared rebuild admission without refunding still-owned staging"
+      },
+      {
+        "id": "checkpoint-budget",
+        "path": "backends/patches/ninfer-checkpoint-budget.patch",
+        "sha256": "df6e97806b8249d9e0a84c9b683ef7fbd78fb49972a87aa97d64a866e55397e4",
+        "requires": [
+          "source-forget"
+        ],
+        "after_tree": "ca0ce1b40686185f1020f8be9910ae523d2871d9",
+        "source": "Bound existing checkpoint images and metadata by actual owner lifetime, include unpublished and rollback captures, and handle quota failures locally"
       }
     ]
   },
