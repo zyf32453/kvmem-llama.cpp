@@ -87,6 +87,10 @@ public:
     std::optional<SourceState> inspect(size_t slot) const;
     void read_tokens(SourceRef, uint64_t begin, int32_t * out, size_t count) const;
     SourceEvent event(SourceRef, uint64_t index) const;
+    // Bounded, allocation-free preflight for an owner's alias revocation.
+    // Validates the ancestor's current revision; member identity deliberately
+    // ignores its revision so older derived bindings cannot evade the fence.
+    bool family_contains(SourceRef ancestor, SessionIdentity member) const;
     // Explicitly forget this record and branches in THIS store. Backend KV,
     // persisted archives and external aliases must be fenced by their owner;
     // this primitive alone is not the system-wide ForgetSource operation.

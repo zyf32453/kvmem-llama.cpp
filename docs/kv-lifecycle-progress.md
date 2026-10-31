@@ -8,15 +8,17 @@
   服务验收发现并修复了生成中辅助额度不足会使整个 Engine 故障的真实缺陷。第 26 补丁区分有效 sequence 的有序 abort 和已消费 membership 的结清，保留等待 FIFO。当前版本 20 项主机契约、5 项原生测试、两环境各 6 项协议测试通过；真实模型 8 项活动/排队停止、2 项生成中额度不足、12 次 M=10 MiB 独立会话轮换全部通过。之前的四组强压力回收、非流式拒绝/后续恢复、断连与中间二进制 48 次轮换按各自版本保留，不混记。见 [服务故障及完整结果](kv-lifecycle-service-failures.md)。
 
   这里完成的是冻结的单 GPU、单运行请求、文本/RAM 档位的机制和有界 GC 自有资源；M/H 不是整个进程或 checkpoint 的上界。新测试实际观察到冷域/checkpoint 带来的 RSS 增长，完整 checkpoint/源记录预算继续由 C/E 处理。长时间、固定工作量性能、先前偶发 CUDA 和 Agent 质量属于后续门槛，完整生产系统尚未完成。
-- **C 恢复与版本闭环：实现中，未完成。** C1 独立 RAM SourceJournalStore、真实配额、分配失败原子性、revision/分支/局部遗忘 fence 已完成组件验证，见 [C1](kv-lifecycle-source-journal.md)。C2 已接入 NInfer：实际 frontend 模板/配置及消息来源、接纳输入与最终提交输出、独立 `--kvmem-source-mib` 和用量，以及取消/失败清理。最终二进制通过 21 项主机契约、7 项原生检查、4 组真实内容记录、2 组源额度耗尽/FIFO 和 4 组取消边界检查，见 [C2 完整说明](kv-lifecycle-native-source.md)。源记录默认关闭、当前按请求保留（含预热/失败输入），没有源过期/公开遗忘或去重。
+- **C 恢复与版本闭环：实现中，未完成。** C1 独立 RAM SourceJournalStore、真实配额、分配失败原子性、revision/分支/局部遗忘 fence 已完成组件验证，见 [C1](kv-lifecycle-source-journal.md)。C2 已接入 NInfer：实际 frontend 模板/配置及消息来源、接纳输入与最终提交输出、独立 `--kvmem-source-mib` 和用量，以及取消/失败清理。最终二进制通过 21 项主机契约、7 项原生检查、4 组真实内容记录、2 组源额度耗尽/FIFO 和 4 组取消边界检查，见 [C2 完整说明](kv-lifecycle-native-source.md)。源记录默认关闭、当前按请求保留（含预热/失败输入）；当时没有公开遗忘，后续 C4 已补进程内家族接口，仍无自动过期/去重。
 
   C3 的规范前缀新域重建已接入 NInfer：独立 R 真实配额、正常 Program 模型资源预约、新鲜域身份、逐单元源版本校验、取消不保留半成品、请求级源回执和父分支关系。最终候选通过 9 项原生检查、Linux 三项 ASan/UBSan/泄漏检查；22 项主机契约在确认核心源码未变后复用其覆盖。LRU／redundancy × 普通解码／MTP4 四组真实模型全部通过：重建前缀内 CPU 页确实释放后，规范重建与独立原始 IDs 输出一致；旧 native window 被换出后仍可仅从源重建。另覆盖实际部分取消、准备额度耗尽、准入 reserve 拒绝和首 token 停止。详见 [C3 组件](kv-lifecycle-source-recovery.md) 和 [原生重建及不利结果](kv-lifecycle-native-recovery.md)。
 
   这次只支持完整前缀可装入窗口的显式 raw-token 新域重建，不是旧稀疏/recurrent 轨迹的精确恢复，也没有 HTTP 或持久化接口。R 副本之外的 prepared-input 与源分支另占请求工作区/S；仍无全进程内存上界或性能结论。超长源稀疏重放、checkpoint/归档 fence、完整发布/回滚故障、持久化及系统级遗忘仍待完成，阶段 C 不关闭。
+
+  C4 已接通显式进程内源家族遗忘：空闲 Engine 下统一撤销原生 KV/checkpoint/coverage 别名，再删除源与子孙；旧准备对象在准入失效，R 随真实 owner 退出退款，忙碌或 stale 不部分修改，无关源保留。最新候选 9 项原生检查、四组真实模型均通过；22 项主机契约及 3 项核心 sanitizer 结果在确认源码未变后复用。本批同时暴露了测试输入超过 H 会提前逐出目标域，修正前置负载且保留失败。更重要的是 checkpoint 在遗忘后仍约 0.92 GB，H 不覆盖它；下一步优先收紧 checkpoint 总预算。详见 [C4 完整说明及代价](kv-lifecycle-native-forget.md)。这个接口不覆盖持久化、其他 Engine 或调用方 transcript，也不承诺安全擦除。
 - **D 任务感知保留：未完成。** 仍需结构化任务事件、有限锚点、衰减价值策略及质量比较；已有角色/thinking/冗余能力保留为基础。
 - **E 分层与多会话：未完成。** 已有 HostKvStorage/SpillFile 等组件不等于 GC+SSD/并发组合已验收。
 - **F 完整生产及研究验收：未完成。** 仍需新版本 GPU/Agent、长时间多次回收/恢复、资源边界及性能验收。
 
-下一步接通 checkpoint/归档/版本/退休 fence，检查缺页、前缀分歧和恢复失败，补长源重放及持久恢复。只有验证旧快照不能复活退休身份并完成其余版本闭环条件，才关闭 C。四组短功能检查不代替 F 的配对性能、长时间与 Agent 质量验收。
+下一步优先补现有 checkpoint owner/pool 的完整预算与额度失败行为，再接持久化 checkpoint/归档/版本/退休和遗忘 fence，检查缺页、前缀分歧和恢复失败，补长源重放及持久恢复。只有验证旧快照不能复活退休身份并完成其余版本闭环条件，才关闭 C。短功能检查不代替 F 的配对性能、长时间与 Agent 质量验收。
 
 用户“暂不修改主机调试设置”和“DeepSWE 暂缓”的约束继续有效。当前无需用户补充信息即可推进下一项。

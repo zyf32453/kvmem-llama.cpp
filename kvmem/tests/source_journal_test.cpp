@@ -139,6 +139,35 @@ void real_capacity_and_independent_limits() {
     rejects(MemoryErrorCode::BudgetExceeded, [&] { small.append(ref, tokens.data(), 2, nullptr, 0, 0); });
     CHECK(small.state(ref).accepted_frontier == 1 && small.state(ref).events == 1);
 }
+void owner_family_preflight() {
+    SourceJournalStore store(limits());
+    const int32_t token = 17;
+    auto root = store.capture(configuration(), &token, 1, nullptr, 0, 0);
+    auto child = store.branch(root, 1);
+    auto grandchild = store.branch(child, 1);
+    auto other = store.capture(configuration(), &token, 1, nullptr, 0, 0);
+    const auto old_child = child;
+    child = store.append(child, &token, 1, nullptr, 0, 1);
+    const auto before = store.stats();
+    // Native windows may still carry an older revision of the same source.
+    // Membership and a valid ancestor must require no heap preparation.
+    allocation_failure = 0; allocation_count = 0;
+    const bool self = store.family_contains(root, root.source);
+    const bool direct = store.family_contains(root, old_child.source);
+    const bool deep = store.family_contains(root, grandchild.source);
+    const bool unrelated = store.family_contains(root, other.source);
+    const bool foreign = store.family_contains(root, {root.source.id, root.source.incarnation + 1});
+    allocation_failure = SIZE_MAX;
+    CHECK(self && direct && deep && !unrelated && !foreign);
+    CHECK(store.stats().charged == before.charged && store.stats().sources == before.sources);
+    rejects(MemoryErrorCode::Stale, [&] { store.family_contains(old_child, grandchild.source); });
+    CHECK(store.forget(child) == 2);
+    CHECK(!store.family_contains(root, old_child.source));
+    CHECK(store.family_contains(root, root.source) && !store.family_contains(root, other.source));
+    const auto reused = store.capture(configuration(), &token, 1, nullptr, 0, 0);
+    CHECK(!store.family_contains(root, reused.source));
+    CHECK(store.forget(root) == 1 && store.state(other).ref == other && store.state(reused).ref == reused);
+}
 void allocation_failure_atomicity() {
     size_t total_failures = 0;
     for (int operation = 0; operation < 3; ++operation) {
@@ -214,6 +243,7 @@ int main() {
     reject_rewrites_without_partial_publication();
     branch_and_forget_fence();
     real_capacity_and_independent_limits();
+    owner_family_preflight();
     allocation_failure_atomicity();
     source_survives_actual_page_retirement();
     std::puts("source journal contracts passed; no native recovery integration claimed");

@@ -240,6 +240,18 @@ SourceRef SourceJournalStore::branch(SourceRef expected, uint64_t prefix) {
     *destination = std::move(prepared);
     return destination->state.ref;
 }
+bool SourceJournalStore::family_contains(SourceRef ancestor, SessionIdentity member) const {
+    find(ancestor);
+    for (size_t depth = 0; depth < limits_.max_sources && member.id; ++depth) {
+        if (member == ancestor.source) return true;
+        const Entry * entry = nullptr;
+        for (size_t i = 0; i < limits_.max_sources; ++i)
+            if (entries_[i].state.ref.source == member) { entry = &entries_[i]; break; }
+        if (!entry) return false;
+        member = entry->state.parent.source;
+    }
+    return false;
+}
 size_t SourceJournalStore::forget(SourceRef expected) {
     find(expected).forgetting = true;
     bool changed = true;

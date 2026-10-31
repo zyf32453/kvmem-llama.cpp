@@ -1,0 +1,587 @@
+{
+  "date": "2026-10-31",
+  "stage": "C4_Engine_local_source_family_forget",
+  "status": "frozen_RAM_scope_functionally_qualified",
+  "full_goal_complete": false,
+  "stage_C_complete": false,
+  "production_qualified": false,
+  "based_on_commit": "4856b294e4aaafa50dec2afa23a266f4c8f851af",
+  "primary_backend": "ninfer",
+  "native_patched_tree": "5570676d1e0145b413116877b96b0034f3762644",
+  "native_patch_count": 29,
+  "candidate_manifest": {
+    "path": "docs/contracts/kv-lifecycle-native-forget-candidate-v1.json",
+    "sha256": "5db740e96c57a7015c69d1d9b85d435c0b83068f0ee510dc6f38225c44efc87e",
+    "pinned_source_files": 106
+  },
+  "changes": [
+    "Engine::forget_historical_source returns typed counts; queue/execution owner boundary requires no outstanding requests including unconsumed handles.",
+    "Allocation-free bounded SourceJournalStore.family_contains validates current ancestor revision but follows member identity across older binding revisions; no parallel catalog or tombstone registry.",
+    "Program preflights native ownership and empty window replacements, then revokes retained native KV/checkpoint/coverage aliases before deleting the explicit source family.",
+    "No active device continuation is released behind ResourceManager; busy/stale refusal does not mutate the source family.",
+    "Existing prepared rebuilds fail source validation during normal admission before execution, retain R until actual destruction, and do not fail the whole Engine.",
+    "Unrelated sources survive; last-source gauges are cleared when their family is forgotten; new caller-supplied IDs create a new identity without old checkpoint reuse.",
+    "Ordinary memory-pressure GC does not call forget; S exhaustion still refuses capture/append rather than silently discarding recovery sources."
+  ],
+  "checks": {
+    "source": {
+      "status": "passed",
+      "count": 106,
+      "report_sha256": "7df3d718c0382d61d2cc2ca967fe6045b51676435569d03133309c1bcf7a841f"
+    },
+    "windows_host": {
+      "status": "passed_reused_identical_core",
+      "count": 22,
+      "original_native_tree": "7ef0bd9356312b9047151b86f09ae4d6280e5e15",
+      "report_sha256": "d3a5d725f3ddd800b20f0d24ec9ba67845d4223cba0447eaa4afde0e9a904795",
+      "original_manifest_sha256": "c8eeb41a85f1fea1237b4381d8399a1afbf4a98eea38940c3211306c88f5e980",
+      "compiler": "MinGW GCC 16.2",
+      "build_type": "Debug",
+      "results": [
+        {
+          "name": "checkpoint_policy_test",
+          "seconds": 0.52166
+        },
+        {
+          "name": "checkpoint_image_test",
+          "seconds": 0.588896
+        },
+        {
+          "name": "historical_gc_ninfer_core_test",
+          "seconds": 0.818936
+        },
+        {
+          "name": "historical_kv_boundary_mailbox_test",
+          "seconds": 15.9032
+        },
+        {
+          "name": "historical_kv_commit_conditions_test",
+          "seconds": 0.983966
+        },
+        {
+          "name": "historical_kv_range_lock_test",
+          "seconds": 0.680609
+        },
+        {
+          "name": "historical_kv_witness_lifecycle_test",
+          "seconds": 0.826616
+        },
+        {
+          "name": "historical_kv_score_evidence_test",
+          "seconds": 0.739347
+        },
+        {
+          "name": "historical_kv_auxiliary_budget_test",
+          "seconds": 0.934576
+        },
+        {
+          "name": "historical_kv_owner_budget_test",
+          "seconds": 0.837765
+        },
+        {
+          "name": "historical_kv_service_health_test",
+          "seconds": 0.607285
+        },
+        {
+          "name": "memory_contract_test",
+          "seconds": 0.97653
+        },
+        {
+          "name": "source_journal_test",
+          "seconds": 0.964044
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.95401
+        },
+        {
+          "name": "native_kv_payload_test",
+          "seconds": 0.763206
+        },
+        {
+          "name": "host_kv_storage_test",
+          "seconds": 0.52626
+        },
+        {
+          "name": "spill_io_test",
+          "seconds": 0.574182
+        },
+        {
+          "name": "tiered_kv_storage_test",
+          "seconds": 0.829034
+        },
+        {
+          "name": "native_residency_test",
+          "seconds": 0.608177
+        },
+        {
+          "name": "kv_content_test",
+          "seconds": 0.655383
+        },
+        {
+          "name": "prefix_checkpoint_test",
+          "seconds": 0.533124
+        },
+        {
+          "name": "mean_key_retrieval_test",
+          "seconds": 0.789465
+        }
+      ],
+      "reuse_reason": "Only native standalone fixture inputs/diagnostics and their patch metadata changed after host pass; all frozen core and host-test sources/contract set identical. Workload metadata inherited from C3 was corrected; original host report/manifest retained."
+    },
+    "native": {
+      "status": "passed",
+      "count": 9,
+      "results": [
+        {
+          "name": "ninfer_cli_options_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_serve_options_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_kv_capacity_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_context_cache_defaults_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_unique_strings_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_qwen3_5_frontend_test",
+          "exit": 0
+        },
+        {
+          "name": "source_journal_test",
+          "exit": 0
+        },
+        {
+          "name": "source_recovery_test",
+          "exit": 0
+        },
+        {
+          "name": "public_include_boundaries",
+          "exit": 0
+        }
+      ],
+      "binaries_sha256": {
+        "build-native/apps/ninfer-serve": "b699b8d6c57eb17123339392eeeed83d57f288b7d05f2ee4abed1563141f3494",
+        "build-native/tests/ninfer_memory_policy_tests": "2202b4c7787080940a804a5d0158da36ba363cd088ef8182189738dc9faf15d8",
+        "build-native/tests/ninfer_engine_source_recovery_real_test": "368566be36766ef2289be92103d69e976cec4081b2a759b910fec47cdd34f517",
+        "build-native/tests/ninfer_engine_source_forget_real_test": "e8107c2703820f6c8cad23f4f2e3990ca1f6feef46461238fdc1f60d6ec3d0d2"
+      },
+      "compiler": "GCC 13.3",
+      "cuda": "13.2",
+      "architecture": "sm_86",
+      "python": "3.11.18",
+      "build_type": "Release",
+      "build_parallelism": "-j"
+    },
+    "linux_core_sanitizers": {
+      "status": "passed_reused_identical_core",
+      "count": 3,
+      "original_native_tree": "7ef0bd9356312b9047151b86f09ae4d6280e5e15",
+      "tests": [
+        {
+          "name": "memory_contract_test",
+          "classname": "memory_contract_test",
+          "time": "0.349398",
+          "status": "run"
+        },
+        {
+          "name": "source_journal_test",
+          "classname": "source_journal_test",
+          "time": "0.0549051",
+          "status": "run"
+        },
+        {
+          "name": "source_recovery_test",
+          "classname": "source_recovery_test",
+          "time": "0.0597802",
+          "status": "run"
+        }
+      ],
+      "linked_libraries": [
+        "libasan.so.8",
+        "libubsan.so.1"
+      ],
+      "sanitizers": [
+        "ASan",
+        "UBSan",
+        "LeakSanitizer"
+      ],
+      "compiler": "GCC 13.3",
+      "build_type": "Debug",
+      "binary_sha256": {
+        "source_recovery_test": "e140fc71ca6a8fd2b8de625b421d279fa0ed4eca57dde07d7c7a3cf0bae49971",
+        "source_journal_test": "19b787a23fc0ed8d64a3dfc97f9e02f45f70299f95d01c8d35c9b7a286595536",
+        "memory_contract_test": "b046a530e092ab5a04b910841149357a73723321620c0aaf48eb355333b8e819"
+      },
+      "scope": "Core host tests only, unchanged byte for byte; no TSan/GPU sanitizer claim"
+    },
+    "real_model": {
+      "status": "passed",
+      "count": 4,
+      "model": {
+        "name": "Qwen3.8-27B-GSQ-RCO-IQ3_S NInfer v3",
+        "bytes": 15017456896,
+        "sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+        "remote_path": "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+        "hash_observation": {
+          "date": "2026-10-31",
+          "host": "yifan@100.118.87.22",
+          "file_unchanged_during_hash": true
+        }
+      },
+      "image_id": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "binary_sha256": "e8107c2703820f6c8cad23f4f2e3990ca1f6feef46461238fdc1f60d6ec3d0d2",
+      "driver_python": "3.10.12",
+      "gpu": "RTX 3080 Ti Laptop 16 GiB",
+      "driver": "596.08",
+      "options": {
+        "B_tokens": 2048,
+        "generation_reserve_tokens": 512,
+        "H_mib": 96,
+        "S_mib": 16,
+        "R_bytes": 8192,
+        "prefill_chunk": 512,
+        "original_input_tokens": 1024,
+        "branch_prefix_tokens": 1024,
+        "unrelated_input_tokens": 512,
+        "busy_input_tokens": 768,
+        "retained_sessions": 8,
+        "context": 65536,
+        "page_tokens": 64,
+        "kv_dtype": "rk4v4",
+        "query": "meanq_cosine_max",
+        "graph_alpha": 0,
+        "lrfu": false,
+        "seed": 42,
+        "temperature": 0,
+        "model_stop_defaults": false,
+        "reason_loop": "off",
+        "output_tokens": 8,
+        "context_cache": false,
+        "sink_requested_tokens": 0,
+        "effective_sink_pages": 1,
+        "recent_tokens": 64
+      },
+      "cases": [
+        {
+          "config": "lru-none",
+          "passed": true,
+          "terminal_state": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-31T01:01:37.391507088Z",
+            "FinishedAt": "2026-10-31T01:01:51.359950703Z"
+          },
+          "result": {
+            "busy_partial_prefill": true,
+            "checkpoint_bytes_after": 924051868,
+            "checkpoint_bytes_before": 1540397678,
+            "discarded_native_domains": 3,
+            "final_staging_bytes": 0,
+            "forgotten_sources": 3,
+            "fresh_reused_tokens": 0,
+            "fresh_source_id": 6,
+            "fresh_speculative_rounds": 0,
+            "host_bytes_after": 25231360,
+            "host_bytes_before": 83722240,
+            "mtp": false,
+            "output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "redundancy": false,
+            "revoked_staging_bytes": 8192,
+            "source_bytes_after": 53760,
+            "source_bytes_before": 79104,
+            "sources_after": 2,
+            "sources_before": 5,
+            "status": "passed"
+          },
+          "forget_receipts": [
+            [
+              "1",
+              "3",
+              "3"
+            ],
+            [
+              "5",
+              "1",
+              "1"
+            ]
+          ]
+        },
+        {
+          "config": "lru-mtp4",
+          "passed": true,
+          "terminal_state": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-31T01:01:52.352710896Z",
+            "FinishedAt": "2026-10-31T01:02:06.887020237Z"
+          },
+          "result": {
+            "busy_partial_prefill": true,
+            "checkpoint_bytes_after": 924062132,
+            "checkpoint_bytes_before": 1540423338,
+            "discarded_native_domains": 3,
+            "final_staging_bytes": 0,
+            "forgotten_sources": 3,
+            "fresh_reused_tokens": 0,
+            "fresh_source_id": 6,
+            "fresh_speculative_rounds": 2,
+            "host_bytes_after": 26808320,
+            "host_bytes_before": 88954880,
+            "mtp": true,
+            "output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "redundancy": false,
+            "revoked_staging_bytes": 8192,
+            "source_bytes_after": 53760,
+            "source_bytes_before": 79104,
+            "sources_after": 2,
+            "sources_before": 5,
+            "status": "passed"
+          },
+          "forget_receipts": [
+            [
+              "1",
+              "3",
+              "3"
+            ],
+            [
+              "5",
+              "1",
+              "1"
+            ]
+          ]
+        },
+        {
+          "config": "redundancy-none",
+          "passed": true,
+          "terminal_state": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-31T01:02:07.434148667Z",
+            "FinishedAt": "2026-10-31T01:02:22.109714362Z"
+          },
+          "result": {
+            "busy_partial_prefill": true,
+            "checkpoint_bytes_after": 924051868,
+            "checkpoint_bytes_before": 1540397678,
+            "discarded_native_domains": 3,
+            "final_staging_bytes": 0,
+            "forgotten_sources": 3,
+            "fresh_reused_tokens": 0,
+            "fresh_source_id": 6,
+            "fresh_speculative_rounds": 0,
+            "host_bytes_after": 25231360,
+            "host_bytes_before": 83722240,
+            "mtp": false,
+            "output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "redundancy": true,
+            "revoked_staging_bytes": 8192,
+            "source_bytes_after": 53760,
+            "source_bytes_before": 79104,
+            "sources_after": 2,
+            "sources_before": 5,
+            "status": "passed"
+          },
+          "forget_receipts": [
+            [
+              "1",
+              "3",
+              "3"
+            ],
+            [
+              "5",
+              "1",
+              "1"
+            ]
+          ]
+        },
+        {
+          "config": "redundancy-mtp4",
+          "passed": true,
+          "terminal_state": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-31T01:02:22.804651914Z",
+            "FinishedAt": "2026-10-31T01:02:37.84907768Z"
+          },
+          "result": {
+            "busy_partial_prefill": true,
+            "checkpoint_bytes_after": 924062132,
+            "checkpoint_bytes_before": 1540423338,
+            "discarded_native_domains": 3,
+            "final_staging_bytes": 0,
+            "forgotten_sources": 3,
+            "fresh_reused_tokens": 0,
+            "fresh_source_id": 6,
+            "fresh_speculative_rounds": 2,
+            "host_bytes_after": 26808320,
+            "host_bytes_before": 88954880,
+            "mtp": true,
+            "output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "redundancy": true,
+            "revoked_staging_bytes": 8192,
+            "source_bytes_after": 53760,
+            "source_bytes_before": 79104,
+            "sources_after": 2,
+            "sources_before": 5,
+            "status": "passed"
+          },
+          "forget_receipts": [
+            [
+              "1",
+              "3",
+              "3"
+            ],
+            [
+              "5",
+              "1",
+              "1"
+            ]
+          ]
+        }
+      ]
+    }
+  },
+  "unfavorable_findings": [
+    {
+      "kind": "fixture_capacity_failure",
+      "native_tree": "7ef0bd9356312b9047151b86f09ae4d6280e5e15",
+      "status": "preserved_exit_1_not_OOM",
+      "detail": "Initial 2048-token root and 1536-token busy input exceeded existing H across five domains; normal admission evicted the root before forget. Failed before source-family commit, not accepted as a pass.",
+      "disposition": "Reduced root to1024 and busy input to768 within the SAME96MiB H. Kept all five-domain coexistence, three-source/three-native-domain revocation, stale/busy/independent-source and R-lifetime assertions. Forget/eviction implementation unchanged."
+    },
+    {
+      "kind": "checkpoint_memory_still_outside_H",
+      "none_before_bytes": 1540397678,
+      "none_after_bytes": 924051868,
+      "mtp_before_bytes": 1540423338,
+      "mtp_after_bytes": 924062132,
+      "detail": "Checkpoint observations include valid remaining domains and idle pool buffers; not RSS. H only bounds historical KV payload. Full checkpoint byte budget is an outstanding requirement and next priority before durable archive expansion."
+    },
+    {
+      "kind": "retained_preparation_cost",
+      "detail": "Revoked caller-held preparations still occupy8192bytes R until rejected/destroyed; caller-returned IDs/transcript cannot be securely erased by this API."
+    }
+  ],
+  "verification_limits": [
+    "Process-local explicit source family only, quiescent RAM Engine; no HTTP/CLI control, persisted archive, cross-Engine/global external forget or same-text independent-request erasure.",
+    "Short repeated-token functional fixture with8 greedy outputs; no throughput, latency, whole-process memory, long duration or new Agent-quality claim.",
+    "C3 physical-GC/rebuild results stay with their own prior binary; not counted as a fresh four-cohort stress test on this binary.",
+    "Earlier occasional CUDA and TSan environment limitations remain; no host debugger/settings changes. DeepSWE remains deferred."
+  ],
+  "next_work": [
+    "Bound existing checkpoint owners/pool and metadata with real budget and quota failure behavior, then durable checkpoint/source archive fences.",
+    "Long/sparse replay, corruption/model-change/OOM and restore publication/rollback qualification; stage C incomplete.",
+    "Task value/expiry, tier and multisession resources, long-duration paired performance and quality; stages D-F incomplete."
+  ],
+  "evidence": {
+    "local_directory": "artifacts/lifecycle-stage-c-native-forget",
+    "remote_directory": "/tmp/kvmem-lifecycle-native-forget-qualified-20261031-inrddnnn",
+    "final_archive_sha256": "1bd528f86d49becb4051b59ed7bdb68dcfc2f5adb28d9fe6933ec13f062943e3",
+    "initial_capacity_archive_sha256": "06cd7368c5881b887ff72eed2e78e6c8fcf839bd0529dd6a08c5c986e9c07843",
+    "terminal_hardware": {
+      "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB, 371 MiB",
+      "compute_apps": ""
+    },
+    "terminal_containers": {
+      "kvmem-native-forget-inrddnnn": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-31T01:00:24.731805864Z",
+        "FinishedAt": "2026-10-31T01:00:47.395602341Z"
+      }
+    },
+    "cleanup": {
+      "removed_stopped_owned_containers": [
+        "kvmem-native-forget-inrddnnn"
+      ],
+      "gpu_containers_removed_by_driver": true
+    },
+    "core_source_reuse_changes": [
+      "backends/ninfer/tests/test_engine_source_forget_real.cpp",
+      "backends/versions.json",
+      "backends/patches/ninfer-source-forget.patch"
+    ]
+  }
+}
