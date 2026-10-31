@@ -1,0 +1,179 @@
+{
+  "date": "2026-11-01",
+  "stage": "C11f_CPU_source_native_publication_candidate",
+  "status": "Windows_CPU_publication_protocol_passed_Linux_authority_Engine_GPU_pending",
+  "source_contract": "docs/contracts/kv-lifecycle-checkpoint-import-candidate-v1.json",
+  "native": {
+    "base_tree": "8a119b930a87c8aed5b76cdc206d493c8a6cb50c",
+    "patched_tree": "97c2a094c3c6c450167ed9b15ae710bb04335541",
+    "patch": "backends/patches/ninfer-checkpoint-import.patch",
+    "patch_sha256": "0fe80355fe8eb28f42ffbe883f021a224afde452ead1e69c443f31b9996c4b56",
+    "native_files": [
+      "include/ninfer/engine.h",
+      "src/models/qwen3_5/program/program.cpp",
+      "src/models/qwen3_5/program/program.h",
+      "src/models/qwen3_5/program/program_impl.h",
+      "src/models/qwen3_5/program/storage/checkpoint_publish.cpp",
+      "src/models/qwen3_5/program/storage/checkpoint_publish.h",
+      "src/models/qwen3_5/program/storage/checkpoint_read.h",
+      "src/models/qwen3_5/program/storage/historical_checkpoint.cpp",
+      "src/models/qwen3_5/program_sources.cmake",
+      "src/runtime/engine/engine.cpp",
+      "src/runtime/engine/engine_core.h",
+      "tests/cmake/RuntimeTests.cmake",
+      "tests/test_checkpoint_window.cpp",
+      "tests/test_engine_checkpoint_import_real.cpp"
+    ],
+    "patch_count": 38,
+    "replay_passed": true,
+    "component_qualified": "Windows CPU publication protocol; Linux archive authority and full Engine/GPU pending",
+    "native_adapter_build_qualified": false,
+    "gpu_qualified": false,
+    "native_publication_implemented": true
+  },
+  "core_changes": [
+    "kvmem/include/kvmem/source_archive.hpp",
+    "kvmem/include/kvmem/source_journal.hpp",
+    "kvmem/src/host/source_archive.cpp",
+    "kvmem/src/host/source_journal.cpp",
+    "kvmem/tests/source_archive_test.cpp"
+  ],
+  "toolchain": {
+    "os": "Windows x64",
+    "compiler": "MinGW GNU16.2.0",
+    "language": "C++20",
+    "nvtx": {
+      "repository": "https://github.com/NVIDIA/NVTX",
+      "tag": "v3.4.0",
+      "commit": "60147cb506070b6af9ac8f2ca6a09ae034fb8d5d",
+      "use": "headers for Windows standalone actual native types; no host install or GPU qualification",
+      "files": {
+        "c/include/nvtx3/nvToolsExt.h": "2513b9e9795bffab986f6347d6d2f52eeccdba27a94ea51c7002338c7a0a9b08",
+        "c/include/nvtx3/nvToolsExtCounters.h": "380625542dd7741a9a2dffc09ca1439fbd9a396d0d78445a2111eb7249b65ba3",
+        "c/include/nvtx3/nvToolsExtCuda.h": "0e3132efda6dafae646dc6003390f621513d9015d5367345fd22e0ba78fd84a3",
+        "c/include/nvtx3/nvToolsExtCudaRt.h": "f0a1dfcb3190ec652f0991bdcc40089bef5af788bb38d69e8f8aa99a3d6b5383",
+        "c/include/nvtx3/nvToolsExtMem.h": "2ccd39b905b191aa5492675edcdac2f8734f20d7cda5c1782bea8edee9fa6e7c",
+        "c/include/nvtx3/nvToolsExtMemCudaRt.h": "5a42921d1ed44df3862694131f2300f686f76beadeda266a8b2fe33e6e7c5f6a",
+        "c/include/nvtx3/nvToolsExtOpenCL.h": "c8208283d11493c8955562980d73a596837596dc5e9d9973736a82fcdfea99ca",
+        "c/include/nvtx3/nvToolsExtPayload.h": "34d6cce01a4be9405a41f6f90405d20df1966e879624e1cc8cf17fa6a5e0c1be",
+        "c/include/nvtx3/nvToolsExtPayloadHelper.h": "41fcb25c559177eb057416175ea194d53203862a5581e8f23b514101c28a8c1e",
+        "c/include/nvtx3/nvToolsExtSemanticsCorrelation.h": "fc333f5c72e0d011b2f87b45b3887fe1742d19df840f3898aead4f5919d173a5",
+        "c/include/nvtx3/nvToolsExtSemanticsCounters.h": "6ec5f9071aad33c72995aad81bb509a08cb065a028f6aba319c7fd172f14ddaa",
+        "c/include/nvtx3/nvToolsExtSemanticsScope.h": "e655d08854d59e04a351960b7e70d185683dc99ef352633bb7d70721f8ded519",
+        "c/include/nvtx3/nvToolsExtSemanticsTime.h": "00954019c1d0c6986b9e8a220d3606ef7102ff443768266fc9059e5433efe2ed",
+        "c/include/nvtx3/nvToolsExtSync.h": "4453a3f1e380faa4c6ad480c7b09317d124f25ccfe203ca34df99f6cf48d4268",
+        "c/include/nvtx3/nvtxDetail/nvtxExtHelperMacros.h": "5fc474979d84137a5feeece9cee2c4734fb85167ae5c9950c363c58662f8f1ac",
+        "c/include/nvtx3/nvtxDetail/nvtxExtImpl.h": "7c167277bdba598bb48fc62267e35cb13fab9996f6b8a9ed17f0bd90394f8256",
+        "c/include/nvtx3/nvtxDetail/nvtxExtImplCounters_v1.h": "fe78e36a391fa8a3344fa39355e479bc24f4ed46d7caac6eee7a37341448cf59",
+        "c/include/nvtx3/nvtxDetail/nvtxExtImplMem_v1.h": "7ec0b3f942b6747eb69b1085afdf29fb81843b2a79627413ea8157c9a56069fa",
+        "c/include/nvtx3/nvtxDetail/nvtxExtImplMemCudaRt_v1.h": "19e16ef51bf668afbd415f0431b212bd770b140987039244d6be9fb016e6de46",
+        "c/include/nvtx3/nvtxDetail/nvtxExtImplPayload_v1.h": "4695f2de2bcfc0a89a11c5c7f9af9a47d02c18ad27e0cb65d0ad9b4afb4ab593",
+        "c/include/nvtx3/nvtxDetail/nvtxExtInit.h": "6ebcda2332dd3852eba6cbf5542b538d89260025ed198b9c31f6bd07361d6100",
+        "c/include/nvtx3/nvtxDetail/nvtxExtPayloadHelperInternal.h": "97b48671fdf2f0b1d90457ebf88d4c717b07b69d6da205957032dd9083940687",
+        "c/include/nvtx3/nvtxDetail/nvtxExtPayloadTypeInfo.h": "c0254f0e4d9d0ab2a623b1a804694ad4537c48c0818fb0215a483c3f731b7a10",
+        "c/include/nvtx3/nvtxDetail/nvtxExtTypes.h": "f427cb555233e0c05198e6899dbd3a7956e63a9bebd7b819de6b964083472f1a",
+        "c/include/nvtx3/nvtxDetail/nvtxImpl.h": "84a528a24e1c44cb867635571eaaa2b500b6f1645eaa72430ea571011c59d44b",
+        "c/include/nvtx3/nvtxDetail/nvtxImplCore.h": "706bf278f339e8664a737b6c648b459f6e48f46a5c8b170914a7d5b656436de0",
+        "c/include/nvtx3/nvtxDetail/nvtxImplCuda_v3.h": "96ace12bf3fea25fe66ca3adaaea731674a8659837f6c32452f2a7e18a0f0060",
+        "c/include/nvtx3/nvtxDetail/nvtxImplCudaRt_v3.h": "c8c665ec225f04d1a92661dbb8d99931f8415cda86c1e13503c4e18b57ca5e00",
+        "c/include/nvtx3/nvtxDetail/nvtxImplOpenCL_v3.h": "066161a2938797d4612fd22dd74c1a09e61f3a6eefbe91715cea85a9a60237d1",
+        "c/include/nvtx3/nvtxDetail/nvtxImplSync_v3.h": "7b6de5c487d6927181129265b78a08c60969d7eafcedb21e97381652ca07dc07",
+        "c/include/nvtx3/nvtxDetail/nvtxInit.h": "3c39cb41108ec94b5366576d4fe762c16790ba2b5ad39e95023a577dc916f59a",
+        "c/include/nvtx3/nvtxDetail/nvtxInitDecls.h": "edb6fea752ca9025520daaead402fa7fdcf7a280654cbcba32e4e6411c6fccf6",
+        "c/include/nvtx3/nvtxDetail/nvtxInitDefs.h": "94c947f0615b16e3c452bad6a2185eaec2de0ec37147a3e1ee1f415149c01503",
+        "c/include/nvtx3/nvtxDetail/nvtxLinkOnce.h": "af77fd20d6e7ba46e909e5a7817316c8cabc32c34da384336e8ff823068b286b",
+        "c/include/nvtx3/nvtxDetail/nvtxTypes.h": "9a605cba6f9e28ca1991aea88b9ffe25b10b848ac0ae0467d95e2f13644d119b",
+        "LICENSE.txt": "c3b19baa37cf18bac07b65700824acadcfa617316f02af10d3852ed20f4f6ab8"
+      }
+    }
+  },
+  "tests": [
+    {
+      "name": "native_checkpoint_input_test",
+      "seconds": 1.29344,
+      "output": "all 6568 truncation boundaries and malformed dependency references rejected\nactual private decode allocation failures=12; C/H refunded\nlogical state C admission=9601 ordinary-heap peak=8201; owned state survives wire release\nactual typed-state allocation failures=79; C/M refunded, no source/native publication\nactual M upstream failures=7; exact M quota=344 and one-byte-short refusal checked\nlogical state C admission=8377 ordinary-heap peak=7217; owned state survives wire release\nnative private checkpoint input: exact byte/state metadata, strict closure, bounded storage; PASS (CPU only, no Engine publication)\n",
+      "evidence": "windows-r1-junit.xml"
+    },
+    {
+      "name": "source_journal_test",
+      "seconds": 1.05337,
+      "output": "source allocation failures checked: 12\nsource journal contracts passed; no native recovery integration claimed\n",
+      "evidence": "windows-r1-junit.xml"
+    },
+    {
+      "name": "source_image_test",
+      "seconds": 0.912956,
+      "output": "source image corruption bytes checked: 2274, truncations: 2274, semantic forgeries: 11\nsource image transport failures checked: 33 per writer/reader, two writers\nsource image allocation failures checked: 4 (decode)\nsource image allocation failures checked: 4 (prepare)\natomic source image import allocation failure points: 4\nsource image codec and atomic data import contracts passed; no native restore claim\n",
+      "evidence": "windows-r1-junit.xml"
+    },
+    {
+      "name": "native_checkpoint_window_test",
+      "seconds": 1.68873,
+      "output": "actual native-window assembly allocation failures=20; C/H/M/graph refunded\nprivate publication: source/native pair, CP boundary129, no-heap native commit PASS (archive authority not exercised on Windows)\nactual private-publication preparation allocation failures=6; missing Host/version and source refusal leave no native publication\nnative window data/aliases/invalid identities: PASS; C peak=104111 M peak=351 (CPU physical-buffer stand-in only, no CUDA/Engine publication)\n",
+      "evidence": "windows-window-final-junit.xml"
+    }
+  ],
+  "checked": {
+    "local_unique_tests": 4,
+    "normalization_to_complete_CP": true,
+    "sparse_selectable_Host_and_version_closure": true,
+    "native_commit_heap_forbidden": true,
+    "source_data_operations_real": true,
+    "actual_S_quota_refusal": true,
+    "publication_preparation_allocation_failures": 6,
+    "assembly_allocation_failures": 20,
+    "original_input_truncations": 6568,
+    "CPU_import_API_written": true,
+    "CPU_source_native_publication_protocol_passed": true,
+    "ordinary_data_import_computed_zero_regression_passed": true,
+    "physical_buffer": "ordinary CPU test stand-in; no CUDA pinned-memory qualification",
+    "actual_Linux_checkpoint_source_import_executed": false,
+    "actual_final_archive_fences_executed": false,
+    "complete_Native_Engine_build": false,
+    "Linux_sanitizers": false,
+    "model_GPU_or_cross_process_continuation": false,
+    "real_model_test_syntax_only": true,
+    "explicit_request_resume_interface": false,
+    "process_RSS_or_performance": false,
+    "production_qualified": false
+  },
+  "small_fixture": {
+    "C_peak_bytes": 104111,
+    "M_peak_bytes": 351,
+    "prepared_evaluated_frontier": 129
+  },
+  "costs": [
+    "normalization graph/feedback copy and conservative publication C slack admitted before large payload I/O",
+    "C/H/M/S capacity may reject complete-directory import; no unrelated native slot evicted to force success",
+    "extra CPU parsing/rewind/copy and synchronous I/O; model throughput/latency/RSS unmeasured",
+    "CPU import plus later normal generate is not a forced request-level native-resume contract"
+  ],
+  "gaps": [
+    "SSH still unavailable; inspect previous remote jobs before replacing; no new SSH/job this turn",
+    "actual Linux same-blob source/CP authority, late retire/forget/binding rollback tests written but unrun",
+    "complete current Native/Engine linking, Linux memory checks and actual pinned/GPU model continuation pending",
+    "real save/restore test has separate process phases and original native output oracle, syntax checked only",
+    "explicit request resume/lineage/cancellation/resource-failure gates and automatic source retention remain",
+    "full stages D/E/F and production/research acceptance remain incomplete"
+  ],
+  "model_test": {
+    "target": "ninfer_engine_checkpoint_import_real_test",
+    "artifact_env": "NINFER_CHECKPOINT_IMPORT_ARTIFACT",
+    "phases": [
+      "save fresh-work-directory",
+      "restore same-work-directory"
+    ],
+    "source_syntax_passed": true,
+    "linked_or_run": false
+  },
+  "corrections": [
+    "real test nodiscard warnings fixed, final syntax check clean; no linker/GPU claim",
+    "process-local numeric identity repetition is allowed; authority is current owner/receipts, not file-origin equality"
+  ],
+  "evidence": {
+    "path": "C:\\Users\\25468\\.codex\\worktrees\\d87d\\kvmem-llama.cpp\\artifacts\\kv-lifecycle-checkpoint-resume\\artifacts\\lifecycle-checkpoint-publish\\evidence-local.zip",
+    "sha256": "c550217035ecda01fe67c18837a142fae00d11fe362c7fd35a45c0a3b3fd8c2c",
+    "bytes": 909737,
+    "scope": "Windows actual native CPU data/publication protocol and S data regressions; no Linux archive authority/full Engine/GPU proof"
+  }
+}

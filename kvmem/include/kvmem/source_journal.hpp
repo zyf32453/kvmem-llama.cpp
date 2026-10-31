@@ -11,6 +11,7 @@
 
 namespace kvmem {
 class SourceImage;
+class SourceArchive;
 
 // Backend-produced digest of model, tokenizer/template, position/row encoding,
 // KV/state schema and execution configuration. A match authorizes interpreting
@@ -105,11 +106,15 @@ public:
     Stats stats() const noexcept;
 
 private:
+    friend class SourceArchive;
     struct Entry;
     Entry & find(SourceRef);
     const Entry & find(SourceRef) const;
     SourceRef capture_impl(const SourceConfiguration &, const int32_t *, size_t,
         const SourceEvent *, size_t, uint64_t, SourceRef parent = {}, uint64_t prefix = 0);
+    // Only the archive's current checkpoint authority may install an inherited
+    // evaluated frontier. Ordinary source-data import always passes zero.
+    SourceRef import_image_impl(const SourceImage &, uint64_t computed_frontier);
     void update(Entry &, const int32_t *, size_t, const SourceEvent *, size_t, uint64_t);
     [[noreturn]] void exhausted(const char *);
     const SourceLimits limits_;

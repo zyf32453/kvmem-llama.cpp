@@ -668,6 +668,25 @@ SourceRef SourceArchive::import_source(const SourceArchiveRead & read, SourceJou
     entry.bound_snapshot_revision = imported.revision;
     return imported;
 }
+SourceRef SourceArchive::import_checkpoint_source(const SourceArchiveRead& read,const SourceArchiveCheckpointRead& checkpoint,
+    SourceJournalStore& store,uint64_t evaluated_frontier) {
+    validate(read);validate(checkpoint);auto& s=*state_;
+    if (read.state_.get()!=checkpoint.state_.get() || read.slot_!=checkpoint.slot_ || !evaluated_frontier ||
+        evaluated_frontier>read.image().origin().computed_frontier)
+        throw MemoryError(MemoryErrorCode::InvalidPlan,"checkpoint import requires matching current source and evaluated prefix");
+    if (s.entries[s.find(read.key())].bound_store)
+        throw MemoryError(MemoryErrorCode::Pending,"archive source already has a live owner binding");
+    const auto imported=store.import_image_impl(read.image(),evaluated_frontier);
+    try {
+        validate(read);validate(checkpoint);
+        if(s.entries[s.find(read.key())].bound_store)
+            throw MemoryError(MemoryErrorCode::Pending,"archive source acquired another binding during checkpoint import");
+    }
+    catch (...) {store.forget(imported);throw;}
+    auto& entry=s.entries[s.find(read.key())];
+    entry.bound_store=&store;entry.bound_source=imported.source;entry.bound_snapshot_revision=imported.revision;
+    return imported;
+}
 size_t SourceArchive::cool_sources(SourceJournalStore & store, const SourceRef * sources, size_t count) {
     auto & s=*state_;s.check();
     if ((count && !sources) || count>s.limits.max_sources)

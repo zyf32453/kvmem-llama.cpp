@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <future>
+#include <functional>
 #include <mutex>
 #include <new>
 #include <numeric>
@@ -18,7 +19,9 @@
 
 namespace allocation {
 thread_local size_t fail_at = SIZE_MAX, calls = 0;
+thread_local std::function<void()> on_new;
 void check() {
+    if (on_new) {auto hook=std::move(on_new);hook();}
     if (fail_at != SIZE_MAX && calls++ == fail_at) { fail_at = SIZE_MAX; throw std::bad_alloc(); }
 }
 }
@@ -1032,6 +1035,62 @@ void checkpoint_disk_bounds_and_midread_revocation() {
     }
 }
 }
+void checkpoint_authorized_source_import() {
+    Temp temp;Fixture f,other;HostKvStorage ram(65536);StorageIoQueue queue(2,1<<20);
+    SourceArchiveKey key,other_key;
+    {auto archive=SourceArchive::create(temp.path(),config(),checkpoint_limits());
+     key=checkpoint_source(archive,f,queue);other_key=checkpoint_source(archive,other,queue);
+     auto a=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));a.wait();archive.publish_checkpoint(a,f.store);
+     auto b=archive.save_checkpoint(queue,other.store,other.ref,checkpoint_input(ram));b.wait();archive.publish_checkpoint(b,other.store);}
+    auto archive=SourceArchive::open(temp.path(),config(),checkpoint_limits());
+    auto source=archive.read(key,ram),second=archive.read(other_key,ram);
+    auto cp=checkpoint_read(archive,source),foreign=checkpoint_read(archive,second);
+    SourceJournalStore restored{{1<<20,8192,256,4}},small{{1<<16,32,2,2}};
+    rejects(MemoryErrorCode::InvalidPlan,[&]{archive.import_checkpoint_source(source,cp,restored,0);});
+    rejects(MemoryErrorCode::InvalidPlan,[&]{archive.import_checkpoint_source(source,cp,restored,513);});
+    rejects(MemoryErrorCode::InvalidPlan,[&]{archive.import_checkpoint_source(source,foreign,restored,300);});
+    rejects(MemoryErrorCode::BudgetExceeded,[&]{archive.import_checkpoint_source(source,cp,small,300);});
+    CHECK(!restored.stats().sources && !small.stats().sources && !archive.bound_source(key,restored));
+    size_t failures=0;std::optional<SourceRef> imported;
+    for(size_t point=0;point<32;++point){allocation::fail_at=point;allocation::calls=0;bool failed=false;
+        try{imported=archive.import_checkpoint_source(source,cp,restored,300);}catch(const std::bad_alloc&){failed=true;}
+        allocation::fail_at=SIZE_MAX;
+        if(failed){++failures;CHECK(!restored.stats().sources && !archive.bound_source(key,restored));}
+        else break;
+    }
+    CHECK(imported && failures>=4);const auto state=restored.state(*imported);
+    CHECK(state.ref.revision==1 && state.computed_frontier==300 && state.accepted_frontier==513 && !state.parent.source.id);
+    rejects(MemoryErrorCode::Pending,[&]{archive.import_checkpoint_source(source,cp,restored,300);});
+    CHECK(archive.retire_checkpoint(key));
+    rejects(MemoryErrorCode::Stale,[&]{archive.import_checkpoint_source(source,cp,restored,300);});
+    CHECK(restored.stats().sources==1 && restored.state(*imported).computed_frontier==300);
+    std::printf("current checkpoint/source pair import allocation failures=%zu, evaluated prefix and retirement checked\n",failures);
+}
+void checkpoint_import_final_fences() {
+    for(bool forget:{false,true}){
+        Temp temp;Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);SourceArchiveKey key;
+        {auto archive=SourceArchive::create(temp.path(),config(),checkpoint_limits());key=checkpoint_source(archive,f,queue);
+         auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();archive.publish_checkpoint(write,f.store);}
+        auto archive=SourceArchive::open(temp.path(),config(),checkpoint_limits());
+        auto source=archive.read(key,ram);auto cp=checkpoint_read(archive,source);
+        SourceJournalStore target{{1<<20,8192,256,4}};const auto baseline=target.stats().charged;bool revoked=false;
+        // Revoke from an actual S allocation after initial authority checks.
+        // The final dual fence must erase the transient root, not bind it.
+        allocation::on_new=[&]{revoked=true;if(forget)archive.forget(key);else archive.retire_checkpoint(key);};
+        rejects(MemoryErrorCode::Stale,[&]{archive.import_checkpoint_source(source,cp,target,300);});
+        allocation::on_new={};CHECK(revoked && !target.stats().sources && target.stats().charged==baseline);
+        if(!forget)CHECK(!archive.bound_source(key,target));
+    }
+    {Temp temp;Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);SourceArchiveKey key;
+     {auto archive=SourceArchive::create(temp.path(),config(),checkpoint_limits());key=checkpoint_source(archive,f,queue);
+      auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();archive.publish_checkpoint(write,f.store);}
+     auto archive=SourceArchive::open(temp.path(),config(),checkpoint_limits());auto source=archive.read(key,ram);auto cp=checkpoint_read(archive,source);
+     SourceJournalStore target{{1<<20,8192,256,4}},winner{{1<<20,8192,256,4}};std::optional<SourceRef> won;
+     allocation::on_new=[&]{won=archive.import_source(source,winner);};
+     rejects(MemoryErrorCode::Pending,[&]{archive.import_checkpoint_source(source,cp,target,300);});
+     allocation::on_new={};CHECK(won && !target.stats().sources && archive.bound_source(key,winner)==won && winner.stats().sources==1);}
+    std::puts("checkpoint import final source/CP revocation fences roll back new S root PASS");
+}
 int main(int argc, char ** argv) {
     if (argc == 3) { restart_child(argv[1],argv[2]); return 0; }
     roundtrip_reopen_and_lock(); versions_and_reader_retention(); forget_family_late_writer_and_reuse();
@@ -1046,5 +1105,7 @@ int main(int argc, char ** argv) {
     checkpoint_bounds_producer_failures_and_late_writer();checkpoint_exec_and_source_only_reopen();
     checkpoint_actual_io_failure_and_crash_boundaries();checkpoint_foreground_allocation_and_queue_rollback();
     checkpoint_disk_bounds_and_midread_revocation();
+    checkpoint_authorized_source_import();
+    checkpoint_import_final_fences();
     std::puts("source archive lifecycle, quotas, durable authority and failure boundaries PASS");
 }

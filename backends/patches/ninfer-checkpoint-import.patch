@@ -1,0 +1,504 @@
+diff --git a/include/ninfer/engine.h b/include/ninfer/engine.h
+index 3651789..73cde0a 100644
+--- a/include/ninfer/engine.h
++++ b/include/ninfer/engine.h
+@@ -144,6 +144,12 @@ public:
+     [[nodiscard]] std::vector<HistoricalArchiveRecord> historical_archives() const;
+     [[nodiscard]] HistoricalArchiveUsage historical_archive_usage() const;
+     [[nodiscard]] HistoricalSourceRef import_historical_source(HistoricalArchiveKey);
++    // Import current source + native checkpoint data into a NEW CPU history.
++    // Idle Linux text/RAM owner, unbound archive key and free native slot only.
++    // Current source/CP authority is checked again at publication. Evaluated
++    // frontier is the newest complete CP; no GPU upload occurs here. Subsequent
++    // generate uses normal resource admission and exact-prefix cache matching.
++    [[nodiscard]] HistoricalSourceRef import_historical_checkpoint(HistoricalArchiveKey);
+     [[nodiscard]] HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey);
+     // Synchronous idle-owner housekeeping, never called on the decode boundary.
+     void collect_historical_archives();
+diff --git a/src/models/qwen3_5/program/program.cpp b/src/models/qwen3_5/program/program.cpp
+index 331ca49..59ed03a 100644
+--- a/src/models/qwen3_5/program/program.cpp
++++ b/src/models/qwen3_5/program/program.cpp
+@@ -768,6 +768,7 @@ void Program::finish_historical_save(const kvmem::SourceArchiveWrite& write) { i
+ std::vector<HistoricalArchiveRecord> Program::historical_archives() const { return impl_->historical_archives(); }
+ HistoricalArchiveUsage Program::historical_archive_usage() const { return impl_->historical_archive_usage(); }
+ HistoricalSourceRef Program::import_historical_source(HistoricalArchiveKey key) { return impl_->import_historical_source(key); }
++HistoricalSourceRef Program::import_historical_checkpoint(HistoricalArchiveKey key) { return impl_->import_historical_checkpoint(key); }
+ HistoricalSourceForgetResult Program::forget_historical_archive(HistoricalArchiveKey key) { return impl_->forget_historical_archive(key); }
+ void Program::collect_historical_archives() { impl_->collect_historical_archives(); }
+ 
+diff --git a/src/models/qwen3_5/program/program.h b/src/models/qwen3_5/program/program.h
+index 70ee776..bea9e2e 100644
+--- a/src/models/qwen3_5/program/program.h
++++ b/src/models/qwen3_5/program/program.h
+@@ -1296,6 +1296,7 @@ public:
+     [[nodiscard]] std::vector<HistoricalArchiveRecord> historical_archives() const;
+     [[nodiscard]] HistoricalArchiveUsage historical_archive_usage() const;
+     [[nodiscard]] HistoricalSourceRef import_historical_source(HistoricalArchiveKey);
++    [[nodiscard]] HistoricalSourceRef import_historical_checkpoint(HistoricalArchiveKey);
+     [[nodiscard]] HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey);
+     void collect_historical_archives();
+     [[nodiscard]] ExpertResidencyStats expert_residency_stats() const;
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index 5f66ebc..8b720a2 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -994,6 +994,7 @@ public:
+     std::vector<HistoricalArchiveRecord> historical_archives() const;
+     HistoricalArchiveUsage historical_archive_usage() const;
+     HistoricalSourceRef import_historical_source(HistoricalArchiveKey);
++    HistoricalSourceRef import_historical_checkpoint(HistoricalArchiveKey);
+     HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey);
+     enum class SourceFamilyAction { Forget, Cool };
+     struct SourceFamilyRelease { std::uint64_t sources=0,native_domains=0,archives=0; };
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_publish.cpp b/src/models/qwen3_5/program/storage/checkpoint_publish.cpp
+new file mode 100644
+index 0000000..dfd4c93
+--- /dev/null
++++ b/src/models/qwen3_5/program/storage/checkpoint_publish.cpp
+@@ -0,0 +1,99 @@
++#include "models/qwen3_5/program/storage/checkpoint_publish.h"
++#include <algorithm>
++#include <type_traits>
++
++namespace ninfer::models::qwen3_5::detail {
++namespace {
++template<class Work>void each_checkpoint(KvmemWindowState& w,Work work){
++    for(auto& e:w.checkpoints)if(e.data)work(*e.data);
++    for(auto& e:w.coverage)if(e.info.identity && e.record.data)work(*e.record.data);
++}
++std::uint64_t add(std::uint64_t a,std::uint64_t b){
++    if(a>SIZE_MAX || b>SIZE_MAX-a)throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,"checkpoint publication metadata overflow");return a+b;
++}
++[[noreturn]]void invalid(const char* message){throw kvmem::MemoryError(kvmem::MemoryErrorCode::InvalidPlan,message);}
++} // namespace
++
++std::uint64_t kvmem_checkpoint_publication_metadata_bytes(const KvmemCheckpointManifest& m,const KvmemCheckpointInputLimits& limits){
++    if(!m.record_count || m.record_count>kKvmemCheckpointMaximumRecords || m.statistics.size()<52)
++        throw kvmem::SnapshotCorrupt("checkpoint publication has incomplete metadata");
++    std::uint64_t largest=0,frontier=0,tail=0;
++    for(std::size_t i=0;i<m.record_count;++i){const auto& cp=m.records[i];
++        if(cp.graph.size()>SIZE_MAX/4 || cp.feedback.size()>SIZE_MAX/2)
++            throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,"checkpoint graph publication quote overflow");
++        largest=std::max(largest,add(cp.graph.size()*4,cp.feedback.size()*2));
++        frontier=std::max<std::uint64_t>(frontier,cp.prefix.size());tail=std::max<std::uint64_t>(tail,cp.mean_tail.bytes.size());
++    }
++    if(m.selector.size()>SIZE_MAX/2)throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,"checkpoint selector quote overflow");
++    auto bytes=add(add(largest,m.selector.size()*2),add(tail,1024));
++    std::uint64_t raw_blocks=0;std::memcpy(&raw_blocks,m.statistics.data()+44,8);
++    const auto pages=(frontier+63)/64;
++    if(raw_blocks<pages)bytes=add(bytes,kvmem::RawKvStore::mean_snapshot_capacity_bytes(limits.statistics,std::uint32_t(pages*2)));
++    return bytes;
++}
++
++void prepare_kvmem_checkpoint_publication(KvmemCheckpointRead& read,kvmem::SessionIdentity domain){
++    if(!read.window || read.assembly_failed || read.publication_failed || read.publication_prepared || read.published ||
++        !domain.id || !domain.incarnation)invalid("checkpoint publication requires an unused private Window and fresh owner identity");
++    read.publication_failed=true;auto& w=*read.window;
++    if(w.stamp.valid || w.source.source.id || !w.statistics || !w.selector || !w.imported_charge.bytes())
++        invalid("checkpoint publication lost its private state or metadata admission");
++    KvmemPrefixCheckpoint* latest=nullptr;
++    // Same equal-frontier priority as normal native restore.
++    for(const auto purpose:{kvmem::CheckpointPurpose::Endpoint,kvmem::CheckpointPurpose::Reconstruction,
++            kvmem::CheckpointPurpose::InputFallback,kvmem::CheckpointPurpose::QueryReplay,kvmem::CheckpointPurpose::ReuseAnchor}){
++        const auto* e=w.checkpoints.find(purpose);
++        if(e && e->data && (!latest || e->data->prefix.size()>latest->prefix.size()))latest=e->data.get();
++    }
++    for(auto& e:w.coverage)if(e.info.identity && e.record.data && (!latest || e.record.data->prefix.size()>latest->prefix.size()))latest=e.record.data.get();
++    if(!latest || !latest->prefix.size() || latest->prefix.size()>read.manifest.origin.computed_frontier)
++        invalid("checkpoint publication has no complete evaluated boundary");
++    const auto frontier=std::uint32_t(latest->prefix.size());const auto pages=(std::uint64_t(frontier)+63)/64;
++    if(w.archive.size()<pages || w.host_versions.size()<pages || w.retired_pages.size()<pages)
++        throw kvmem::SnapshotCorrupt("checkpoint publication lost its Host page directory");
++    for(std::size_t i=0;i<pages;++i){const auto rows=std::min<std::uint64_t>(64,frontier-i*64);
++        if(!w.retired_pages[i] && (!w.archive[i] || w.host_versions[i]<rows || w.archive[i].size()!=read.manifest.header.page_stride))
++            throw kvmem::SnapshotCorrupt("checkpoint publication has a selectable Host hole or incomplete version");
++    }
++    // The file's top statistics may extend beyond its newest complete CP.
++    // Admit the private graph/feedback copy and selector truncate scratch before
++    // rewinding. The Window retains conservative slack until owner destruction.
++    auto extra=add(latest->graph.bytes(),latest->feedback.bytes());
++    extra=add(extra,std::uint64_t(w.selector->block_count())*2*sizeof(kvmem::KvMemDroppedBlock)+256);
++    if(extra>read.publication_reserved_bytes)
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,"checkpoint normalization exceeded prior publication admission");
++    w.graph={};w.feedback={};
++    auto graph=latest->graph;auto feedback=latest->feedback;
++    graph.include_feedback(feedback.bytes());
++    w.statistics->truncate_to(frontier);w.statistics->restore_mean_checkpoint(frontier,latest->mean_tail);
++    (void)w.selector->truncate_to(frontier);w.selector->restore_retrieval(latest->history);
++    w.graph=std::move(graph);w.feedback.restore(std::move(feedback));w.attention_scope=latest->attention_scope;
++    w.statistics_frontier=frontier;w.archive.resize(pages);w.host_versions.resize(pages);w.retired_pages.resize(pages);w.gc_protected.resize(pages);
++    if(frontier%64)w.host_versions.back()=frontier%64;
++    w.payload_bytes=0;for(const auto& page:w.archive)w.payload_bytes=add(w.payload_bytes,page.size());
++    if(w.historical_features)w.historical_features->truncate_to(frontier,64);
++    if(w.historical_thinking)w.historical_thinking->truncate(frontier);
++    if(w.historical_think_start>=frontier)w.historical_think_start=UINT64_MAX;
++    w.capture_plan=kvmem::CheckpointCapturePlan(frontier,w.coverage.policy().interval,w.capture_plan.root,w.capture_plan.tail);
++    w.reuse_anchor=std::min(w.reuse_anchor,frontier);w.reconstruction_frontier=0;
++    w.stamp={false,domain,1,0,frontier,1};
++    each_checkpoint(w,[&](KvmemPrefixCheckpoint& cp){cp.identity.stamp={false,domain,1,0,cp.prefix.size(),1};});
++    read.publication_prepared=true;read.publication_failed=false;
++}
++
++kvmem::SourceRef publish_kvmem_checkpoint_window(KvmemCheckpointRead& read,std::optional<KvmemWindowState>& target,
++    const std::function<kvmem::SourceRef(std::uint64_t)>& importer){
++    if(!read.window || !read.publication_prepared || read.publication_failed || read.published || target || !importer)
++        invalid("checkpoint publication target or private preparation is stale");
++    read.publication_failed=true;
++    const auto source=importer(read.window->stamp.frontier);
++    // SourceArchive's importer returned a committed current S root. Every
++    // following operation is a bounded plain update/noexcept owner move.
++    static_assert(std::is_nothrow_move_constructible_v<KvmemWindowState> && std::is_nothrow_move_assignable_v<KvmemWindowState>);
++    if(!source.source.id || !source.source.incarnation || !source.revision)std::terminate();
++    auto& w=*read.window;w.source=source;w.stamp.valid=true;w.update_session_index=true;
++    each_checkpoint(w,[](KvmemPrefixCheckpoint& cp){cp.identity.stamp.valid=true;});
++    target=std::move(w);read.window.reset();read.publication_prepared=false;read.publication_failed=false;read.published=true;
++    return source;
++}
++} // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_publish.h b/src/models/qwen3_5/program/storage/checkpoint_publish.h
+new file mode 100644
+index 0000000..e1fc340
+--- /dev/null
++++ b/src/models/qwen3_5/program/storage/checkpoint_publish.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include "models/qwen3_5/program/storage/checkpoint_read.h"
++
++namespace ninfer::models::qwen3_5::detail {
++std::uint64_t kvmem_checkpoint_publication_metadata_bytes(const KvmemCheckpointManifest&,const KvmemCheckpointInputLimits&);
++// All fallible CPU normalization/admission remains private. Missing selectable
++// Host pages cannot be smuggled into the next Query by an otherwise legal CP.
++void prepare_kvmem_checkpoint_publication(KvmemCheckpointRead&,kvmem::SessionIdentity fresh_domain);
++// Importer MUST atomically validate current archive + checkpoint authority and
++// publish a new canonical S root at the supplied evaluated frontier, or throw
++// without a visible root. The native commit after it returns cannot allocate
++// or fail. Serialized Engine owner only; target must still be empty.
++kvmem::SourceRef publish_kvmem_checkpoint_window(KvmemCheckpointRead&,
++    std::optional<KvmemWindowState>& target,const std::function<kvmem::SourceRef(std::uint64_t)>& importer);
++} // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_read.h b/src/models/qwen3_5/program/storage/checkpoint_read.h
+index d0f3ab8..8db9121 100644
+--- a/src/models/qwen3_5/program/storage/checkpoint_read.h
++++ b/src/models/qwen3_5/program/storage/checkpoint_read.h
+@@ -15,6 +15,8 @@ struct KvmemCheckpointRead {
+     KvmemCheckpointBufferPool::MetadataCharge metadata_charge;
+     std::uint64_t read_metadata_bytes=0;
+     bool assembly_failed=false;
++    bool publication_prepared=false,publication_failed=false,published=false;
++    std::uint64_t publication_reserved_bytes=0;
+     // Archive control is Linux-only. Windows standalone tests exercise the
+     // same private data/assembly, without fabricating archive permissions.
+ #if defined(__linux__)
+diff --git a/src/models/qwen3_5/program/storage/historical_checkpoint.cpp b/src/models/qwen3_5/program/storage/historical_checkpoint.cpp
+index 9bb9341..c368981 100644
+--- a/src/models/qwen3_5/program/storage/historical_checkpoint.cpp
++++ b/src/models/qwen3_5/program/storage/historical_checkpoint.cpp
+@@ -1,6 +1,7 @@
+ #include "models/qwen3_5/program/program_impl.h"
+ #include "models/qwen3_5/program/storage/checkpoint_read.h"
+ #include "models/qwen3_5/program/storage/checkpoint_window.h"
++#include "models/qwen3_5/program/storage/checkpoint_publish.h"
+ #include "models/qwen3_5/frontend/digest.h"
+ #include <algorithm>
+ #include <array>
+@@ -325,7 +326,8 @@ std::unique_ptr<KvmemCheckpointRead> ProgramImpl::read_historical_checkpoint(His
+             // large image/page targets. Materialize it only after file checksum.
+             const auto logical=kvmem_checkpoint_state_metadata_bytes(manifest,limits,selection);
+             const auto native=kvmem_checkpoint_window_metadata_bytes(manifest,descriptor);
+-            state->metadata_charge.resize(add(add(control,state->metadata.capacity()),add(logical,native)));
++            state->publication_reserved_bytes=kvmem_checkpoint_publication_metadata_bytes(manifest,limits);
++            state->metadata_charge.resize(add(add(control,state->metadata.capacity()),add(add(logical,native),state->publication_reserved_bytes)));
+             // Admit the COMPLETE unpublished image set and H payload first.
+             // This control path is serialized; no other Program allocation can
+             // consume C between this check and individual pool acquisition.
+@@ -363,6 +365,28 @@ std::unique_ptr<KvmemCheckpointRead> ProgramImpl::read_historical_checkpoint(His
+ #endif
+ }
+ 
++HistoricalSourceRef ProgramImpl::import_historical_checkpoint(HistoricalArchiveKey key) {
++#if defined(__linux__)
++    require_source_control();
++    if(!source_archive || !source_checkpoint_max_bytes || !source_replay_supported() || context_cache.enabled)
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"native checkpoint import is disabled");
++    if(source_archive->bound_source({key.space,key.id},*source_journal))
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending,"archive source already has a live owner binding");
++    auto target=std::find_if(memory_histories.begin(),memory_histories.end(),[](const auto& value){return !value;});
++    if(target==memory_histories.end())
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,"checkpoint import needs a free native history slot");
++    auto read=read_historical_checkpoint(key);
++    prepare_kvmem_checkpoint_publication(*read,allocate_memory_identity());
++    const auto imported=publish_kvmem_checkpoint_window(*read,*target,[&](std::uint64_t frontier){
++        return source_archive->import_checkpoint_source(*read->source,*read->checkpoint,*source_journal,frontier);
++    });
++    advance_resource_revision();
++    return {imported.source.id,imported.source.incarnation,imported.revision};
++#else
++    (void)key;throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"native checkpoint import requires Linux");
++#endif
++}
++
+ kvmem::SourceArchiveCheckpointWrite ProgramImpl::begin_historical_checkpoint_save(HistoricalSourceRef source) {
+ #if defined(__linux__)
+     require_source_control();
+diff --git a/src/models/qwen3_5/program_sources.cmake b/src/models/qwen3_5/program_sources.cmake
+index 26ea49d..d52e446 100644
+--- a/src/models/qwen3_5/program_sources.cmake
++++ b/src/models/qwen3_5/program_sources.cmake
+@@ -23,6 +23,7 @@ target_sources(ninfer_model_runtime PRIVATE
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/checkpoint_input.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/checkpoint_state.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/checkpoint_window.cpp"
++  "${CMAKE_CURRENT_LIST_DIR}/program/storage/checkpoint_publish.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/memory_statistics.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/disk_tier.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/program/storage/session_snapshot.cpp"
+diff --git a/src/runtime/engine/engine.cpp b/src/runtime/engine/engine.cpp
+index e4d9eeb..8113e24 100644
+--- a/src/runtime/engine/engine.cpp
++++ b/src/runtime/engine/engine.cpp
+@@ -865,6 +865,10 @@ HistoricalSourceRef Engine::import_historical_source(HistoricalArchiveKey key) {
+     if (!impl_) throw std::logic_error("Engine is moved from");
+     return impl_->generation_core().import_historical_source(key);
+ }
++HistoricalSourceRef Engine::import_historical_checkpoint(HistoricalArchiveKey key) {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    return impl_->generation_core().import_historical_checkpoint(key);
++}
+ HistoricalSourceForgetResult Engine::forget_historical_archive(HistoricalArchiveKey key) {
+     if (!impl_) throw std::logic_error("Engine is moved from");
+     return impl_->generation_core().forget_historical_archive(key);
+diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
+index a8231bc..a1a2034 100644
+--- a/src/runtime/engine/engine_core.h
++++ b/src/runtime/engine/engine_core.h
+@@ -710,6 +710,9 @@ public:
+     HistoricalSourceRef import_historical_source(HistoricalArchiveKey key) {
+         return source_archive_control([&] { return instance_.program->import_historical_source(key); });
+     }
++    HistoricalSourceRef import_historical_checkpoint(HistoricalArchiveKey key) {
++        return source_archive_control([&] { return instance_.program->import_historical_checkpoint(key); });
++    }
+     HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey key) {
+         return source_archive_control([&] { return instance_.program->forget_historical_archive(key); });
+     }
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+index c29e6a1..9e2f9c5 100644
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -84,11 +84,16 @@ ninfer_add_test(ninfer_checkpoint_window_test STANDALONE
+       "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/storage/checkpoint_window.cpp"
+       "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/prefix_identity.cpp" LIBRARIES kvmem)
+ target_include_directories(ninfer_checkpoint_window_test PRIVATE "${PROJECT_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}/include")
++target_sources(ninfer_checkpoint_window_test PRIVATE "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/storage/checkpoint_publish.cpp")
+ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+   ninfer_add_test(ninfer_engine_checkpoint_export_real_test STANDALONE
+     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_export_real.cpp"
+     LIBRARIES ninfer_engine kvmem ninfer::json)
+   set_tests_properties(ninfer_engine_checkpoint_export_real_test PROPERTIES SKIP_RETURN_CODE 77)
++    ninfer_add_test(ninfer_engine_checkpoint_import_real_test STANDALONE
++      SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_import_real.cpp"
++      LIBRARIES ninfer_engine kvmem ninfer::json)
++    set_tests_properties(ninfer_engine_checkpoint_import_real_test PROPERTIES SKIP_RETURN_CODE 77)
+   ninfer_add_test(ninfer_engine_source_cool_real_test STANDALONE
+     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_cool_real.cpp"
+     LIBRARIES ninfer_engine kvmem ninfer::json)
+@@ -125,6 +130,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND UNIX)
+       "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/storage/checkpoint_window.cpp"
+       "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/prefix_identity.cpp" LIBRARIES kvmem)
+   target_include_directories(ninfer_checkpoint_window_sanitizer_test PRIVATE "${PROJECT_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}/include")
++  target_sources(ninfer_checkpoint_window_sanitizer_test PRIVATE "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/storage/checkpoint_publish.cpp")
+   target_compile_options(ninfer_checkpoint_window_sanitizer_test PRIVATE -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
+   target_link_options(ninfer_checkpoint_window_sanitizer_test PRIVATE -fsanitize=address,undefined)
+   target_link_options(ninfer_checkpoint_input_sanitizer_test PRIVATE -fsanitize=address,undefined)
+diff --git a/tests/test_checkpoint_window.cpp b/tests/test_checkpoint_window.cpp
+index b51f0fd..767f0e6 100644
+--- a/tests/test_checkpoint_window.cpp
++++ b/tests/test_checkpoint_window.cpp
+@@ -1,4 +1,5 @@
+ #include "models/qwen3_5/program/storage/checkpoint_window.h"
++#include "models/qwen3_5/program/storage/checkpoint_publish.h"
+ #include "models/qwen3_5/checkpoint_fixture.h"
+ #include <cstdlib>
+ #include <iostream>
+@@ -49,7 +50,8 @@ std::unique_ptr<KvmemCheckpointRead> private_read(const Fixture& fixture,Account
+     read->manifest=read_kvmem_checkpoint_metadata(read->metadata,header,limits);
+     kvmem::KvMemStoreConfig cfg;cfg.block_tokens=64;cfg.select_budget=128;cfg.sink_blocks=0;cfg.lrfu=true;
+     const auto native=kvmem_checkpoint_window_metadata_bytes(read->manifest,fixture.descriptor);
+-    read->logical=prepare_kvmem_checkpoint_state(read->manifest,limits,cfg,a.m,[&](auto bytes){read->metadata_charge.resize(read->read_metadata_bytes+bytes+native);});
++    read->publication_reserved_bytes=kvmem_checkpoint_publication_metadata_bytes(read->manifest,limits);
++    read->logical=prepare_kvmem_checkpoint_state(read->manifest,limits,cfg,a.m,[&](auto bytes){read->metadata_charge.resize(read->read_metadata_bytes+bytes+native+read->publication_reserved_bytes);});
+     a.c->require_images_available(header.images,17);
+     for(unsigned image=0;image<header.images;++image){auto buffer=a.c->acquire(17);
+         for(unsigned j=0;j<17;++j)static_cast<std::uint8_t*>(buffer->data())[j]=std::uint8_t(0x20+image*0x40+j);
+@@ -134,8 +136,63 @@ void failures(const Fixture& f,std::size_t c_peak,std::size_t m_peak){
+     REQUIRE(complete && faults>10 && f.journal.stats().sources==1);
+     std::cout<<"actual native-window assembly allocation failures="<<faults<<"; C/H/M/graph refunded\n";
+ }
++void publication(const Fixture& f){
++    Accounts a;kvmem::HostKvStorage r(1<<20);
++    const auto image=kvmem::prepare_source_image(f.journal,f.source.ref,{1<<20,256,8},r);
++    kvmem::SourceJournalStore source{{1<<20,256,8,8}};std::optional<KvmemWindowState> published;
++    auto read=private_read(f,a);assemble_kvmem_checkpoint_window(*read,f.descriptor,f.policy,a.graph,a.m);
++    prepare_kvmem_checkpoint_publication(*read,{777,1});
++    REQUIRE(!read->window->stamp.valid && read->publication_prepared && read->window->statistics_frontier==129);
++    REQUIRE(read->window->host_versions.back()==1 && read->window->selector->total_tokens()==129 && read->window->graph.accepted_through==129);
++    std::array<float,2> mean{};read->window->statistics->mean_k(2,0,mean.data());REQUIRE(mean[0]==129 && mean[1]==1);
++    // Actual S data operations, NOT an archive-permission substitute. The Linux
++    // SourceArchive importer has its own tests for current dual-receipt authority.
++    const std::function<kvmem::SourceRef(std::uint64_t)> importer=[&](auto frontier){
++        auto ref=source.import_image(image);
++        try{ref=source.append(ref,nullptr,0,nullptr,0,frontier);}catch(...){source.forget(ref);throw;}
++        fail_at=0;allocations=0;return ref;
++    };
++    kvmem::SourceRef ref;
++    try{ref=publish_kvmem_checkpoint_window(*read,published,importer);}catch(...){fail_at=SIZE_MAX;throw;}
++    fail_at=SIZE_MAX;REQUIRE(!allocations && published && read->published && !read->window);
++    const auto state=source.state(ref);REQUIRE(state.computed_frontier==129 && state.accepted_frontier==192 && !state.parent.source.id && ref.source!=f.source.ref.source);
++    REQUIRE(published->source==ref && published->stamp.valid && published->stamp.session.id==777 && published->stamp.frontier==129);
++    for(auto& e:published->coverage)if(e.info.identity)REQUIRE(e.record.data->identity.stamp.valid && e.record.data->identity.stamp.session==published->stamp.session);
++    read.reset();published.reset();a.empty();
++    std::cout<<"private publication: source/native pair, CP boundary129, no-heap native commit PASS (archive authority not exercised on Windows)\n";
++}
++void publication_failures(const Fixture& f){
++    std::size_t faults=0;bool complete=false;
++    for(std::size_t failure=0;failure<128;++failure){Accounts a;auto read=private_read(f,a);assemble_kvmem_checkpoint_window(*read,f.descriptor,f.policy,a.graph,a.m);
++        fail_at=failure;allocations=0;bool failed=false;
++        try{prepare_kvmem_checkpoint_publication(*read,{778,1});}catch(const std::bad_alloc&){failed=true;}
++        fail_at=SIZE_MAX;if(failed)REQUIRE(read->publication_failed && !read->window->stamp.valid);
++        read.reset();a.empty();if(failed)++faults;else{complete=true;break;}}
++    REQUIRE(complete && faults>=3);
++    {Accounts a;auto read=private_read(f,a);assemble_kvmem_checkpoint_window(*read,f.descriptor,f.policy,a.graph,a.m);
++     prepare_kvmem_checkpoint_publication(*read,{781,1});std::optional<KvmemWindowState> target;
++     kvmem::HostKvStorage staging(1<<20);const auto image=kvmem::prepare_source_image(f.journal,f.source.ref,{1<<20,256,8},staging);
++     kvmem::SourceJournalStore small{{1<<16,32,8,4}};const auto baseline=small.stats().charged;bool refused=false;
++     try{(void)publish_kvmem_checkpoint_window(*read,target,[&](auto){return small.import_image(image);});}
++     catch(const kvmem::MemoryError& e){refused=e.code()==kvmem::MemoryErrorCode::BudgetExceeded;}
++     REQUIRE(refused && !small.stats().sources && small.stats().charged==baseline && !target && !read->window->stamp.valid);
++     read.reset();a.empty();}
++    // The CP resident closure alone does not prove that future Query candidates
++    // have Host data. Refuse missing/nonresident and short-version pages too.
++    for(unsigned which=0;which<2;++which){Accounts a;auto read=private_read(f,a);assemble_kvmem_checkpoint_window(*read,f.descriptor,f.policy,a.graph,a.m);
++        if(which==0)read->window->retired_pages[1]=0;else read->window->host_versions[0]=0;
++        bool refused=false;try{prepare_kvmem_checkpoint_publication(*read,{779,1});}catch(const kvmem::SnapshotCorrupt&){refused=true;}
++        REQUIRE(refused && read->publication_failed && !read->window->stamp.valid);read.reset();a.empty();}
++    for(bool stale:{false,true}){Accounts a;auto read=private_read(f,a);assemble_kvmem_checkpoint_window(*read,f.descriptor,f.policy,a.graph,a.m);
++        prepare_kvmem_checkpoint_publication(*read,{780,1});std::optional<KvmemWindowState> target;
++        const std::function<kvmem::SourceRef(std::uint64_t)> importer=[&](auto)->kvmem::SourceRef{
++            throw kvmem::MemoryError(stale ? kvmem::MemoryErrorCode::Stale : kvmem::MemoryErrorCode::BudgetExceeded,"test source refusal");};
++        bool refused=false;try{(void)publish_kvmem_checkpoint_window(*read,target,importer);}catch(const kvmem::MemoryError&){refused=true;}
++        REQUIRE(refused && read->publication_failed && !target && !read->window->stamp.valid);read.reset();a.empty();}
++    std::cout<<"actual private-publication preparation allocation failures="<<faults<<"; missing Host/version and source refusal leave no native publication\n";
++}
+ }
+ int main(){metadata_transfer_and_idle_reuse();const Fixture f;const auto peak=exact_assembly(f);exact_assembly(f,true);
+-    const Fixture legacy(false,false,false);exact_assembly(legacy);window_move_lifetime(f);failures(f,peak.first,peak.second);
++    const Fixture legacy(false,false,false);exact_assembly(legacy);window_move_lifetime(f);failures(f,peak.first,peak.second);publication(f);publication_failures(f);
+     std::cout<<"native window data/aliases/invalid identities: PASS; C peak="<<peak.first<<" M peak="<<peak.second
+         <<" (CPU physical-buffer stand-in only, no CUDA/Engine publication)\n";}
+diff --git a/tests/test_engine_checkpoint_import_real.cpp b/tests/test_engine_checkpoint_import_real.cpp
+new file mode 100644
+index 0000000..59f1d32
+--- /dev/null
++++ b/tests/test_engine_checkpoint_import_real.cpp
+@@ -0,0 +1,100 @@
++#include "ninfer/engine.h"
++#include "kvmem/memory_contract.hpp"
++#include <nlohmann/json.hpp>
++#include <algorithm>
++#include <array>
++#include <cstdlib>
++#include <fstream>
++#include <iostream>
++#include <stdexcept>
++
++namespace {
++void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
++template<class Work>void rejects(kvmem::MemoryErrorCode code,Work work){
++    try{work();}catch(const kvmem::MemoryError& e){check(e.code()==code,e.what());return;}throw std::runtime_error("checkpoint import unexpectedly accepted");
++}
++ninfer::RequestOptions request(){ninfer::RequestOptions r;r.execution.requested_output_tokens=8;
++    r.execution.sampling.temperature=0;r.execution.sampling.seed=42;r.execution.thinking.loop=ninfer::ReasoningLoopAction::Off;
++    r.stop.include_model_defaults=false;r.output.raw=r.output.preserve_special_tokens=true;return r;}
++int run(int argc,char** argv){
++    const char* model=std::getenv("NINFER_CHECKPOINT_IMPORT_ARTIFACT");if(!model || !*model)return 77;
++    check(argc==3,"usage: checkpoint_import_real save|restore work-directory");
++    const std::string mode=argv[1];const std::filesystem::path root=argv[2];
++    check(mode=="save" || mode=="restore","unknown checkpoint import phase");
++    const bool mtp=std::getenv("NINFER_CHECKPOINT_IMPORT_MTP")!=nullptr;
++    const bool redundancy=std::getenv("NINFER_CHECKPOINT_IMPORT_REDUNDANCY")!=nullptr;
++    const bool long_input=std::getenv("NINFER_CHECKPOINT_IMPORT_LONG")!=nullptr;
++    ninfer::EngineOptions o;o.artifact_path=model;o.max_context=65536;o.kv_capacity=ninfer::KvCapacityPolicy::explicit_capacity(2560);
++    o.prefill_chunk=512;o.max_concurrency=1;o.max_pending_requests=4;o.device_profile="off";o.context_cache.enabled=false;
++    o.kv_cache=ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
++    auto& m=o.kvmem;m.selected_tokens=2048;m.reserve_tokens=512;m.host_bytes=96ULL<<20;m.checkpoint_bytes=2048ULL<<20;
++    m.source_bytes=16ULL<<20;m.recovery_bytes=1ULL<<20;m.historical_gc_aux_bytes=64ULL<<20;m.retained_sessions=8;
++    m.query_meanq_cosine=m.score_agg_max=true;m.graph_alpha=.2;m.historical_gc_lru=!redundancy;m.historical_gc_redundancy=redundancy;m.verify_transfers=true;
++    if(mtp){o.speculative.backend=ninfer::SpeculativeBackend::Mtp;o.speculative.draft_tokens=4;}
++    ninfer::HistoricalArchiveOptions archive;archive.directory=root/"archive";archive.disk_bytes=3ULL<<30;
++    archive.metadata_bytes=1ULL<<20;archive.max_checkpoint_bytes=2ULL<<30;archive.create=true;
++    ninfer::HistoricalArchiveKey key;ninfer::HistoricalSourceRef original;
++    std::vector<ninfer::TokenId> canonical,expected;std::uint64_t original_computed=0,retired=0;
++    if(mode=="save"){
++        ninfer::Engine engine(o);const auto token=engine.tokenize_text(" Memory").front();
++        auto reference=engine.prepare_tokens({token});engine.attach_historical_archive(archive,reference);
++        canonical.assign(long_input ? 32768 : 4096,token);const auto first=engine.generate(engine.prepare_tokens(canonical),request());
++        check(first.accepted_source.has_value(),"source receipt missing");original=*first.accepted_source;
++        auto sources=engine.historical_sources();const auto found=std::find_if(sources.begin(),sources.end(),[&](const auto& s){return s.ref==original;});
++        check(found!=sources.end() && found->retained_native_domains==1,"original native history missing");
++        original_computed=found->computed_tokens;retired=found->retired_native_pages;
++        if(long_input)check(retired>0,"long workload did not retire real CPU pages");
++        auto source=engine.begin_historical_save(original);key=source.key();source.wait();engine.finish_historical_save(source);
++        auto cp=engine.begin_historical_checkpoint_save(original);cp.wait();engine.finish_historical_save(cp);
++        rejects(kvmem::MemoryErrorCode::Pending,[&]{(void)engine.import_historical_checkpoint(key);});
++        canonical.insert(canonical.end(),first.generated_token_ids.begin(),first.generated_token_ids.end());
++        const auto hits=engine.memory_summary().kvmem.history_hits;
++        expected=engine.generate(engine.prepare_tokens(canonical),request()).generated_token_ids;
++        check(engine.memory_summary().kvmem.history_hits>hits,"independent original continuation did not use native history");
++        const nlohmann::json fixture={{"mtp",mtp},{"redundancy",redundancy},{"long_input",long_input},
++            {"space",key.space},{"id",key.id},{"original",{original.id,original.incarnation,original.revision}},
++            {"canonical",canonical},{"expected",expected},{"computed",original_computed},{"retired",retired}};
++        std::ofstream out(root/"import-fixture.json");out<<fixture;out.close();check(out.good(),"fixture write failed");
++        std::cout<<nlohmann::json{{"phase","save"},{"status","passed"}}<<'\n';return 0;
++    }
++    std::ifstream in(root/"import-fixture.json");nlohmann::json fixture;in>>fixture;check(in.good() || in.eof(),"fixture read failed");
++    check(fixture.at("mtp").get<bool>()==mtp && fixture.at("redundancy").get<bool>()==redundancy && fixture.at("long_input").get<bool>()==long_input,"restore configuration differs");
++    key.space=fixture.at("space").get<std::array<std::uint8_t,16>>();key.id=fixture.at("id").get<std::uint64_t>();
++    const auto old=fixture.at("original").get<std::array<std::uint64_t,3>>();original={old[0],old[1],old[2]};
++    canonical=fixture.at("canonical").get<std::vector<ninfer::TokenId>>();expected=fixture.at("expected").get<std::vector<ninfer::TokenId>>();
++    original_computed=fixture.at("computed").get<std::uint64_t>();retired=fixture.at("retired").get<std::uint64_t>();
++    // Invoke restore as a separate process after save exits: no old Engine,
++    // CUDA context, process-local source/native identity or pinned owner exists.
++    archive.create=false;nlohmann::json result;
++    {
++        ninfer::Engine engine(o);const auto token=canonical.front();auto reference=engine.prepare_tokens({token});
++        engine.attach_historical_archive(archive,reference);const auto initial_hits=engine.memory_summary().kvmem.history_hits;
++        const auto restored=engine.import_historical_checkpoint(key);check(restored.revision==1,"new RAM revision did not restart");
++        auto sources=engine.historical_sources();const auto first=std::find_if(sources.begin(),sources.end(),[&](const auto& s){return s.ref==restored;});
++        check(first!=sources.end() && first->retained_native_domains==1 && !first->parent.id && first->computed_tokens>0 && first->computed_tokens<=original_computed,"imported source/native pair inconsistent");
++        check(engine.memory_summary().kvmem.history_hits==initial_hits,"CPU import executed model restoration");
++        if(long_input)check(first->retired_native_pages>0,"CPU retirement flags disappeared at import");
++        rejects(kvmem::MemoryErrorCode::Pending,[&]{(void)engine.import_historical_checkpoint(key);});
++        const auto cold=engine.cool_historical_source(restored);check(cold.cooled_sources==1 && cold.discarded_native_domains==1,"imported pair did not cool together");
++        const auto again=engine.import_historical_checkpoint(key);check(!(again==restored),"same-owner reimport reused source identity");
++        const auto hits=engine.memory_summary().kvmem.history_hits;
++        const auto actual=engine.generate(engine.prepare_tokens(canonical),request());
++        check(actual.generated_token_ids==expected,"imported checkpoint continuation differs from original native continuation");
++        check(engine.memory_summary().kvmem.history_hits>hits,"restored execution silently recomputed instead of using native history");
++        check(!mtp || actual.speculative.rounds>0,"MTP continuation did not execute");
++        const auto usage=engine.memory_summary().kvmem;
++        check(usage.checkpoint_bytes<=usage.checkpoint_budget_bytes && usage.host_payload_bytes<=usage.host_payload_budget_bytes,"import/resume exceeded C/H");
++        engine.retire_historical_checkpoint(key);const auto retired_cold=engine.cool_historical_source(again);
++        check(retired_cold.cooled_sources==1,"retired attachment prevented source-only cooldown");
++        const auto before=engine.historical_sources().size();
++        rejects(kvmem::MemoryErrorCode::Stale,[&]{(void)engine.import_historical_checkpoint(key);});
++        check(engine.historical_sources().size()==before && engine.is_available(),"retired import changed sources or poisoned Engine");
++        result={{"status","passed"},{"mtp",mtp},{"redundancy",redundancy},{"long_input",long_input},
++            {"canonical_tokens",canonical.size()},{"original_retired_pages",retired},{"output",actual.generated_token_ids},
++            {"original_continuation",expected},{"native_hits",usage.history_hits-hits},{"C",usage.checkpoint_bytes},{"H",usage.host_payload_bytes},
++            {"scope","separate save/restore processes, CPU import/cool/reimport, normal native GPU continuation and attachment retirement"}};
++    }
++    std::ofstream out(root/"import-result.json");out<<result;out.close();check(out.good(),"result write failed");std::cout<<result<<'\n';return 0;
++}
++}
++int main(int argc,char** argv){try{return run(argc,argv);}catch(const std::exception& e){std::cerr<<"CHECKPOINT_IMPORT_FATAL: "<<e.what()<<'\n';return 1;}}

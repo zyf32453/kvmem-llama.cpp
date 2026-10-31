@@ -174,6 +174,12 @@ public:
     // binding returns Pending; no implicit replacement, alias or decoded-origin
     // matching. Durable lineage remains in the archive, not old RAM parent refs.
     SourceRef import_source(const SourceArchiveRead &, SourceJournalStore &);
+    // Current source AND checkpoint receipts must name the same immutable blob.
+    // Backend has prepared a private native continuation at evaluated_frontier.
+    // Failure (including a final fence) rolls back the new S root before any
+    // binding is installed. Caller publishes native state without further failure.
+    SourceRef import_checkpoint_source(const SourceArchiveRead &, const SourceArchiveCheckpointRead &,
+        SourceJournalStore &, uint64_t evaluated_frontier);
     // Explicit RAM eviction, not durable forgetting. Every selected current
     // source must have a complete current published copy, and the selection
     // must include all its RAM descendants. Verify all files/fences first,

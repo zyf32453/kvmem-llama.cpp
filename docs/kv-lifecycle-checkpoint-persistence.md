@@ -4,7 +4,7 @@
 本地 CPU 检查通过，最新原生完整编译和真实模型检查因 SSH 再次中断尚未完成。
 后续 C11c 已补私有 CPU 读取准备组件，C11d 已补实际逻辑对象及其 C/M 准备，均只有本地组件证据；
 C11e 已补私有原生 Window/目录及 owner 转移，CPU 数据装配检查通过；
-Engine 原生恢复入口及跨重启模型恢复仍未实现，
+C11f 已接通 Engine CPU checkpoint 导入候选与新身份发布协议，完整 Linux/模型恢复仍未验收，
 阶段 C 与完整六阶段目标继续开放。
 执行范围、结果和不利发现见 [本批摘要](experiments/2026-10-31-lifecycle-checkpoint-authority/summary.json)。
 
@@ -226,11 +226,45 @@ NVTX v3.4.0 固定头文件，未修改主机设置。源类型布局已改变�
 保留到销毁，恢复全部目录可能因额度不足拒绝。同步 I/O、构造耗时和完整进程内存未测。
 见 [C11e 结果及限定](experiments/2026-11-01-lifecycle-checkpoint-window/summary.json)。
 
+## C11f：新源/原生身份的发布候选
+
+新增 `Engine::import_historical_checkpoint(key)` 候选：要求空闲 Linux 单 owner、归档 key 尚未
+绑定 RAM 源、存在空原生历史槽。先准备全部私有状态，整理到最新完整 CP 的计算边界，再
+导入新 S 根并发布新 native domain。该入口导入 CPU 历史；没有 GPU 上传，后续 generate
+仍走正常资源准入及精确前缀匹配，不承诺强制命中或完整请求恢复。
+
+整理同时回退 Raw mean/selector、图/feedback、尾页版本与 thinking/features；文件的顶层
+statistics 不能被当成一个未保存的完整状态。还会检查所有可召回页的实际 H/版本，避免只有
+CP resident 依赖合法、下次 Query 却选到缺页。额外图复制/临时空间在大载荷读取前纳入 C。
+
+普通 SourceImage 导入继续 computed=0。只有 Core 的新 checkpoint 授权入口，才可把后端
+证明的 CP frontier 写入新根（revision=1、parent=0）。源和 CP 回执必须属于同一当前 blob；
+S 准备后再次复核源/CP 及绑定条件，失败删除新根，成功才设置当前归档 binding。原生最后
+一步只写入身份/有效位并移动已构造对象，无新增分配；空槽不够时拒绝，不先淘汰无关历史。
+这里的新身份属于当前 owner，文件中的旧数值不是权限，跨进程数值重复也不能替代回执检查。
+
+Windows 四项检查通过：输入/逻辑、原生 Window/发布协议、SourceJournal、SourceImage。
+新增 6 个实际发布准备分配失败点、真实 S 额度拒绝、无效 H/version 拒绝和 S 返回后禁止新
+分配的提交检查；此前各组件失败点保留。测试使用实际 Native 对象、实际 S 数据操作及 CPU
+物理缓冲替身，**没有执行 Linux 归档授权入口**，不能当作最终权限验收。当前小 fixture 的
+C peak 为 104,111 bytes、M peak 为 351 bytes，不是模型或全进程内存上界。
+
+Linux 测试已加入同 blob 双回执、已计算边界、分配失败、S 分配期间 retire/forget/抢占绑定
+后的最终回滚。真实模型测试新增独立 `save`/`restore` 进程，以原始 native continuation 作
+输出基线，并要求实际 history hit、同 owner 转冷/再导入及附件退休拒绝。模型测试仅完成
+Windows 语法检查，Linux/链接/GPU 尚未运行。原生 import/规范前缀重放属于不同路径，不能
+用旧 SourceReplayAsNew 结果代替这一批。
+
+成本是恢复时的私有整理/图反馈副本及保守 C 余量；全部合法目录和 S 数据仍须有额度，
+I/O、性能、RSS 未测。接口/源码现为候选，完整 Native build、文件最终授权与实际模型循环
+均待 SSH 恢复验证；请求级显式续算、取消/资源故障及长期质量仍未完成。
+见 [C11f 实现、证据与未验证项](experiments/2026-11-01-lifecycle-checkpoint-publish/summary.json)。
+
 ## 下一步的完整原生链路
 
 1. SSH 恢复后先取回已启动任务的最终状态和日志，再编译最新保存候选。真实模型检查完整
    文件、退休标记、全部合法目录引用、C/H/D 边界与迟到工单拒绝，不复用旧模型二进制。
-2. 在 C11c–C11e 私有准备上，完成 S/native 新身份的原子发布/回滚、正常执行资源预约、
+2. 验收 C11f 的最终授权与 S/native 原子发布/回滚，再接通请求级原生续算及正常执行资源预约、
    GPU 上传及最终许可复核；成功才发布新 S/native 身份，失败不暴露半恢复状态。
 3. 接通 Engine 新域恢复入口；验证普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程
    恢复及独立输出基线，旧版本、遗忘和退休不得绕过新身份许可。

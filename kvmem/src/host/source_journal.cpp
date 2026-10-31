@@ -165,7 +165,12 @@ SourceRef SourceJournalStore::capture(const SourceConfiguration & configuration,
     return capture_impl(configuration, tokens, count, events, event_count, computed);
 }
 SourceRef SourceJournalStore::import_image(const SourceImage & image) {
+    return import_image_impl(image,0);
+}
+SourceRef SourceJournalStore::import_image_impl(const SourceImage & image,uint64_t computed) {
     const auto origin = image.origin();
+    if (computed>origin.computed_frontier)
+        throw MemoryError(MemoryErrorCode::InvalidPlan,"checkpoint import exceeds its evaluated source prefix");
     if (origin.accepted_frontier > limits_.max_tokens || origin.events > limits_.max_events)
         exhausted("source import row/event limit exceeded");
     // Reject moved-from images and size/geometry limits before touching S.
@@ -208,9 +213,10 @@ SourceRef SourceJournalStore::import_image(const SourceImage & image) {
         std::memcpy(prepared.events.writable_data()+i*sizeof(SourceEvent), &event, sizeof(event));
         previous_end = event.end;
     }
-    prepared.state = {{{next_id_, incarnation_}, 1}, origin.configuration, {}, 0, origin.accepted_frontier, 0, origin.events};
+    prepared.state = {{{next_id_, incarnation_}, 1}, origin.configuration, {}, 0, origin.accepted_frontier, computed, origin.events};
     // All fallible work was private. Neither old parent identity nor a claimed
-    // computed frontier is installed; this is new source, not restored KV.
+    // computed frontier is installed by ordinary DATA import. An inherited
+    // frontier is only passed by current SourceArchive checkpoint authority.
     *destination = std::move(prepared); ++next_id_;
     return destination->state.ref;
 }
