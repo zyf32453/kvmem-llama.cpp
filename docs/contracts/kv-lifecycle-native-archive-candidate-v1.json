@@ -1,0 +1,753 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-31",
+  "stage": "C8_native_source_archive_first_scope_qualified",
+  "production_qualified": false,
+  "primary": {
+    "backend": "ninfer",
+    "source_commit": "b67a45eacb0b38ab9d5ed1cf425632760e293f9e",
+    "branch_at_freeze": "codex/kv-lifecycle-checkpoint-resume",
+    "native": {
+      "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
+      "patched_tree": "8a8c71483cb31ac675671d2f0baf34eae7b9fca3",
+      "patch_count": 31
+    },
+    "historical_binary_sha256": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+    "current_binary_sha256": "27dff1c4722c80ee214d1cbc3b1e7113c7368448285da86bb60d9ef69c11f72c"
+  },
+  "secondary": {
+    "backend": "llamacpp",
+    "source_commit": "be21a18e6141dbd4a6ff26d214e01903ffb947c3",
+    "role": "legacy reference and shared compatibility probe; not native NInfer GPU evidence"
+  },
+  "model": {
+    "name": "Qwen3.8-27B-GSQ-RCO-IQ3_S NInfer v3",
+    "bytes": 15017456896,
+    "sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+    "remote_path": "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+    "hash_observation": {
+      "date": "2026-10-31",
+      "host": "yifan@100.118.87.22",
+      "file_unchanged_during_hash": true
+    }
+  },
+  "hash_encoding": "SHA-256 of Git text with CRLF normalized to LF; model hash is exact binary bytes",
+  "source_files": {
+    "CMakeLists.txt": "e0a3465d37451182dbf7a5876b324e01bab938531e11e5a2a1d35f3d5900f5de",
+    "backends/ninfer/docs/maintainer/engine-architecture.md": "3b1115a4358e0f6651df7bc328ebaf0e0b3719734ce2d85b9427ea194056abb9",
+    "backends/ninfer/include/ninfer/engine.h": "4f5e511299b01b56716adf5eb31eeabeec24fe4c1e97ba2861c0b96e7f561502",
+    "backends/ninfer/include/ninfer/historical_source.h": "c3c10941ff90fcd503d20d873b1a0c6255cbea9b1d951d81a6f9aa0654ced51c",
+    "backends/ninfer/include/ninfer/types_fwd.h": "7fc9a42646cb0382bde004135a827b28c93583f661fe6f8d5bb5a4dfb82868dc",
+    "backends/ninfer/src/models/qwen3_5/frontend/frontend.cpp": "eeb581db56521018a586dcb91456e8c7b1eebe0dfc8b3f2ed37ab6e6a866450b",
+    "backends/ninfer/src/models/qwen3_5/frontend/frontend.h": "dc2eabd320cac914d63c329ba6eca07815eae3d43a1259c5bffde0b720edba12",
+    "backends/ninfer/src/models/qwen3_5/frontend/prepared_prompt.h": "23d683f0f28b67075b999268fb6e0ee19aeec2781c7a411e40e7739c90c445d7",
+    "backends/ninfer/src/models/qwen3_5/program/program.cpp": "16becd6af04dd8071076a9548a539628a771e4d78bcf4a6484b94cb643d8a14c",
+    "backends/ninfer/src/models/qwen3_5/program/program.h": "0523f860597c34af574333cc5be8655adbca8087cde672a581ed1f634e3aa4c5",
+    "backends/ninfer/src/models/qwen3_5/program/program_impl.h": "53191995ce03cf44a29280bcaa68e0f1d0fb9802d26a55e867d3fc04d89e0747",
+    "backends/ninfer/src/models/qwen3_5/program/storage/source_journal.cpp": "ebfc8840f5e08400b0218fbc5aaf0aab8e4f8772f764bc82e2582fd88516ada1",
+    "backends/ninfer/src/runtime/engine/engine.cpp": "44f871f91e677edc206ac339697ad91dd3bb6ff60aef8f9d0a1f1e983a80ee52",
+    "backends/ninfer/src/runtime/engine/engine_core.h": "42773d8c58be9d424f1d485d161be01fccff2aada93b5a0276fec1ec9d95aa72",
+    "backends/ninfer/tests/cmake/RuntimeTests.cmake": "3d1d9fa9270f76bdfa2377c158e87ca27fc1ba7c6026ed5531f95f28ac708d98",
+    "backends/ninfer/tests/models/qwen3_5/test_frontend.cpp": "5982eabd50f315eac3eb22b58b32ab7c5a9fc8a60b6b7b5172a9c6e021259c63",
+    "backends/ninfer/tests/test_engine_source_archive_real.cpp": "32d6b0e42431e424e9fbd040b35a1dacff3eb08d9f6e913b008dc6d5c077c324",
+    "backends/patches/ninfer-checkpoint-budget.patch": "df6e97806b8249d9e0a84c9b683ef7fbd78fb49972a87aa97d64a866e55397e4",
+    "backends/patches/ninfer-historical-gc-lifecycle.patch": "77926d844af73be0ef162167666398b14dcb229cff74073816916c73a71401b6",
+    "backends/patches/ninfer-historical-gc-request-errors.patch": "a907d5191977633191de24197d43f4d85ef00d467bd0bd416f6f98b5333dfda9",
+    "backends/patches/ninfer-source-archive.patch": "409fb758344f67ba5cdf90a0cc7a19812d854cbd9408029ab68f69de85c84fde",
+    "backends/patches/ninfer-source-forget.patch": "16d787dbcfeb6020b945d22fb4b48faa27dbf21b96278eeeefcf59ce83a91aab",
+    "backends/patches/ninfer-source-journal.patch": "a05efd3d8eaa3616f32b5b328722c902e1f33ac255dd714e12490b689729a33c",
+    "backends/patches/ninfer-source-recovery.patch": "207c5c4a1f62d07fcaa1daa1e9b44a44dbb6049bc983a0aa2cd541b5b9d7c0d4",
+    "backends/versions.json": "12447ff8666d5f6c7e8c62e39cc44d53a060abf0578338a8fdaf7ba178bd34b3",
+    "kvmem/CMakeLists.txt": "e684ac3183181ef409237f1037ee8ea6a9b1d5a7e655e77623656cc96a5db664",
+    "kvmem/include/kvmem/checkpoint_image.hpp": "78120cc8dbf2e8e6269b2d2e6c94aef10d619e1673c038becabfe785999add8a",
+    "kvmem/include/kvmem/checkpoint_policy.hpp": "e79b694bc6a72ecb021c3e52d32a36783f4207312269775c568af6c2ff03d43c",
+    "kvmem/include/kvmem/cli_options.h": "761ec131aec4a7b0cb518580b9fe0fc0f9a3498ea3cc1dee9f904b4be232cc62",
+    "kvmem/include/kvmem/graph_recall.hpp": "a3749e12187e20aec78bb57eb1d577cb0c3416c4b952d0c76a20ca6ae32e05bb",
+    "kvmem/include/kvmem/historical_kv_audit.hpp": "639f833debfa296b9bf8b241957afba109090bc83a3c0eb1e61ecdbde244a251",
+    "kvmem/include/kvmem/historical_kv_auxiliary.hpp": "e402a51205b50132937f365838d0c525d09a3778ac6aaa29f743160d16a6e442",
+    "kvmem/include/kvmem/historical_kv_gc.hpp": "dadce22f020ec3fc351dc44b94c93b14e71eafa02e9365cbec7b6c182b6a3f78",
+    "kvmem/include/kvmem/historical_kv_page_features.hpp": "7441c7d905d6b1eba0a9af7bda7cd3b44e78be94cc048c5069cb9b2d48a5f80a",
+    "kvmem/include/kvmem/historical_kv_page_gc.hpp": "3163b6c7c4c6383bc7b9db91e2a43f90b1cffc12b68bb5faf50cf79fc4278f42",
+    "kvmem/include/kvmem/historical_kv_policy.hpp": "4c2e5d5d7d23492e7bd40b2ecd6e23e071fc223c4fe35f1a5c6c620c47fdab5e",
+    "kvmem/include/kvmem/historical_kv_redundancy.hpp": "b01b5ec15d611dbeaa11e856391235ed1fb81129f9702760c9ab5e85a4a104e1",
+    "kvmem/include/kvmem/historical_kv_repository.hpp": "655d561a4932c2531a1237fdc5705bceaa4d0ea37e4ca300025dec11e99067db",
+    "kvmem/include/kvmem/host_kv_storage.hpp": "ba4aaa1e26038e610e813bd63df5a7a27430d7efbb43b0b8bb0b495788df9f78",
+    "kvmem/include/kvmem/kv_content.hpp": "9964eb11d3e8d654e833e49d5a0f0e14f6e9328e949964d18e751d4cab880080",
+    "kvmem/include/kvmem/kvmem_backend.hpp": "af9ed7c8162976db2804c1d6627ab61120248d7101dd7d46212af1a13fecc1e4",
+    "kvmem/include/kvmem/kvmem_runtime.hpp": "61fd8379f735cfa254998cb25c2427a9287b9b000d69b0f93bb92cf9a1f0d8ad",
+    "kvmem/include/kvmem/kvmem_store.hpp": "66df297b45383a0cc61ea99f58cab497f72ba86cb06c1ac46f1520f715c205fe",
+    "kvmem/include/kvmem/launch_contract.hpp": "15043a404169185fb63338deb4a8c77b1e568619399a84dcd9c762db3c685d78",
+    "kvmem/include/kvmem/lrfu.hpp": "dbc0ba8938053e78ca0572117198bbf1412fb954f0def04dad620d829f888e28",
+    "kvmem/include/kvmem/mean_key_retrieval.hpp": "5a61ca41c58d5418be91685c7c4c68ffed558b889c74cc7201928a46d28428a6",
+    "kvmem/include/kvmem/memory_contract.hpp": "9aa40412f16848aa5d041ae32143d4901ead05367f0332517d06c775646dcb93",
+    "kvmem/include/kvmem/monitor.hpp": "cc17b4318ad5890e5f1d707e35b4440ece4d1c40bf32e3d748274b9885120fab",
+    "kvmem/include/kvmem/monitor_hardware.hpp": "3c228f060c3324223a0b25cc8837314a13ba350b878cc765400f3b4d8c205e41",
+    "kvmem/include/kvmem/monitor_rate.hpp": "6897df05da6cf6761542e077b5d97dd2db22e4a92427d011d69f510fb0ae67db",
+    "kvmem/include/kvmem/native_kv_payload.hpp": "3d62791520c0dcf24ecb2dd9786074a3088a65400b442dfd571fd414a5e39b09",
+    "kvmem/include/kvmem/page_softmax_cuda.hpp": "87b359cea062ee29ad2b85efdb15099d8bc0491bdf18f7cd8978c0f2f3875978",
+    "kvmem/include/kvmem/pinned_kv_tier.hpp": "be26285a94c133b1684f888c2af4bcf355a1895781e1efa2889145e924228302",
+    "kvmem/include/kvmem/prefix_checkpoint.hpp": "caa276c1361709d10dda3091c20c710dc8dffc94e6dcd17bfe2f91e3ed2ef5cd",
+    "kvmem/include/kvmem/query_policy.hpp": "d3526d3777365b988006daeab1bf90324b0e47a7278faced47d7325e8b35b088",
+    "kvmem/include/kvmem/raw_kv_store.hpp": "595d83de4a0b6e9818b9946cd0515e4f46aae8221c1eeb9a8e9669e5a3cf0409",
+    "kvmem/include/kvmem/request_control.hpp": "6a84aa52673f7444f24a577b1e07417b7e859cb215290baec0da73638091b566",
+    "kvmem/include/kvmem/retrieval_options.hpp": "67760a81a237708ab64c9e9acd48f7fca500d3f2a31026f12790a01ebab49a77",
+    "kvmem/include/kvmem/rope.hpp": "53f6e8d082c0770d273eaccf528b03ba29ff0918af50e4b3dfd8a5055405d12c",
+    "kvmem/include/kvmem/session_memory.hpp": "f29199e0ddb24a7a5b56f922725e2f6b35ced24398abe788beb6931e5c42a2d0",
+    "kvmem/include/kvmem/snapshot.hpp": "91713cab014a87fd469c3a8d9483169ec914a1cbd1bda9d25539abdd1c5599c0",
+    "kvmem/include/kvmem/snapshot_buffer.hpp": "56617192a10d1f348b5798b9c8d3ef592d47648add0f9d42fd216402ee0fcce3",
+    "kvmem/include/kvmem/source_archive.hpp": "0924098cad138dc95617310e03c78e9201747ae1d9fe3a4e7dc5ce64ae95194d",
+    "kvmem/include/kvmem/source_image.hpp": "7faa3df80c61972139225d5e74922cce98c98346e5c3b4745f09c55b55970902",
+    "kvmem/include/kvmem/source_journal.hpp": "4e70e5e63bad3a05be5592e39a2ad761459289e36666322e8abad07e03cce53b",
+    "kvmem/include/kvmem/source_recovery.hpp": "e24d756401d0085da4e56bbfb7ad45bd184d60382923281d8bd7f493fd8b6fe3",
+    "kvmem/include/kvmem/speculative.hpp": "eeafecda631a96c783485c9b0d98a81f9a2151d71cd7f59521a93821f96b2a2c",
+    "kvmem/include/kvmem/spill_io.hpp": "9cf9b7e9946e93aa7528b5ead098620e1dbabbc0dc4e6df19330e51c82f2dcd9",
+    "kvmem/include/kvmem/token_options.hpp": "fbfb7ed3b2adb57713e02f2e160b95e764534c90e16ddaa228ba4ba078aee812",
+    "kvmem/src/cuda/page_softmax.cu": "b6ba6441aba48245290e8d7a418a3aa6c01370c935dc09b21c01ce8d47dd82d2",
+    "kvmem/src/host/checkpoint_policy.cpp": "cab66e988ad26c73ba48246ff10bcfabd642ed7a09ce91d80e02fd379ece0c5e",
+    "kvmem/src/host/graph_recall.cpp": "cd4b44e9b2900ad40240a2dbf32c8cf5b739c3d5f13470ab0622098e3b1053bb",
+    "kvmem/src/host/historical_kv_auxiliary.cpp": "ede6e597a0c07eae9d8e1be6472b4d190872916bb8e8b1e7d4da81fbfd635b9e",
+    "kvmem/src/host/historical_kv_gc.cpp": "511de1bb22e843155ee0058d61935f958ff5847c50c3c15a65023d7350b21c44",
+    "kvmem/src/host/historical_kv_page_features.cpp": "6d007941debc28029026e0c6836967c130ec7fde8aa74a7e037af1298f0c8642",
+    "kvmem/src/host/historical_kv_page_gc.cpp": "6e3c72291b0bf31078d4e8187515e1410017531aeadc776d844958aff4b9dcf8",
+    "kvmem/src/host/historical_kv_policy_lru.cpp": "beb8fb7613f0c08daea2ea4e9765e882874dc50993b60d4bbf183ce38672a36c",
+    "kvmem/src/host/historical_kv_redundancy.cpp": "d0f2157ee148514ba413a831a07788d5e699716c69946f76814e9070af7f68b1",
+    "kvmem/src/host/historical_kv_repository.cpp": "0ef60275a79e5755a8b12849c0755c7dc349104ad07aee73b36e4fa83d40ef16",
+    "kvmem/src/host/host_kv_storage.cpp": "6e13ba1bfdad998c6a6ce4817ffb197329ade27dc85b07092351fe5f472a12ad",
+    "kvmem/src/host/kv_content.cpp": "71de48c0d6df92d7a2136bb9e83716109df749f188859045c3b7f9e8384dd0c7",
+    "kvmem/src/host/kvmem_runtime.cpp": "5f2c1f6c15ba6b582afdf0f077fc47406800a279d599f448b4945a5c082dd797",
+    "kvmem/src/host/kvmem_store.cpp": "97b0af2dffb246eba254fa17373df3078b16ec4a7d94d5d9c2cb4890052b7160",
+    "kvmem/src/host/mean_key_retrieval.cpp": "79753f753a17955b7ebd6d7914f810d0c3efab993e36f7029d6acc239e8d08e3",
+    "kvmem/src/host/memory_contract.cpp": "cc571edda0552118353f5784ac2ccd9ca9754c52a72ed46f3ddd42614d42a45f",
+    "kvmem/src/host/native_kv_payload.cpp": "3ce20cf9c765444c3390c0b0b1f4cd3fd5036d47b857bb19f7fccc1adb32576c",
+    "kvmem/src/host/prefix_checkpoint.cpp": "84aff78773192af5de24c65a8e1de930a289571c68478b8ba8b59115b9161105",
+    "kvmem/src/host/raw_kv_store.cpp": "6e5bde72805eac086e1b6384e6de94a4a3b5fe0d6d21b2cd7b4c1a5044295878",
+    "kvmem/src/host/rope.cpp": "668afdd921c3c3dee770cc1e1840a028171e590975f1f991e0be9b0b663bfa16",
+    "kvmem/src/host/session_memory.cpp": "637be310d20103f13b8e8db82480c6528817cf0f629efa2e5cfd6eadfc6f9912",
+    "kvmem/src/host/source_archive.cpp": "014f3bda256bf33241ee5b7e11373c686afae66b3421382537009ce18e0c9760",
+    "kvmem/src/host/source_image.cpp": "30f647fb09f462adecd540ad90375bf115a52db31505d209145918a76c9a07c8",
+    "kvmem/src/host/source_journal.cpp": "fce45fe19d99e3ac154241141fa5961216292e5d25c82a96eb91bab51567c251",
+    "kvmem/src/host/source_recovery.cpp": "d09a648e72c8249e7f0e71d12f4573ddf93a932237ede4a8403859f886e6a5e2",
+    "kvmem/src/host/spill_io.cpp": "297eb0496bb3121a6bb7173006915aa011f2355af1070b5f70efe8566854c580",
+    "kvmem/tests/backend_rebind_test.cpp": "2f88db8d78fc4cd8bc700e7875155769a33e84ba2d7902a2c57a73382d846ba7",
+    "kvmem/tests/checkpoint_image_test.cpp": "c44c805d7375ab531a21c8d5a29f5d18fdfa68f7aa2d661d429364546e55c6f5",
+    "kvmem/tests/checkpoint_policy_test.cpp": "66fd201a894e6815c43002d863ae16f0017e3d4188c0f5c722d8c631ff7fde21",
+    "kvmem/tests/graph_recall_cuda_test.cpp": "33f06fb8d8a0901daa5d5f9a2d95677f2ac6100a75e8e42e3378720601ee8cad",
+    "kvmem/tests/graph_recall_test.cpp": "dd0f7cf15fafbb5ff1175a04e2f07fdf4c6902bbdc02561e9c0a7f713f8e7df4",
+    "kvmem/tests/historical_gc_ninfer_core_test.cpp": "f845700aa438d03c7b3a851c1da1b5e81ec7df2c9cb1a97c531bbf41e1fea36a",
+    "kvmem/tests/historical_kv_auxiliary_budget_test.cpp": "d35bc1e86f9acd7d3dcb17b2f555036c1a4ff986e966d062218d1e1977df79b3",
+    "kvmem/tests/historical_kv_boundary_mailbox_test.cpp": "27544e0bb4f382112fe9af64234653b9daa051690ed2d4d1d835bc0ab8b37502",
+    "kvmem/tests/historical_kv_commit_conditions_test.cpp": "5732d11b98ad81bae1bd3cdaaf174b7949c7fb9e955852bd3a603b1f1dd08a4d",
+    "kvmem/tests/historical_kv_owner_budget_test.cpp": "f3073ed99a7af3cb74de956edf0e5ee016691715e2008d4fbc2cbb6ec4afe16a",
+    "kvmem/tests/historical_kv_range_lock_test.cpp": "45bbed69c9ca0cebc2d21372e1e8002a862c6bcc1f0604b7c7ba9d300e510820",
+    "kvmem/tests/historical_kv_score_evidence_test.cpp": "71db9acc5b4c59de9832b53d0267591c1eb0f371c4cdd6c3ac994bdf72a11e7f",
+    "kvmem/tests/historical_kv_service_health_test.cpp": "0d15ed01b91b646ee048cb59f365901dde0991eae2de56596dd73228e6898e65",
+    "kvmem/tests/historical_kv_witness_lifecycle_test.cpp": "dbecff0361e10274e0816880bf80a08a41075dd625d27e864d7e2c5f74ecc008",
+    "kvmem/tests/host_kv_storage_test.cpp": "6bb913838ee20d097df8840cd240461756e2fb1e78dd7748d0aa097054cd7258",
+    "kvmem/tests/kv_content_test.cpp": "d56c09beb0c2327d0b381957562bc17807c042b3335d2ee382606155ea0320ce",
+    "kvmem/tests/kvmem_runtime_test.cpp": "75f529e9e1fb0e0406930bdf08125752afc42be675f5168f4b59e3dea7bb45e0",
+    "kvmem/tests/kvmem_store_test.cpp": "b0137f75e4c3aa9e9b3e602508f22f6839813246ce1ba485bc8aafd52f5a1da0",
+    "kvmem/tests/mean_key_retrieval_test.cpp": "8c12920c3302f47dbad5bbfd2ed146db644b56978ff300f71b9beef9108fbcf4",
+    "kvmem/tests/memory_contract_test.cpp": "2dee409fb853f9bc1cb40e54fc3f9c5f88c6f9cc1fc37fd4e96b425d8dcef2d5",
+    "kvmem/tests/memory_test_support.hpp": "6ab869a5bfe66e4c212a58005a187139387ddc0fdbdb19c4105343ffbc95b6f9",
+    "kvmem/tests/native_kv_payload_test.cpp": "d88e7b392f7c9e53af4333dad33101609c3a0c3ae9d7306ca04428a4f37e4c98",
+    "kvmem/tests/native_residency_test.cpp": "47569ea858de40a2a247bf8b2654caf27823022c3e9df412d6eba553996f9216",
+    "kvmem/tests/pinned_kv_tier_test.cpp": "5f0bf4c544002b07c7e233d251dc777269957dde08739e54b6690c672ec5a2ad",
+    "kvmem/tests/prefix_checkpoint_test.cpp": "7ee3ef40882d9749a7903427fd53c70fd398824643d905ad90b493ee59e26cf7",
+    "kvmem/tests/query_policy_test.cpp": "2a23558d270b134b38111ad74af0d3002d853510d5a7435c8311fbae5929851d",
+    "kvmem/tests/raw_kv_store_test.cpp": "9923c02c892784d0d414f2775d1b47ee5e84fc6caea3ec050dcfaed73b8c4698",
+    "kvmem/tests/source_archive_test.cpp": "2b3108a9e89c75e934371fdd4ec9509491c7ae78f9d03d9345c2408e26f27d8d",
+    "kvmem/tests/source_image_test.cpp": "c5392ce220138d389d4f9760023b73a627697b8b8ff07c415c1fa65883875e5d",
+    "kvmem/tests/source_journal_test.cpp": "51a7499b049a0b145249376fde087543e62394b38f4471f8bd592c3b46e6ba4c",
+    "kvmem/tests/source_recovery_test.cpp": "50fa1adfc836fb78ba689fb31b5505f24daac00426a3fd5a4c100d82565236cf",
+    "kvmem/tests/spill_io_test.cpp": "7136b8994e8123398cdcc554c29782ed108df26f554321ed7e996a634a36a198",
+    "kvmem/tests/tiered_kv_storage_test.cpp": "8ab3fdabfc5528c02797278a316a90185ed6404e18bcda5b6a95126e9d242ccb",
+    "kvmem/tests/token_options_test.cpp": "0d06bf407737baa850c66152e8a82590f3b556fa3b17f08120b5341616c67b4a",
+    "scripts/check_kv_lifecycle_baseline.py": "991f822d9868d92d4a81760e79f8dbd57ee166ea0b9eea5a396abdb9b6c0bdcf",
+    "scripts/ninfer_checkpoint_budget_acceptance.py": "69e1c3625bbb00b4882120a350b796c2e125dadb6302030e1b44b7777b1c1595",
+    "scripts/ninfer_gc_acceptance.py": "1a4ec965534f5f335bc8ae747fd6393eee320bae5a3d3d1f79976d057d606ee9",
+    "scripts/ninfer_gc_harbor.py": "060abd42b4ac45038f51f42c723e7b23fd5418c9c12512f27d8359ac7616a2e7",
+    "scripts/ninfer_gc_latency.py": "d492cc68e771f7ef618d47202ae4f9a34c8abdb379b85839a21fe3db7c5b4d3b",
+    "scripts/ninfer_lifecycle_service_acceptance.py": "cbe98816822315d4b3ae54dcb9af027dd73f1e3355b5486522f436ada93efb40",
+    "scripts/ninfer_source_acceptance.py": "6d9167ce414f5977f1a6b61b56a76e52233e05e0ca405b7a44dd86d3753dc4b7",
+    "scripts/ninfer_source_forget_acceptance.py": "611c6142f482c6db138a4af0b7b87adb714d2b7988ad2c2e97f1abd414767885",
+    "scripts/ninfer_source_recovery_acceptance.py": "cdf48f4b670a55945ba6ff98a5c8a865e52e379427f523f1c34a6d2ff9ef8fef",
+    "scripts/prepare-backends.py": "17b15883c347555096b66d199c3231db2bf87bda71cfae2b39a23c4f9b1c8019",
+    "tests/kv-lifecycle-compatibility-probe.cpp": "26ff6a4073f87127439244683f704872a152cc85e5d332a24308ef5208538855",
+    "tests/test_kv_lifecycle_baseline.py": "98326e52b8893a6f11f00abc12749c6bb6ea9f89754fee1a0da9ec249f83e587",
+    "tests/test_ninfer_lifecycle_service_acceptance.py": "4c35efd31fcddbb963cefe2aaa5c7f2a961bbea2ca56024b4c61dc2b80f53e28"
+  },
+  "profiles": [
+    {
+      "backend": "ninfer",
+      "gpu_count": 1,
+      "max_concurrency": 1,
+      "modality": "text",
+      "historical_tier": "ram",
+      "page_tokens": 64,
+      "kv_dtype": "rk4v4",
+      "admission": "bounded_prefill",
+      "query_scorer": "meanq-cosine",
+      "query_aggregation": "max",
+      "lrfu": false,
+      "graph_alpha": 0,
+      "query_max_tokens": 512,
+      "query_replay_max_tokens": 2048,
+      "policy_modes": [
+        "off",
+        "lru",
+        "redundancy"
+      ],
+      "prefill_chunk": 512,
+      "id": "checkpoint-functional-none",
+      "spec": "none",
+      "active_tokens": 2048,
+      "reserve_tokens": 512,
+      "host_mib": 96,
+      "context_tokens": 65536,
+      "output_tokens": 8,
+      "records": 256,
+      "seed": 42,
+      "temperature": 0,
+      "timing_unit": "functional_not_performance",
+      "entrypoint": "scripts/ninfer_checkpoint_budget_acceptance.py",
+      "audit": true,
+      "sink_recent": "frozen native defaults: sink_tokens=0 means one page; recent_tokens=64",
+      "gc_aux_mib": 1024,
+      "source_mib": 16,
+      "input_tokens": 1024,
+      "rebuild_prefix_tokens": 1024,
+      "recovery_bytes": 8192,
+      "retained_sessions": 8,
+      "qualified_policy_modes": [
+        "lru",
+        "redundancy"
+      ],
+      "sink_requested_tokens": 0,
+      "effective_sink_pages": 1,
+      "recent_tokens": 64,
+      "model_stop_defaults": false,
+      "reasoning_loop": "off",
+      "checkpoint_mib": 384,
+      "quota_probe_checkpoint_mib": 1,
+      "source_regression_checkpoint_mib": 2048,
+      "rotation_requests": 8
+    },
+    {
+      "backend": "ninfer",
+      "gpu_count": 1,
+      "max_concurrency": 1,
+      "modality": "text",
+      "historical_tier": "ram",
+      "page_tokens": 64,
+      "kv_dtype": "rk4v4",
+      "admission": "bounded_prefill",
+      "query_scorer": "meanq-cosine",
+      "query_aggregation": "max",
+      "lrfu": false,
+      "graph_alpha": 0,
+      "query_max_tokens": 512,
+      "query_replay_max_tokens": 2048,
+      "policy_modes": [
+        "off",
+        "lru",
+        "redundancy"
+      ],
+      "prefill_chunk": 512,
+      "id": "checkpoint-functional-mtp4",
+      "spec": "mtp4",
+      "active_tokens": 2048,
+      "reserve_tokens": 512,
+      "host_mib": 96,
+      "context_tokens": 65536,
+      "output_tokens": 8,
+      "records": 256,
+      "seed": 42,
+      "temperature": 0,
+      "timing_unit": "functional_not_performance",
+      "entrypoint": "scripts/ninfer_checkpoint_budget_acceptance.py",
+      "audit": true,
+      "sink_recent": "frozen native defaults: sink_tokens=0 means one page; recent_tokens=64",
+      "gc_aux_mib": 1024,
+      "source_mib": 16,
+      "input_tokens": 1024,
+      "rebuild_prefix_tokens": 1024,
+      "recovery_bytes": 8192,
+      "retained_sessions": 8,
+      "qualified_policy_modes": [
+        "lru",
+        "redundancy"
+      ],
+      "sink_requested_tokens": 0,
+      "effective_sink_pages": 1,
+      "recent_tokens": 64,
+      "model_stop_defaults": false,
+      "reasoning_loop": "off",
+      "checkpoint_mib": 384,
+      "quota_probe_checkpoint_mib": 1,
+      "source_regression_checkpoint_mib": 2048,
+      "rotation_requests": 8
+    }
+  ],
+  "host_tests": [
+    "historical_gc_ninfer_core_test",
+    "memory_contract_test",
+    "native_kv_payload_test",
+    "host_kv_storage_test",
+    "spill_io_test",
+    "tiered_kv_storage_test",
+    "native_residency_test",
+    "kv_content_test",
+    "prefix_checkpoint_test",
+    "checkpoint_policy_test",
+    "checkpoint_image_test",
+    "historical_kv_boundary_mailbox_test",
+    "historical_kv_commit_conditions_test",
+    "historical_kv_range_lock_test",
+    "historical_kv_witness_lifecycle_test",
+    "historical_kv_score_evidence_test",
+    "historical_kv_auxiliary_budget_test",
+    "historical_kv_owner_budget_test",
+    "historical_kv_service_health_test",
+    "mean_key_retrieval_test",
+    "source_journal_test",
+    "source_recovery_test",
+    "source_image_test"
+  ],
+  "compatibility_probe": "tests/kv-lifecycle-compatibility-probe.cpp",
+  "contracts": [
+    {
+      "id": "C01",
+      "guarantee": "Retired history is excluded from new planning; original positions are not compacted",
+      "level": "host_test",
+      "tests": [
+        "memory_contract_test",
+        "native_residency_test"
+      ]
+    },
+    {
+      "id": "C02",
+      "guarantee": "Native proposals commit only at the explicit boundary; late protection is rechecked",
+      "level": "host_test",
+      "tests": [
+        "historical_gc_ninfer_core_test"
+      ]
+    },
+    {
+      "id": "C03",
+      "guarantee": "Host quota includes reservations and retained readers until final ownership release",
+      "level": "host_test",
+      "tests": [
+        "host_kv_storage_test",
+        "historical_gc_ninfer_core_test"
+      ]
+    },
+    {
+      "id": "C04",
+      "guarantee": "Physical capacity pressure includes unsealed native pages",
+      "level": "host_test",
+      "tests": [
+        "historical_gc_ninfer_core_test"
+      ]
+    },
+    {
+      "id": "C05",
+      "guarantee": "Partial-tail restore invalidates descriptors; Query snapshot stays stable during a round",
+      "level": "host_test",
+      "tests": [
+        "historical_gc_ninfer_core_test"
+      ]
+    },
+    {
+      "id": "C06",
+      "guarantee": "Transfer failure and stale plans do not publish an incomplete working set",
+      "level": "host_test",
+      "tests": [
+        "memory_contract_test",
+        "native_kv_payload_test"
+      ]
+    },
+    {
+      "id": "C07",
+      "guarantee": "Idle checkpoint aliases can be removed while an admitted state reference survives",
+      "level": "host_test",
+      "tests": [
+        "prefix_checkpoint_test",
+        "checkpoint_policy_test",
+        "checkpoint_image_test"
+      ]
+    },
+    {
+      "id": "C08",
+      "guarantee": "Replica eviction preserves valid data and charges transition/leased allocations",
+      "level": "host_test",
+      "tests": [
+        "tiered_kv_storage_test",
+        "spill_io_test"
+      ]
+    },
+    {
+      "id": "C09",
+      "guarantee": "Content/history versions participate in compatibility checks",
+      "level": "host_test",
+      "tests": [
+        "kv_content_test",
+        "memory_contract_test"
+      ]
+    },
+    {
+      "id": "N01",
+      "guarantee": "Native GC refuses max_concurrency != 1; retired pages are filtered in Query/pressure/checkpoint paths",
+      "level": "pinned_native_patch_and_prior_gpu_evidence",
+      "tests": []
+    },
+    {
+      "id": "N02",
+      "guarantee": "Native prefill wait is bounded at two seconds and may release detached ownership on the foreground",
+      "level": "pinned_native_patch_and_prior_gpu_evidence",
+      "tests": []
+    },
+    {
+      "id": "T01",
+      "guarantee": "Strict whole-request NInfer GC reservation is not implemented",
+      "level": "future_not_supported",
+      "tests": []
+    },
+    {
+      "id": "T02",
+      "guarantee": "General Engine durable recovery and system-wide permanent forgetting remain incomplete; archive-only authority/fences are qualified independently",
+      "level": "future_not_supported",
+      "tests": []
+    },
+    {
+      "id": "B01",
+      "guarantee": "Boundary handoff does not acquire worker mutexes; batch ownership and acknowledgement are exactly once",
+      "level": "host_test",
+      "tests": [
+        "historical_kv_boundary_mailbox_test"
+      ]
+    },
+    {
+      "id": "B02",
+      "guarantee": "Boundary commits evaluate fixed metadata, atomic epochs and native protection without invoking arbitrary policy code or acquiring range mutexes",
+      "level": "host_test",
+      "tests": [
+        "historical_kv_commit_conditions_test",
+        "historical_kv_range_lock_test"
+      ]
+    },
+    {
+      "id": "B03",
+      "guarantee": "Retry preserves the originally authorized epoch; Query replacement and range edits revoke old conditions, monotone prefix growth does not starve them",
+      "level": "host_test",
+      "tests": [
+        "historical_kv_commit_conditions_test"
+      ]
+    },
+    {
+      "id": "B04",
+      "guarantee": "Redundancy retirement binds exact Live witness identity/version atomically to victim retirement; same-batch witness removal, freed/reused witnesses and malformed provenance are rejected without permanent pins",
+      "level": "host_test",
+      "tests": [
+        "historical_kv_witness_lifecycle_test",
+        "historical_kv_score_evidence_test"
+      ]
+    },
+    {
+      "id": "B05",
+      "guarantee": "Scored intents bind feature schema, Query epoch, frozen score-bank epoch and round; raw attention updates do not revoke a frozen bank; ACK records the committed witness",
+      "level": "host_test",
+      "tests": [
+        "historical_kv_score_evidence_test"
+      ]
+    },
+    {
+      "id": "B06",
+      "guarantee": "Explicit shared auxiliary budget caps requested allocator bytes of PageFeatures, ThinkingRanges and redundancy containers including nested edges and scoring temporaries; transient reallocation and old owners remain charged, failures roll back and policy exhaustion preserves old reclamation",
+      "level": "host_test",
+      "tests": [
+        "historical_kv_auxiliary_budget_test"
+      ]
+    },
+    {
+      "id": "B07",
+      "guarantee": "Explicit shared auxiliary account covers GC/bridge owned objects and queues, LRU scratch, repository slot directory/control block, observations and reservation handles; old leases retain real charges; constructor faults/denials roll back; native registration/boundary/ACK/reuse and repeated Retry do not allocate",
+      "level": "host_test",
+      "tests": [
+        "historical_kv_owner_budget_test"
+      ]
+    },
+    {
+      "id": "B08",
+      "guarantee": "Policy/worker/stopped health is visible and sticky; unhealthy owners reject new capacity and boundary batches, old retirements can drain; thread startup failure does not silently restart",
+      "level": "host_test",
+      "tests": [
+        "historical_kv_service_health_test",
+        "historical_kv_owner_budget_test"
+      ]
+    },
+    {
+      "id": "B09",
+      "guarantee": "GC-specific Mean-Q staging is charged to auxiliary budget and matches existing FP32 semantics and independent FP64 oracle in mean/max aggregation",
+      "level": "host_test",
+      "tests": [
+        "mean_key_retrieval_test"
+      ]
+    },
+    {
+      "id": "B10",
+      "level": "native_service_test",
+      "tests": [
+        "stream-quota"
+      ],
+      "guarantee": "A consumed execution batch with explicit KVMem quota failure settles only its request membership, reports typed unavailability and preserves the Engine and pending FIFO; stale consumed sequences are not aborted again"
+    },
+    {
+      "id": "R01",
+      "level": "host_test",
+      "tests": [
+        "source_journal_test"
+      ],
+      "guarantee": "An owner-serialized RAM source directory preserves accepted token IDs independently of derived KV retirement, separately tracks computed frontier, bounds directory and real buffer capacities including transient growth, rejects pressure without forgetting, and fences stale revisions/store identities and explicitly forgotten descendant records; capture/append/branch allocation failure publishes nothing partial"
+    },
+    {
+      "id": "R02",
+      "level": "native_service_test",
+      "tests": [
+        "capture",
+        "quota",
+        "cancel-prefill",
+        "cancel-decode"
+      ],
+      "guarantee": "Native recording keeps admitted input independent of computed KV, records only accepted output after whole commits, exposes real S bounds and preserves request-local quota/cancel cleanup and pending FIFO; no recovery execution claim"
+    },
+    {
+      "id": "R03",
+      "level": "host_test",
+      "tests": [
+        "source_recovery_test"
+      ],
+      "guarantee": "Explicit canonical source rebuild planning requires a different owner-issued domain identity, compatible current source configuration, complete prefix/output capacity and current source/domain revisions. Source staging has a separate real HostKvStorage charge and strong allocation-failure guarantee; local forget or changed source/domain/configuration rejects reads. Planning/staging neither reserve model state nor publish a recovered native computation."
+    },
+    {
+      "id": "R04",
+      "level": "native_model_test",
+      "tests": [
+        "ninfer_engine_source_recovery_real_test"
+      ],
+      "guarantee": "Explicit canonical source rebuild uses a fresh native domain and ordinary Engine reservation/execution, revalidates source receipts, refuses incomplete retention, returns R on cancellation and completion, and preserves old retirement; required qualification includes actual reclaimed pages inside the rebuilt prefix, source-only rebuild after old-window eviction, independent fresh-ID oracle, real MTP rounds, reserve/capacity rejection and first-token stop. Results are recorded separately, not implied by this manifest. Each terminal request returns its own accepted-source receipt (including partial cancellation), and explicit rebuild branches expose exact parent/prefix metadata independently of later requests."
+    },
+    {
+      "id": "R05",
+      "level": "native_model_test",
+      "tests": [
+        "ninfer_engine_source_forget_real_test"
+      ],
+      "guarantee": "Quiescent Engine-local source-family forget revokes retained native KV/checkpoint/coverage aliases before source deletion; prepared rebuilds fail admission without early R refund, stale/busy preflight is nonmutating, independent sources survive; no persisted/global external erasure claim."
+    },
+    {
+      "id": "R06",
+      "level": "native_test_and_model",
+      "tests": [
+        "ninfer_checkpoint_budget_contract_test",
+        "ninfer_checkpoint_budget_sanitizer_test",
+        "ninfer_kvmem_checkpoint_pool_test",
+        "ninfer_engine_checkpoint_budget_real_test"
+      ],
+      "guarantee": "Existing checkpoint pool C charges pinned images including idle/execution aliases and scoped metadata/rollback reservations until actual owner exit; construction failures refund, quota refusal cleans the request locally, pressure evicts optional old domains and source-only rebuild remains bounded. Not an RSS bound or arbitrary restore qualification."
+    },
+    {
+      "id": "R07",
+      "level": "host_test",
+      "tests": [
+        "source_image_test"
+      ],
+      "guarantee": "Bounded immutable source DATA copies use shared real R; explicit little-endian framing and configuration/length/event/checksum checks reject invalid reads; allocation and transport failure preserve source/real-owner charges. Origin annotations are never durable publication/import capabilities."
+    },
+    {
+      "id": "R08",
+      "level": "linux_component_test",
+      "tests": [
+        "source_archive_test"
+      ],
+      "guarantee": "Current catalog/seal authority, monotonically consumed namespaced identities, owner-issued publication receipts and append/version/family fences; real shared M tables, R payloads, bounded jobs/object slots and D reservations; delayed cleanup distinguishes reservation refunds from actual unlinked file bytes. No Engine import/global erasure claim."
+    },
+    {
+      "id": "R09",
+      "level": "host_test",
+      "tests": [
+        "source_image_test"
+      ],
+      "guarantee": "Atomic source DATA import reserves both real S buffers, copies bounded chunks, preserves events, creates a fresh RAM root with computed0; quota/allocation failure publishes nothing. No archive or old-KV authority from decoded provenance."
+    },
+    {
+      "id": "R10",
+      "level": "linux_component_test",
+      "tests": [
+        "source_archive_test"
+      ],
+      "guarantee": "Only a current owner-issued read receipt can import/bind a durable key; duplicate live binding refuses. Durable blob order prevents stale saves across reset/colliding process-local SourceRef counters. Four independent executables save/import-append/reimport-forget/reopen-deny."
+    },
+    {
+      "id": "R11",
+      "level": "native_engine_model_test",
+      "tests": [
+        "ninfer_engine_source_archive_real_test"
+      ],
+      "guarantee": "Current Frontend/Program namespace verification, separate I/O receipt and owner publication, new RAM roots and domains after restart, durable-family plus online alias forget, ambiguous-commit closure; seventeen independent-process native model cases passed."
+    }
+  ],
+  "actions": {
+    "evict_replica": "common_storage_primitive_only; native_GC_plus_SSD_not_qualified",
+    "retire_history": "supported_for_sealed_unprotected_native_pages",
+    "invalidate_derived": "partial_tail_and_existing_checkpoint_contracts_only",
+    "forget_source": "quiescent Engine-local explicit source families only; persisted/global external forget not supported"
+  },
+  "out_of_scope": [
+    "SSD+native_GC",
+    "multiple_running_requests+GC",
+    "multi_GPU+GC",
+    "multimodal+GC",
+    "arbitrary_active_or_writing_page_retirement",
+    "strict_whole_request_NInfer_admission",
+    "durable_sparse_recovery",
+    "online_policy_switch",
+    "native_shadow_cli",
+    "other_KV_dtypes"
+  ],
+  "performance": {
+    "p95_increase_percent": 5,
+    "throughput_decrease_percent": 3,
+    "rule": "Per-cohort matched runs; report pooled and every paired run including worst/p99/max. Averages alone cannot establish a universal deadline.",
+    "mtp_latency_unit": "decode_round_not_single_token",
+    "host_only_does_not_qualify_gpu": true
+  },
+  "next_stage": "Checkpoint persistence, long-source chunked new-domain replay and remaining version/lifecycle closure; then D-F",
+  "based_on_manifest": {
+    "path": "docs/contracts/kv-lifecycle-source-import-candidate-v1.json",
+    "sha256": "437e475ff7a22995cccfcfef4a24fe311f732dd07acca06226636c355c4c655d"
+  },
+  "candidate_scope": "Qualified native Engine archive save/import/canonical-prefix inference and unified durable/online family revocation at fixed single-owner Linux scope",
+  "approved_source_changes": [
+    "kvmem/include/kvmem/source_archive.hpp",
+    "kvmem/include/kvmem/spill_io.hpp",
+    "kvmem/src/host/source_archive.cpp",
+    "kvmem/src/host/spill_io.cpp",
+    "kvmem/tests/source_archive_test.cpp",
+    "backends/ninfer/docs/maintainer/engine-architecture.md",
+    "backends/ninfer/include/ninfer/engine.h",
+    "backends/ninfer/include/ninfer/historical_source.h",
+    "backends/ninfer/include/ninfer/types_fwd.h",
+    "backends/ninfer/src/models/qwen3_5/frontend/frontend.cpp",
+    "backends/ninfer/src/models/qwen3_5/frontend/frontend.h",
+    "backends/ninfer/src/models/qwen3_5/frontend/prepared_prompt.h",
+    "backends/ninfer/src/models/qwen3_5/program/program.cpp",
+    "backends/ninfer/src/models/qwen3_5/program/program.h",
+    "backends/ninfer/src/models/qwen3_5/program/program_impl.h",
+    "backends/ninfer/src/models/qwen3_5/program/storage/source_journal.cpp",
+    "backends/ninfer/src/runtime/engine/engine.cpp",
+    "backends/ninfer/src/runtime/engine/engine_core.h",
+    "backends/ninfer/tests/cmake/RuntimeTests.cmake",
+    "backends/ninfer/tests/models/qwen3_5/test_frontend.cpp",
+    "backends/ninfer/tests/test_engine_source_archive_real.cpp",
+    "backends/versions.json",
+    "backends/patches/ninfer-source-archive.patch"
+  ],
+  "auxiliary_budget_required": true,
+  "source_journal": {
+    "native_adapter": "source recording plus explicit canonical Engine rebuild candidate; current model results belong to its execution summary",
+    "payload": "accepted text token IDs and structured event ranges; no media/position-row replay",
+    "configuration": "backend-provided nonzero 256-bit complete source configuration digest; not a KV reuse proof",
+    "quota": "S bounds the fixed entry array plus real token/event buffer capacities, including transient old+new growth; bounded HostKvStorage allocation/control objects and runtime overhead are outside S",
+    "serialization": "one engine owner; synchronous reads only; process-local refs, no restart persistence",
+    "forget": "Engine-local RAM aliases and independent archive-family fences exist; unified persistent/online ForgetSource is not implemented",
+    "quota_cli": "--kvmem-source-mib N; positive, off by default, independent S, fixed 256 records",
+    "source_acceptance": "complete admitted input before first prefill; generated/control rows after full Program commit",
+    "source_identity": "SHA-256 of actual tokenizer/template/kwargs and model/runtime configuration; not KV restoration permission",
+    "verification": "actual journal rows compared directly with accepted rows under verify-transfers; public diagnostic FNV-1a uses little-endian int32"
+  },
+  "source_recovery": {
+    "mode": "explicit RebuildAsNew only; ExactState has no source fallback",
+    "capacity": "entire canonical prefix and independently rounded output/draft headroom must fit; no sparse replay fallback",
+    "staging": "actual immutable prefix copy charged for its entire lifetime to caller-owned R; bounded account/control/runtime overhead outside R",
+    "fences": "SourceRef store/revision/local forget, immutable Program/model ownership; optional existing-domain replacement checks full MemoryStamp; source-only new-domain creation needs no old KV window",
+    "ownership": "one engine owner, current facts supplied by authoritative adapter; fresh destination ID issued by existing owner",
+    "remaining": "HTTP access, sparse/long-prefix mode, persisted archive fences, persisted recovery, global external ForgetSource, production/Agent/performance qualification",
+    "native_entry": "GenerationResult::accepted_source, Engine::historical_sources / prepare_source_rebuild; process-local raw-token continuation with explicit branch ancestry",
+    "quota_cli": "--kvmem-recovery-mib; default off; positive and requires S"
+  },
+  "source_forget": {
+    "entry": "Engine::forget_historical_source(HistoricalSourceRef)",
+    "busy": "no outstanding requests including unconsumed terminal handles; Pending leaves original intact",
+    "scope": "current Engine and explicit descendant sources, native historical windows/checkpoint/coverage aliases",
+    "prepared_rebuilds": "source revision fence checked at admission; real R remains charged until owner drops it",
+    "not_claimed": [
+      "secure_erasure",
+      "persisted_archive_fence",
+      "cross_Engine",
+      "caller_owned_transcripts",
+      "same_text_independent_requests",
+      "HTTP_control"
+    ]
+  },
+  "checkpoint_budget": {
+    "quota_cli": "--kvmem-checkpoint-mib positive MiB, default1024 with KVMem; aggregate per Program, independent H/S/R/M",
+    "owners": "pinned image allocations incl idle/execution aliases; scoped checkpoint metadata and rewrite rollback copies; construction charges; fixed disk read promise",
+    "accounting": "capacity charges include conservative shared attachments; bounded allocator/account/control overhead outside C, not whole process RSS",
+    "policy": "spread host cap remains an additional upper bound; no directory removal refund for live alias",
+    "failure": "trim idle and reclaim eligible old histories, optional captures may skip, required insufficiency typed BudgetExceeded and request-local cleanup",
+    "remaining": "SSD/GC and multiple running requests remain unqualified combinations; no performance or global memory bound"
+  },
+  "source_image": {
+    "entry": "prepare_source_image / write_source_image / read_source_image",
+    "wire_version": 1,
+    "magic_hex": "4b5653494d473100",
+    "encoded_bytes": "144 + 4*tokens + 26*events",
+    "staging": "caller shared R RAM-only; real buffers charged until final owner",
+    "transport": "explicit max_bytes/max_tokens/max_events, max callback1024bytes",
+    "origin": "process-local DATA provenance, not restore/publication capability",
+    "native_entry": false,
+    "durable_authority": false,
+    "native_runtime_evidence_reuse": "All8 current executables match qualified C5 digests exactly; no new GPU check counted."
+  },
+  "linux_component_tests": [
+    "source_archive_test",
+    "source_image_test",
+    "source_journal_test",
+    "source_recovery_test",
+    "spill_io_test"
+  ],
+  "source_archive": {
+    "entry": "SourceArchive::create/open/enroll/save/publish/read/validate/forget/collect",
+    "platform": "Linux local filesystem with fsync/rename/flock semantics, single owner; blocking control methods outside decode boundary",
+    "authority": "128-bit durable namespace plus monotone source/blob IDs, fixed catalog and matching seal; absent entry denies",
+    "scope": "source DATA and new-domain rebuild permission only; never revives old SourceRefs/KV/checkpoints",
+    "budgets": "D logical control/blob reservations, fixed max_sources/max_objects plus shared auxiliary allocator M, existing StorageIoQueue limits and shared RAM R",
+    "collection": "quota_released differs from actual file_bytes_removed; both wait for job/leases and directory sync",
+    "crash": "incomplete catalog/seal pair denies whole archive; no automatic old-catalog fallback or blob-scan permission recovery",
+    "rollback_limit": "independent catalog/seal rollback rejected; coherent complete-directory backup rollback needs an external anchor and is not detected",
+    "source_rebinding": true,
+    "engine_entry": true,
+    "global_forget": false,
+    "native_runtime_evidence_reuse": "All eight existing native binaries changed vs C7. Current12native/2component checks,17archive model processes and7existing-behavior GPU regressions passed; not old-binary reuse.",
+    "version_clock": "durably consumed blob sequence; SourceRef revision checked only within current live binding",
+    "native_owner_forget": "one Engine plus its attached archive namespace; not cross-Engine or external transcript"
+  },
+  "source_import": {
+    "entry": "SourceJournalStore::import_image / SourceArchive::import_source",
+    "source": "token/event DATA only, never old parent/ref/KV identity or computed coverage",
+    "atomicity": "both S capacity buffers reserved before allocation, private prepare, no-throw directory publication; R held by immutable image",
+    "archive_binding": "current read receipt revalidated, only unbound key, bind after successful S capture; existing binding Pending, no implicit replacement",
+    "restart": "process-local numeric refs may reset/collide; durable namespace/key and committed save sequence remain authoritative",
+    "remaining": "Checkpoint persistence, long sparse replay, HTTP/CLI and multi-owner operation remain absent."
+  },
+  "qualification": {
+    "native_checks": 12,
+    "components": 2,
+    "archive_model_processes": 17,
+    "gpu_regressions": 7,
+    "execution_contract_sha256": "28d1bfce928342377c3b1abeb083868a216ee9c299daf47bdf27e3719a0b0b5f",
+    "code_pins_equal_execution": true,
+    "full_goal_complete": false,
+    "stage_C_complete": false
+  }
+}

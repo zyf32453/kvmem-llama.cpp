@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "ca0ce1b40686185f1020f8be9910ae523d2871d9",
+    "patched_tree": "8a8c71483cb31ac675671d2f0baf34eae7b9fca3",
     "patches": [
       {
         "id": "kvmem",
@@ -360,6 +360,15 @@
         ],
         "after_tree": "ca0ce1b40686185f1020f8be9910ae523d2871d9",
         "source": "Bound existing checkpoint images and metadata by actual owner lifetime, include unpublished and rollback captures, and handle quota failures locally"
+      },
+      {
+        "id": "source-archive",
+        "path": "backends/patches/ninfer-source-archive.patch",
+        "sha256": "409fb758344f67ba5cdf90a0cc7a19812d854cbd9408029ab68f69de85c84fde",
+        "requires": [
+          "checkpoint-budget"
+        ],
+        "after_tree": "8a8c71483cb31ac675671d2f0baf34eae7b9fca3"
       }
     ]
   },

@@ -388,6 +388,8 @@ SourceArchiveWrite SourceArchive::save(StorageIoQueue & queue, const SourceJourn
         throw MemoryError(MemoryErrorCode::BudgetExceeded, "archive disk quota/identity exhausted");
     const auto slot = s.object_slot();
     auto image = std::make_shared<SourceImage>(prepare_source_image(store, ref, s.limits.image, staging));
+    if (image->staging_bytes() > queue.capacity_bytes())
+        throw MemoryError(MemoryErrorCode::BudgetExceeded, "source image exceeds complete I/O queue capacity");
     // Consume the durable identity BEFORE any worker may create its file.
     s.copy_entries(); const auto id = s.next_blob; s.commit(s.next_source, id+1);
     auto & object = s.objects[slot]; object.id = id; object.bytes = bytes;
@@ -475,6 +477,31 @@ std::optional<SourceArchiveSnapshot> SourceArchive::inspect(size_t slot) const {
     if (!e.id) return std::nullopt;
     return SourceArchiveSnapshot{s.key(e.id), e.parent ? s.key(e.parent) : SourceArchiveKey{}, e.blob, e.bytes, e.origin};
 }
+size_t SourceArchive::slots() const noexcept { return state_->limits.max_sources; }
+std::optional<SourceArchiveKey> SourceArchive::key_for(const SourceJournalStore & store, SourceRef ref) const {
+    auto & s = *state_; s.check(); (void)store.state(ref);
+    const auto slot = s.binding(store, ref.source);
+    return slot == absent ? std::nullopt : std::optional<SourceArchiveKey>(s.key(s.entries[slot].id));
+}
+std::optional<SourceRef> SourceArchive::bound_source(SourceArchiveKey key, const SourceJournalStore & store) const {
+    auto & s = *state_; const auto & entry = s.entries[s.find(key)];
+    if (entry.bound_store != &store) return std::nullopt;
+    for (size_t slot = 0; slot < store.slots(); ++slot) {
+        auto current = store.inspect(slot);
+        if (current && current->ref.source == entry.bound_source) return current->ref;
+    }
+    return std::nullopt;
+}
+bool SourceArchive::family_contains(SourceArchiveKey ancestor, SourceArchiveKey member) const {
+    auto & s = *state_; (void)s.find(ancestor); auto slot = s.find(member);
+    for (size_t depth = 0; depth < s.limits.max_sources; ++depth) {
+        const auto & entry = s.entries[slot];
+        if (entry.id == ancestor.id) return true;
+        if (!entry.parent) return false;
+        slot = s.find(s.key(entry.parent));
+    }
+    throw SnapshotCorrupt("archive lineage is cyclic");
+}
 size_t SourceArchive::forget(SourceArchiveKey key) {
     auto & s = *state_; s.find(key); s.copy_entries(); size_t count = 0;
     for (size_t i = 0; i < s.limits.max_sources; ++i) if (s.entries[i].id) {
@@ -548,6 +575,9 @@ void SourceArchiveWrite::wait() const {
     state_->objects[slot_].ticket.wait();
 }
 bool SourceArchiveWrite::cancel() const { return state_ && state_->objects[slot_].ticket.cancel(); }
+SourceArchiveKey SourceArchiveWrite::key() const noexcept {
+    return state_ ? state_->key(state_->objects[slot_].source) : SourceArchiveKey{};
+}
 SourceArchiveRead::SourceArchiveRead(std::shared_ptr<State> state, size_t slot, SourceImage image)
     : state_(std::move(state)), slot_(slot), image_(std::move(image)) {
     state_->objects[slot_].handles.fetch_add(1, std::memory_order_relaxed);

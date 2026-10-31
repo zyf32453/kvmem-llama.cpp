@@ -2,7 +2,7 @@
 
 日期：2026-10-31。范围是 Linux 本地文件系统上的独立源归档组件，单 owner 串行管理、后台文件写入。已实现真实文件、重开、版本/家族遗忘 fence、配额与失败处理；尚未接入 NInfer Engine，不代表已经能通过 Engine 跨重启推理或执行系统级 ForgetSource。完整阶段 C、D–F 继续开放。
 
-后续 C7 已补原子源导入、当前读回执授权的 RAM binding 和持久保存序号，见 [C7 源导入与跨进程续存](kv-lifecycle-source-import.md)。下文的 C6 运行结果仍按其原候选归属；当前 Engine 接线依然未完成。
+后续 C7 已补原子源导入、当前读回执授权的 RAM binding 和持久保存序号，见 [C7 源导入与跨进程续存](kv-lifecycle-source-import.md)。[C8](kv-lifecycle-native-archive.md) 已接通 Engine 归档和统一遗忘，并在固定配置下提供跨进程模型证据。下文的 C6 运行结果及未完成项按其原候选、原时间理解，不将组件检查倒写成 Engine 验收。
 
 ## 本批交付与完成条件
 

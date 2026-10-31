@@ -413,4 +413,5 @@ size_t StorageIoQueue::pending_jobs() const {
 uint64_t StorageIoQueue::pinned_bytes() const {
     std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->bytes;
 }
+uint64_t StorageIoQueue::capacity_bytes() const noexcept { return impl_->max_bytes; }
 } // namespace kvmem

@@ -2,7 +2,7 @@
 
 日期：2026-10-31。本组件最初从 C4 提交 `57a2f514baf73d7b6b5a08fca5bdd2b27aa67739` 建立离线分支，现已合入完成首批功能验收的 C5 基线。源记录镜像已通过 Windows、Linux 内存检查和 NInfer 实际构建接入检查；后续 [C6 SourceArchive](kv-lifecycle-source-archive.md) 已在独立组件内建立持久清单与归档发布/遗忘 fence，但尚未接入 Engine 保存/导入和持久模型恢复。完整阶段 C 和生产系统都未完成。
 
-后续 [C7](kv-lifecycle-source-import.md) 已补镜像到 S 的原子数据导入、当前读回执授权和跨进程续存；数据对象本身仍不提供归档/旧 KV 许可。当前组合合同为 [source-import-candidate-v1](contracts/kv-lifecycle-source-import-candidate-v1.json)，以下源镜像最初批次的身份与结果保持历史归属。
+后续 [C7](kv-lifecycle-source-import.md) 已补镜像到 S 的原子数据导入、当前读回执授权和跨进程续存；[C8](kv-lifecycle-native-archive.md) 已接通 Engine 及跨进程模型验收。数据对象本身仍不提供归档/旧 KV 许可。当前组合合同为 [native-archive-candidate-v1](contracts/kv-lifecycle-native-archive-candidate-v1.json)，以下源镜像最初批次的身份与结果保持历史归属。
 
 ## 本批解决什么问题
 

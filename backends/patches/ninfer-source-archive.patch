@@ -1,0 +1,908 @@
+diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
+index e35238e..2818ec2 100644
+--- a/docs/maintainer/engine-architecture.md
++++ b/docs/maintainer/engine-architecture.md
+@@ -19,6 +19,30 @@
+ 
+ ## 1. 产品执行模型
+ 
++### 历史源归档控制
++
++Qwen3.5 主后端的 `Engine` 提供显式历史源归档接口。首批支持 Linux、单 GPU、
++`max_concurrency=1`、文本及 RAM KV，要求启用独立 S/R 预算。每个 Program 只附加一个
++固定配置的本地归档；附加时用当前 Frontend 生成的 `PreparedPrompt` 作配置参考，内部同时
++校验真实 artifact、模板及 Program 执行配置。raw 与 chat 配置不能互换。
++
++`begin_historical_save` 在空闲 owner 下取得有界不可变 R 镜像，使用 Program 原有 I/O 队列。
++返回的工单只表示文件 I/O，可独立等待、取消并持有资源；`wait()` 不发布恢复资格。
++`finish_historical_save` 必须回到没有活动请求、排队请求或未消费 handle 的 Engine，复核当前源
++和持久家族后发布。文件写入可以与后续推理共存，清单提交仍是显式控制操作，不在 decode 内执行。
++
++`import_historical_source` 仅把有当前授权的 token/event 数据导入 S，建立新的 RAM 根，computed=0。
++后续显式 `prepare_source_rebuild` 使用正常 Program 资源预约从规范前缀计算新域，不能复活旧
++KV/checkpoint/coverage 身份。当前重建范围仍限完整前缀可装入窗口，不支持长源稀疏轨迹恢复。
++
++源或归档家族遗忘先找全持久家族对应的 RAM 根及子孙，预检查原生别名，再提交持久撤销，最后
++清理在线 KV/checkpoint/coverage/S。持久提交结果不确定时仍撤销已预检查的在线别名并向调用方
++报告失败，归档进入不健康状态；不将该失败报告成已确认的永久遗忘。旧准备对象和迟到工单失效，
++它们真实持有的 R/D 等资源直到最后 owner 退出才能退款。无关家族保留。
++
++归档采用单本地 owner 和固定上界，不提供自动修复、跨 Engine 共享、HTTP/CLI 控制或全进程 RSS
++上界。catalog/seal 不完整会拒绝重开整个归档；一致目录备份回滚仍需要外部单调锚点才能识别。
++
+ Generation purpose 的 NInfer Engine 固定运行：
+ 
+ - 一张 GPU，或 Linux 上按层切成最多八个 pipeline stage 的多张 GPU（见第 8 节）；
+diff --git a/include/ninfer/engine.h b/include/ninfer/engine.h
+index b8e91f9..d4dc8b0 100644
+--- a/include/ninfer/engine.h
++++ b/include/ninfer/engine.h
+@@ -120,6 +120,18 @@ public:
+     // whole prefix and output reserve must fit; old history need not be resident.
+     [[nodiscard]] PreparedPrompt prepare_source_rebuild(HistoricalSourceRef source,
+         std::uint32_t prefix_tokens, std::uint32_t output_reserve_tokens) const;
++    // Linux single-GPU text/RAM KVMem, idle owner, one fixed configuration per
++    // namespace. Reference must come from this Frontend configuration (raw/chat
++    // and template options are distinct). Metadata I/O is outside decode units.
++    void attach_historical_archive(const HistoricalArchiveOptions&, const PreparedPrompt& reference);
++    [[nodiscard]] HistoricalArchiveSave begin_historical_save(HistoricalSourceRef);
++    void finish_historical_save(const HistoricalArchiveSave&);
++    [[nodiscard]] std::vector<HistoricalArchiveRecord> historical_archives() const;
++    [[nodiscard]] HistoricalArchiveUsage historical_archive_usage() const;
++    [[nodiscard]] HistoricalSourceRef import_historical_source(HistoricalArchiveKey);
++    [[nodiscard]] HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey);
++    // Synchronous idle-owner housekeeping, never called on the decode boundary.
++    void collect_historical_archives();
+ 
+     // Artifact-tokenizer raw-text encoding. No chat template or implicit special token is added;
+     // special-token text in `text` encodes as that token unless `parse_special` is false.
+diff --git a/include/ninfer/historical_source.h b/include/ninfer/historical_source.h
+index 733c419..48ddf34 100644
+--- a/include/ninfer/historical_source.h
++++ b/include/ninfer/historical_source.h
+@@ -1,5 +1,8 @@
+ #pragma once
+ #include <cstdint>
++#include <array>
++#include <filesystem>
++#include <memory>
+ 
+ namespace ninfer {
+ // Process-local source receipt; this is not a KV/checkpoint reuse capability.
+@@ -18,6 +21,50 @@ struct HistoricalSourceSummary {
+ struct HistoricalSourceForgetResult {
+     std::uint64_t forgotten_sources = 0;
+     std::uint64_t discarded_native_domains = 0;
++    std::uint64_t forgotten_archives = 0;
++};
++
++struct HistoricalArchiveKey {
++    std::array<std::uint8_t,16> space{};
++    std::uint64_t id = 0;
++    bool operator==(const HistoricalArchiveKey&) const noexcept = default;
++};
++struct HistoricalArchiveOptions {
++    std::filesystem::path directory;
++    std::uint64_t disk_bytes = 0, metadata_bytes = 0;
++    std::uint32_t max_objects = 512;
++    bool create = false; // Open is the default; never recreate a broken namespace.
++};
++struct HistoricalArchiveRecord {
++    HistoricalArchiveKey key, parent;
++    HistoricalSourceRef bound_source; // empty if not imported in this owner
++    std::uint64_t saved_sequence = 0, accepted_tokens = 0, computed_tokens = 0, events = 0, bytes = 0;
++};
++struct HistoricalArchiveUsage {
++    std::uint64_t capacity_bytes = 0, reserved_bytes = 0, metadata_bytes = 0;
++    std::uint64_t sources = 0, objects = 0;
++    bool healthy = false;
++};
++enum class HistoricalArchiveSaveStatus : std::uint8_t { Pending, Complete, Failed, Cancelled };
++// File-I/O receipt only. wait() does not publish an archive or borrow Engine.
++// finish_historical_save() must revalidate under the current idle Engine owner.
++class HistoricalArchiveSave {
++public:
++    HistoricalArchiveSave() noexcept;
++    ~HistoricalArchiveSave();
++    HistoricalArchiveSave(HistoricalArchiveSave&&) noexcept;
++    HistoricalArchiveSave& operator=(HistoricalArchiveSave&&) noexcept;
++    HistoricalArchiveSave(const HistoricalArchiveSave&) = delete;
++    HistoricalArchiveSave& operator=(const HistoricalArchiveSave&) = delete;
++    [[nodiscard]] HistoricalArchiveSaveStatus status() const noexcept;
++    [[nodiscard]] HistoricalArchiveKey key() const noexcept;
++    void wait() const;
++    bool cancel() const;
++private:
++    class Impl;
++    explicit HistoricalArchiveSave(std::unique_ptr<Impl>) noexcept;
++    std::unique_ptr<Impl> impl_;
++    friend class Engine;
+ };
+ 
+ } // namespace ninfer
+diff --git a/include/ninfer/types_fwd.h b/include/ninfer/types_fwd.h
+index 6248503..27bf92b 100644
+--- a/include/ninfer/types_fwd.h
++++ b/include/ninfer/types_fwd.h
+@@ -14,6 +14,12 @@ namespace ninfer {
+ struct HistoricalSourceRef;
+ struct HistoricalSourceSummary;
+ struct HistoricalSourceForgetResult;
++struct HistoricalArchiveKey;
++struct HistoricalArchiveOptions;
++struct HistoricalArchiveRecord;
++struct HistoricalArchiveUsage;
++enum class HistoricalArchiveSaveStatus : std::uint8_t;
++class HistoricalArchiveSave;
+ 
+ // ninfer/model_enums.h
+ enum class EnginePurpose : std::uint8_t;
+diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
+index 6e84fc4..7d16c06 100644
+--- a/src/models/qwen3_5/frontend/frontend.cpp
++++ b/src/models/qwen3_5/frontend/frontend.cpp
+@@ -1504,6 +1504,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+         key[66] = options.preserve_thinking ? std::uint8_t(*options.preserve_thinking) : 2;
+         key[67] = options.reasoning_effort ? std::uint8_t(*options.reasoning_effort) : 255;
+         result.source_configuration = fi::sha256(key);
++        result.source_frontend_configuration = impl_->source_configuration;
+         const auto begin = result.source_events.empty() ? 0 : result.source_events.back().end;
+         if (result.memory_input_end && begin == result.memory_input_end && begin < result.token_ids.size())
+             result.source_events.push_back({message_roles.size() + 1, begin, result.token_ids.size(),
+@@ -1655,6 +1656,7 @@ PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> token_ids, bool all
+         std::copy(impl_->source_configuration.begin(), impl_->source_configuration.end(), key.begin());
+         key[32] = 255; // raw token input, distinct from chat rendering
+         result.source_configuration = fi::sha256(key);
++        result.source_frontend_configuration = impl_->source_configuration;
+         if (!result.token_ids.empty())
+             result.source_events.push_back({1, 0, result.token_ids.size(), kvmem::SourceEventKind::RawInput, true});
+     }
+@@ -1701,6 +1703,15 @@ PreparedPrompt Frontend::prepare_source_rebuild(SourceRebuildInput input) const
+     prompt.data_->source_rebuild.emplace(std::move(input.preparation));
+     return prompt;
+ }
++kvmem::SourceConfiguration Frontend::archive_source_configuration(const PreparedPrompt& prompt) const {
++    const auto& data = PreparedPromptAccess::view(prompt);
++    if (impl_->source_configuration == kvmem::SourceConfiguration{} ||
++        data.source_frontend_configuration != impl_->source_configuration ||
++        data.source_configuration == kvmem::SourceConfiguration{} || data.has_media() || !data.graft_name.empty())
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,
++            "archive reference does not match this text source Frontend");
++    return data.source_configuration;
++}
+ 
+ std::string Frontend::token_bytes(TokenId token) const {
+     if (impl_ == nullptr) { throw std::logic_error("frontend is empty"); }
+diff --git a/src/models/qwen3_5/frontend/frontend.h b/src/models/qwen3_5/frontend/frontend.h
+index 7622f9a..3d078eb 100644
+--- a/src/models/qwen3_5/frontend/frontend.h
++++ b/src/models/qwen3_5/frontend/frontend.h
+@@ -132,6 +132,7 @@ public:
+                                                 bool anchor_prompt_end     = false,
+                                                 bool speculative_drafting  = true) const;
+     [[nodiscard]] PreparedPrompt prepare_source_rebuild(SourceRebuildInput input) const;
++    [[nodiscard]] kvmem::SourceConfiguration archive_source_configuration(const PreparedPrompt&) const;
+     [[nodiscard]] std::vector<TokenId> tokenize_text(std::string_view text,
+                                                      bool parse_special = true) const;
+     [[nodiscard]] std::string token_bytes(TokenId token) const;
+diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
+index ad6a1b1..58ab6d8 100644
+--- a/src/models/qwen3_5/frontend/prepared_prompt.h
++++ b/src/models/qwen3_5/frontend/prepared_prompt.h
+@@ -168,6 +168,7 @@ struct PreparedPromptData {
+     std::vector<std::uint64_t> block_extras;
+     std::vector<TokenId> token_ids;
+     kvmem::SourceConfiguration source_configuration{};
++    kvmem::SourceConfiguration source_frontend_configuration{};
+     std::vector<kvmem::SourceEvent> source_events;
+     std::optional<kvmem::PreparedSourceRecovery> source_rebuild;
+     // Exact token range from frontend provenance. Absent means no trusted query;
+diff --git a/src/models/qwen3_5/program/program.cpp b/src/models/qwen3_5/program/program.cpp
+index 8d90962..e5e37ca 100644
+--- a/src/models/qwen3_5/program/program.cpp
++++ b/src/models/qwen3_5/program/program.cpp
+@@ -752,6 +752,16 @@ std::optional<HistoricalSourceRef> Program::source_receipt(SequenceHandle sequen
+ SourceRebuildInput Program::prepare_source_rebuild(HistoricalSourceRef source, std::uint32_t prefix, std::uint32_t reserve) {
+     return impl_->prepare_source_rebuild(source, prefix, reserve);
+ }
++void Program::attach_historical_archive(const HistoricalArchiveOptions& options, const kvmem::SourceConfiguration& config) {
++    impl_->attach_historical_archive(options, config);
++}
++kvmem::SourceArchiveWrite Program::begin_historical_save(HistoricalSourceRef source) { return impl_->begin_historical_save(source); }
++void Program::finish_historical_save(const kvmem::SourceArchiveWrite& write) { impl_->finish_historical_save(write); }
++std::vector<HistoricalArchiveRecord> Program::historical_archives() const { return impl_->historical_archives(); }
++HistoricalArchiveUsage Program::historical_archive_usage() const { return impl_->historical_archive_usage(); }
++HistoricalSourceRef Program::import_historical_source(HistoricalArchiveKey key) { return impl_->import_historical_source(key); }
++HistoricalSourceForgetResult Program::forget_historical_archive(HistoricalArchiveKey key) { return impl_->forget_historical_archive(key); }
++void Program::collect_historical_archives() { impl_->collect_historical_archives(); }
+ 
+ ExpertResidencyStats Program::expert_residency_stats() const {
+     ExpertResidencyStats out;
+diff --git a/src/models/qwen3_5/program/program.h b/src/models/qwen3_5/program/program.h
+index 750b35d..45efeec 100644
+--- a/src/models/qwen3_5/program/program.h
++++ b/src/models/qwen3_5/program/program.h
+@@ -32,6 +32,7 @@
+ namespace ninfer {
+ struct DeviceContext;
+ }
++namespace kvmem { class SourceArchiveWrite; }
+ 
+ namespace ninfer::models::qwen3_5 {
+ 
+@@ -1283,6 +1284,14 @@ public:
+     [[nodiscard]] HistoricalSourceForgetResult forget_historical_source(HistoricalSourceRef);
+     [[nodiscard]] std::optional<HistoricalSourceRef> source_receipt(SequenceHandle) const noexcept;
+     [[nodiscard]] SourceRebuildInput prepare_source_rebuild(HistoricalSourceRef, std::uint32_t, std::uint32_t);
++    void attach_historical_archive(const HistoricalArchiveOptions&, const kvmem::SourceConfiguration&);
++    [[nodiscard]] kvmem::SourceArchiveWrite begin_historical_save(HistoricalSourceRef);
++    void finish_historical_save(const kvmem::SourceArchiveWrite&);
++    [[nodiscard]] std::vector<HistoricalArchiveRecord> historical_archives() const;
++    [[nodiscard]] HistoricalArchiveUsage historical_archive_usage() const;
++    [[nodiscard]] HistoricalSourceRef import_historical_source(HistoricalArchiveKey);
++    [[nodiscard]] HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey);
++    void collect_historical_archives();
+     [[nodiscard]] ExpertResidencyStats expert_residency_stats() const;
+     // Largest output budget for a prompt of `prompt_tokens` whose admission entitlement (main KV and
+     // any MTP/DFlash backend KV, draft window included) fits one lane's share of each pool, so that
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index 29467ee..e926892 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -9,6 +9,7 @@
+ #include "core/vmm.h"
+ #include "kvmem/memory_contract.hpp"
+ #include "kvmem/source_journal.hpp"
++#include "kvmem/source_archive.hpp"
+ #include "kvmem/prefix_checkpoint.hpp"
+ #include "kvmem/checkpoint_policy.hpp"
+ #include "kvmem/checkpoint_image.hpp"
+@@ -1175,6 +1176,9 @@ public:
+     std::shared_ptr<kvmem::HistoricalKvAuxBudget> historical_auxiliary;
+     std::unique_ptr<kvmem::SourceJournalStore> source_journal;
+     kvmem::HostKvStorage source_recovery_storage;
++#if defined(__linux__)
++    std::optional<kvmem::SourceArchive> source_archive;
++#endif
+     kvmem::SourceState source_last;
+     std::uint64_t source_last_tokens_fnv1a64 = 14695981039346656037ULL;
+     void capture_source(SequenceState&, RequestControl&);
+@@ -1182,6 +1186,16 @@ public:
+     HistoricalSourceForgetResult forget_historical_source(HistoricalSourceRef);
+     std::optional<HistoricalSourceRef> source_receipt(SequenceHandle) const noexcept;
+     SourceRebuildInput prepare_source_rebuild(HistoricalSourceRef, std::uint32_t, std::uint32_t);
++    void require_source_control() const;
++    void attach_historical_archive(const HistoricalArchiveOptions&, const kvmem::SourceConfiguration&);
++    kvmem::SourceArchiveWrite begin_historical_save(HistoricalSourceRef);
++    void finish_historical_save(const kvmem::SourceArchiveWrite&);
++    std::vector<HistoricalArchiveRecord> historical_archives() const;
++    HistoricalArchiveUsage historical_archive_usage() const;
++    HistoricalSourceRef import_historical_source(HistoricalArchiveKey);
++    HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey);
++    HistoricalSourceForgetResult forget_source_family(std::optional<kvmem::SourceRef>, std::optional<kvmem::SourceArchiveKey>);
++    void collect_historical_archives();
+     void validate_source_rebuild(const kvmem::PreparedSourceRecovery&) const;
+     kvmem::MemoryDescriptor memory_descriptor() const;
+     kvmem::SessionIdentity allocate_memory_identity();
+diff --git a/src/models/qwen3_5/program/storage/source_journal.cpp b/src/models/qwen3_5/program/storage/source_journal.cpp
+index 9263a84..7bff53e 100644
+--- a/src/models/qwen3_5/program/storage/source_journal.cpp
++++ b/src/models/qwen3_5/program/storage/source_journal.cpp
+@@ -4,10 +4,11 @@
+ #include <bit>
+ #include <cstdio>
+ #include <type_traits>
++#include <exception>
+ 
+ namespace ninfer::models::qwen3_5::detail {
+ namespace {
+-kvmem::SourceConfiguration configuration(const ProgramImpl& program, const PreparedPromptData& prompt) {
++kvmem::SourceConfiguration configuration(const ProgramImpl& program, const kvmem::SourceConfiguration& frontend_configuration) {
+     // Explicit little-endian scalar encoding: no struct padding, pointer values,
+     // std::hash or source byte positions masquerading as computation identity.
+     std::array<std::uint8_t, 512> bytes{};
+@@ -19,7 +20,7 @@ kvmem::SourceConfiguration configuration(const ProgramImpl& program, const Prepa
+     const auto integer = [&](std::uint64_t x) { for (int i = 0; i < 8; ++i) byte(std::uint8_t(x >> (8 * i))); };
+     for (const char x : std::string_view("ninfer/qwen3.5/text-source-configuration/v1")) byte(std::uint8_t(x));
+     for (auto x : program.parameters.model.info().artifact_id) byte(std::to_integer<std::uint8_t>(x));
+-    for (auto x : prompt.source_configuration) byte(x);
++    for (auto x : frontend_configuration) byte(x);
+     integer(std::uint64_t(program.kv_storage)); integer(std::uint64_t(program.speculative_backend));
+     integer(program.capacity); integer(program.prefill_chunk); integer(program.fast_prefill_kernel);
+     integer(program.use_cuda_graph); integer(program.draft_window); integer(program.ngram_draft_window);
+@@ -92,17 +93,59 @@ std::optional<HistoricalSourceRef> ProgramImpl::source_receipt(SequenceHandle se
+ }
+ 
+ HistoricalSourceForgetResult ProgramImpl::forget_historical_source(HistoricalSourceRef source) {
++    const kvmem::SourceRef ancestor{{source.id, source.incarnation}, source.revision};
++    return forget_source_family(ancestor, std::nullopt);
++}
++void ProgramImpl::require_source_control() const {
+     if (!source_journal)
+         throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported, "source recording is disabled");
+-    const kvmem::SourceRef ancestor{{source.id, source.incarnation}, source.revision};
+-    (void)source_journal->state(ancestor);
+     if (has_context_transaction() || pending_transaction_ || memory_idle_transfer || memory_coverage_transfer ||
+         std::any_of(requests.begin(), requests.end(), [](const auto& request) {
+             return request.lifecycle != Lifecycle::Empty;
+         }))
+-        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending, "source forget requires a quiescent Program");
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending, "source control requires a quiescent Program");
++}
++HistoricalSourceForgetResult ProgramImpl::forget_source_family(std::optional<kvmem::SourceRef> ancestor,
++    std::optional<kvmem::SourceArchiveKey> archive_root) {
++    require_source_control();
++    if (ancestor) (void)source_journal->state(*ancestor);
++    constexpr std::size_t max_sources = 256;
++    if (source_journal->slots() > max_sources) throw std::logic_error("source directory exceeds native fixed geometry");
++    std::array<kvmem::SourceRef,max_sources> refs{};
++    std::array<kvmem::SessionIdentity,max_sources> parents{};
++    std::array<bool,max_sources> marked{}, roots{};
++    for (std::size_t i = 0; i < source_journal->slots(); ++i) if (const auto s = source_journal->inspect(i)) {
++        refs[i] = s->ref; parents[i] = s->parent.source;
++        if (ancestor) marked[i] = source_journal->family_contains(*ancestor,s->ref.source);
++    }
++#if defined(__linux__)
++    if (source_archive) {
++        if (!archive_root && ancestor) archive_root = source_archive->key_for(*source_journal,*ancestor);
++        if (archive_root) {
++            // Validate the persistent family before allocating/revoking anything.
++            (void)source_archive->family_contains(*archive_root,*archive_root);
++            for (std::size_t slot = 0; slot < source_archive->slots(); ++slot) {
++                const auto saved = source_archive->inspect(slot);
++                if (!saved || !source_archive->family_contains(*archive_root,saved->key)) continue;
++                const auto binding = source_archive->bound_source(saved->key,*source_journal);
++                if (!binding) continue;
++                for (std::size_t i = 0; i < source_journal->slots(); ++i)
++                    if (refs[i].source.id && source_journal->family_contains(*binding,refs[i].source)) marked[i] = true;
++            }
++        }
++    } else if (archive_root) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"no source archive attached");
++#else
++    if (archive_root) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++#endif
++    for (std::size_t i = 0; i < max_sources; ++i) if (marked[i]) {
++        roots[i] = true;
++        for (std::size_t j = 0; j < max_sources; ++j)
++            if (marked[j] && parents[i] == refs[j].source) { roots[i] = false; break; }
++    }
+     const auto member = [&](kvmem::SourceRef ref) {
+-        return ref.source.id && source_journal->family_contains(ancestor, ref.source);
++        if (!ref.source.id) return false;
++        for (std::size_t i = 0; i < max_sources; ++i) if (marked[i] && refs[i].source == ref.source) return true;
++        return false;
+     };
+     // Construct replacements and validate every owner before changing anything.
+     // The native catalog still owns physical continuations; this API cannot
+@@ -125,17 +168,28 @@ HistoricalSourceForgetResult ProgramImpl::forget_historical_source(HistoricalSou
+         }
+     const bool clear_last = member(source_last.ref);
+     static_assert(std::is_nothrow_move_assignable_v<KvmemWindowState>);
++    std::exception_ptr persistence_error;
++#if defined(__linux__)
++    if (archive_root) {
++        try { result.forgotten_archives = source_archive->forget(*archive_root); }
++        catch (...) { persistence_error = std::current_exception(); }
++    }
++#endif
+     // Nonallocating owner commit: revoke KV/checkpoint/coverage aliases first,
+     // then erase the source family. Monotonic source IDs are never reissued.
+     for (auto& [i, empty] : empty_windows) continuation_states[i].window = std::move(empty);
+     for (std::size_t i = 0; i < discard.size(); ++i)
+         if (discard[i]) memory_histories[i].reset();
+     if (clear_last) { source_last = {}; source_last_tokens_fnv1a64 = 14695981039346656037ULL; }
+-    result.forgotten_sources = source_journal->forget(ancestor);
++    for (std::size_t i = 0; i < max_sources; ++i) if (roots[i]) result.forgotten_sources += source_journal->forget(refs[i]);
+     advance_resource_revision();
++    // A disk error can mean revocation committed but acknowledgement failed.
++    // Preflighted online aliases must still be closed; the archive is unhealthy
++    // and the caller receives the original UNACKNOWLEDGED failure afterward.
++    if (persistence_error) std::rethrow_exception(persistence_error);
+     if (kvmem_options.verify_transfers)
+         std::fprintf(stderr, "KVMEM_SOURCE_FORGET root=%llu records=%llu native_domains=%llu\n",
+-            (unsigned long long)source.id, (unsigned long long)result.forgotten_sources,
++            (unsigned long long)(ancestor ? ancestor->source.id : archive_root->id), (unsigned long long)result.forgotten_sources,
+             (unsigned long long)result.discarded_native_domains);
+     return result;
+ }
+@@ -149,6 +203,110 @@ void ProgramImpl::validate_source_rebuild(const kvmem::PreparedSourceRecovery& p
+     preparation.validate(*source_journal, {{}, state.configuration});
+ }
+ 
++void ProgramImpl::attach_historical_archive(const HistoricalArchiveOptions& options,
++    const kvmem::SourceConfiguration& frontend_configuration) {
++#if defined(__linux__)
++    require_source_control();
++    if (source_archive) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending,"source archive already attached");
++    if (!kvmem_options.recovery_bytes || !memory_io || max_concurrency != 1 || device.size() != 1 ||
++        kvmem_options.disk_bytes || frontend_configuration == kvmem::SourceConfiguration{})
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"archive requires single-GPU single-owner text/RAM S/R KVMem");
++    if (options.directory.empty() || !options.disk_bytes || !options.metadata_bytes)
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::InvalidPlan,"archive directory and quotas must be explicit");
++    const kvmem::SourceArchiveLimits limits{options.disk_bytes,options.metadata_bytes,source_journal->slots(),
++        options.max_objects,{144+30*std::uint64_t(capacity),capacity,capacity}};
++    const auto expected = configuration(*this,frontend_configuration);
++    source_archive.emplace(options.create
++        ? kvmem::SourceArchive::create(options.directory,expected,limits,historical_auxiliary)
++        : kvmem::SourceArchive::open(options.directory,expected,limits,historical_auxiliary));
++#else
++    (void)options; (void)frontend_configuration;
++    throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++#endif
++}
++kvmem::SourceArchiveWrite ProgramImpl::begin_historical_save(HistoricalSourceRef source) {
++#if defined(__linux__)
++    require_source_control();
++    if (!source_archive) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"no source archive attached");
++    std::array<kvmem::SourceRef,256> chain{}; std::size_t count = 0;
++    kvmem::SourceRef current{{source.id,source.incarnation},source.revision};
++    while (true) {
++        const auto state = source_journal->state(current);
++        if (count == chain.size()) throw std::logic_error("source ancestry exceeds fixed directory");
++        chain[count++] = current;
++        if (!state.parent.source.id) break;
++        bool found = false;
++        for (std::size_t slot = 0; slot < source_journal->slots(); ++slot) {
++            const auto parent = source_journal->inspect(slot);
++            if (parent && parent->ref.source == state.parent.source) { current = parent->ref; found = true; break; }
++        }
++        if (!found) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Stale,"archive source ancestor disappeared");
++    }
++    while (count) (void)source_archive->enroll(*source_journal,chain[--count]);
++    return source_archive->save(*memory_io,*source_journal,{{source.id,source.incarnation},source.revision},source_recovery_storage);
++#else
++    (void)source; throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++#endif
++}
++void ProgramImpl::finish_historical_save(const kvmem::SourceArchiveWrite& write) {
++#if defined(__linux__)
++    require_source_control();
++    if (!source_archive) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"no source archive attached");
++    source_archive->publish(write,*source_journal);
++#else
++    (void)write; throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++#endif
++}
++std::vector<HistoricalArchiveRecord> ProgramImpl::historical_archives() const {
++    std::vector<HistoricalArchiveRecord> result;
++#if defined(__linux__)
++    if (!source_archive) return result;
++    result.reserve(source_archive->stats().sources);
++    for (std::size_t slot = 0; slot < source_archive->slots(); ++slot) if (const auto saved = source_archive->inspect(slot)) {
++        HistoricalArchiveRecord record;
++        record.key = {saved->key.space,saved->key.id}; record.parent = {saved->parent.space,saved->parent.id};
++        record.saved_sequence = saved->object; record.bytes = saved->bytes;
++        record.accepted_tokens = saved->origin.accepted_frontier; record.computed_tokens = saved->origin.computed_frontier;
++        record.events = saved->origin.events;
++        if (const auto bound = source_archive->bound_source(saved->key,*source_journal))
++            record.bound_source = {bound->source.id,bound->source.incarnation,bound->revision};
++        result.push_back(record);
++    }
++#endif
++    return result;
++}
++HistoricalArchiveUsage ProgramImpl::historical_archive_usage() const {
++#if defined(__linux__)
++    if (source_archive) {
++        const auto s = source_archive->stats();
++        return {s.capacity,s.charged,s.metadata_bytes,s.sources,s.objects,s.healthy};
++    }
++#endif
++    return {};
++}
++HistoricalSourceRef ProgramImpl::import_historical_source(HistoricalArchiveKey key) {
++#if defined(__linux__)
++    require_source_control();
++    if (!source_archive) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"no source archive attached");
++    auto read = source_archive->read({key.space,key.id},source_recovery_storage);
++    const auto ref = source_archive->import_source(read,*source_journal);
++    return {ref.source.id,ref.source.incarnation,ref.revision};
++#else
++    (void)key; throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++#endif
++}
++HistoricalSourceForgetResult ProgramImpl::forget_historical_archive(HistoricalArchiveKey key) {
++    return forget_source_family(std::nullopt,kvmem::SourceArchiveKey{key.space,key.id});
++}
++void ProgramImpl::collect_historical_archives() {
++#if defined(__linux__)
++    require_source_control();
++    if (source_archive) (void)source_archive->collect();
++#else
++    throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++#endif
++}
++
+ SourceRebuildInput ProgramImpl::prepare_source_rebuild(HistoricalSourceRef source,
+     std::uint32_t prefix, std::uint32_t reserve) {
+     if (!source_journal || !kvmem_options.recovery_bytes)
+@@ -210,7 +368,7 @@ void ProgramImpl::capture_source(SequenceState& sequence, RequestControl& reques
+     }
+     // Admission already owns this complete prepared input. Source acceptance
+     // does not imply that all its KV has executed; computed frontier is separate.
+-    const auto ref = source_journal->capture(configuration(*this, prompt), prompt.token_ids.data(), count,
++    const auto ref = source_journal->capture(configuration(*this, prompt.source_configuration), prompt.token_ids.data(), count,
+         prompt.source_events.data(), prompt.source_events.size(), sequence.text_kv_valid);
+     const auto state = source_journal->state(ref);
+     const auto digest = hash_rows(*source_journal, ref, 0, state.accepted_frontier, 14695981039346656037ULL,
+diff --git a/src/runtime/engine/engine.cpp b/src/runtime/engine/engine.cpp
+index 4adc36a..37cb732 100644
+--- a/src/runtime/engine/engine.cpp
++++ b/src/runtime/engine/engine.cpp
+@@ -182,6 +182,48 @@ public:
+     models::qwen3_5::PreparedPrompt value;
+ };
+ 
++class HistoricalArchiveSave::Impl {
++public:
++#if defined(__linux__)
++    kvmem::SourceArchiveWrite value;
++#endif
++};
++HistoricalArchiveSave::HistoricalArchiveSave() noexcept = default;
++HistoricalArchiveSave::~HistoricalArchiveSave() = default;
++HistoricalArchiveSave::HistoricalArchiveSave(HistoricalArchiveSave&&) noexcept = default;
++HistoricalArchiveSave& HistoricalArchiveSave::operator=(HistoricalArchiveSave&&) noexcept = default;
++HistoricalArchiveSave::HistoricalArchiveSave(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
++HistoricalArchiveSaveStatus HistoricalArchiveSave::status() const noexcept {
++#if defined(__linux__)
++    if (impl_) switch (impl_->value.status()) {
++        case kvmem::StorageTaskStatus::Pending: return HistoricalArchiveSaveStatus::Pending;
++        case kvmem::StorageTaskStatus::Complete: return HistoricalArchiveSaveStatus::Complete;
++        case kvmem::StorageTaskStatus::Failed: return HistoricalArchiveSaveStatus::Failed;
++        case kvmem::StorageTaskStatus::Cancelled: return HistoricalArchiveSaveStatus::Cancelled;
++    }
++#endif
++    return HistoricalArchiveSaveStatus::Cancelled;
++}
++HistoricalArchiveKey HistoricalArchiveSave::key() const noexcept {
++#if defined(__linux__)
++    if (impl_) { const auto key = impl_->value.key(); return {key.space,key.id}; }
++#endif
++    return {};
++}
++void HistoricalArchiveSave::wait() const {
++#if defined(__linux__)
++    if (impl_) { impl_->value.wait(); return; }
++#endif
++    throw kvmem::MemoryError(kvmem::MemoryErrorCode::Stale,"empty archive save receipt");
++}
++bool HistoricalArchiveSave::cancel() const {
++#if defined(__linux__)
++    return impl_ && impl_->value.cancel();
++#else
++    return false;
++#endif
++}
++
+ PreparedPrompt::PreparedPrompt() noexcept                            = default;
+ PreparedPrompt::~PreparedPrompt()                                    = default;
+ PreparedPrompt::PreparedPrompt(PreparedPrompt&&) noexcept            = default;
+@@ -756,6 +798,50 @@ PreparedPrompt Engine::prepare_source_rebuild(HistoricalSourceRef source, std::u
+         summary, stats, SamplingMode::Thinking, std::move(prepared)));
+ }
+ 
++void Engine::attach_historical_archive(const HistoricalArchiveOptions& options, const PreparedPrompt& reference) {
++    if (!impl_ || !reference.impl_) throw std::invalid_argument("archive needs a live Engine and configuration reference");
++    impl_->generation_core().attach_historical_archive(options,reference.impl_->value);
++}
++HistoricalArchiveSave Engine::begin_historical_save(HistoricalSourceRef source) {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++#if defined(__linux__)
++    auto write = std::make_unique<HistoricalArchiveSave::Impl>();
++    write->value = impl_->generation_core().begin_historical_save(source);
++    return HistoricalArchiveSave(std::move(write));
++#else
++    (void)source; throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++#endif
++}
++void Engine::finish_historical_save(const HistoricalArchiveSave& write) {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++#if defined(__linux__)
++    if (!write.impl_) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Stale,"empty archive save receipt");
++    impl_->generation_core().finish_historical_save(write.impl_->value);
++#else
++    (void)write; throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++#endif
++}
++std::vector<HistoricalArchiveRecord> Engine::historical_archives() const {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    return impl_->generation_core().historical_archives();
++}
++HistoricalArchiveUsage Engine::historical_archive_usage() const {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    return impl_->generation_core().historical_archive_usage();
++}
++HistoricalSourceRef Engine::import_historical_source(HistoricalArchiveKey key) {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    return impl_->generation_core().import_historical_source(key);
++}
++HistoricalSourceForgetResult Engine::forget_historical_archive(HistoricalArchiveKey key) {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    return impl_->generation_core().forget_historical_archive(key);
++}
++void Engine::collect_historical_archives() {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    impl_->generation_core().collect_historical_archives();
++}
++
+ std::vector<TokenId> Engine::tokenize_text(std::string_view text, bool parse_special) const {
+     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+     return impl_->frontend().tokenize_text(text, parse_special);
+diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
+index 9e94d5d..4d04f2d 100644
+--- a/src/runtime/engine/engine_core.h
++++ b/src/runtime/engine/engine_core.h
+@@ -24,6 +24,7 @@
+ #include "runtime/engine/worker_recovery.h"
+ #include "text/structured_output.h"
+ #include "kvmem/memory_contract.hpp"
++#include "kvmem/source_archive.hpp"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -651,6 +652,53 @@ public:
+         return result;
+     }
+ 
++    template<class Work> auto source_archive_control(Work&& work) {
++        std::scoped_lock execution_lock(execution_mutex_);
++        ensure_resident_locked();
++        std::unique_lock queue_lock(queue_mutex_);
++        if (stopping_ || failed_) throw RequestError(RequestErrorKind::Unavailable,"inference engine is unavailable");
++        if (outstanding_ || materializing_)
++            throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending,"archive control requires no outstanding requests or unconsumed handles");
++        const auto snapshot = [&] { try { publish_runtime_stats(); } catch (const std::bad_alloc&) {} };
++        try {
++            if constexpr (std::is_void_v<std::invoke_result_t<Work>>) {
++                std::forward<Work>(work)(); queue_lock.unlock(); snapshot(); return;
++            } else {
++                auto result = std::forward<Work>(work)(); queue_lock.unlock(); snapshot(); return result;
++            }
++        } catch (...) {
++            if (queue_lock.owns_lock()) queue_lock.unlock();
++            snapshot(); throw;
++        }
++    }
++    void attach_historical_archive(const HistoricalArchiveOptions& options, const PreparedPrompt& reference) {
++        source_archive_control([&] {
++            const auto config = instance_.frontend.archive_source_configuration(reference);
++            instance_.program->attach_historical_archive(options,config);
++        });
++    }
++    kvmem::SourceArchiveWrite begin_historical_save(HistoricalSourceRef source) {
++        return source_archive_control([&] { return instance_.program->begin_historical_save(source); });
++    }
++    void finish_historical_save(const kvmem::SourceArchiveWrite& write) {
++        source_archive_control([&] { instance_.program->finish_historical_save(write); });
++    }
++    std::vector<HistoricalArchiveRecord> historical_archives() {
++        std::scoped_lock lock(execution_mutex_); return instance_.program->historical_archives();
++    }
++    HistoricalArchiveUsage historical_archive_usage() {
++        std::scoped_lock lock(execution_mutex_); return instance_.program->historical_archive_usage();
++    }
++    HistoricalSourceRef import_historical_source(HistoricalArchiveKey key) {
++        return source_archive_control([&] { return instance_.program->import_historical_source(key); });
++    }
++    HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey key) {
++        return source_archive_control([&] { return instance_.program->forget_historical_archive(key); });
++    }
++    void collect_historical_archives() {
++        source_archive_control([&] { instance_.program->collect_historical_archives(); });
++    }
++
+     // Served from the snapshot the worker publishes at unit boundaries: the execution mutex is
+     // held for most of a running request, so a reader that waited on it would stall behind a
+     // long prefill.
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+index 377bf72..c52d309 100644
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -68,6 +68,12 @@ ninfer_add_test(ninfer_engine_source_forget_real_test STANDALONE
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_forget_real.cpp"
+   LIBRARIES ninfer_engine kvmem ninfer::json)
+ set_tests_properties(ninfer_engine_source_forget_real_test PROPERTIES SKIP_RETURN_CODE 77)
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++  ninfer_add_test(ninfer_engine_source_archive_real_test STANDALONE
++    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_archive_real.cpp"
++    LIBRARIES ninfer_engine kvmem ninfer::json)
++  set_tests_properties(ninfer_engine_source_archive_real_test PROPERTIES SKIP_RETURN_CODE 77)
++endif()
+ 
+ ninfer_add_test(ninfer_checkpoint_budget_contract_test STANDALONE
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../models/qwen3_5/test_checkpoint_budget_contract.cpp"
+diff --git a/tests/models/qwen3_5/test_frontend.cpp b/tests/models/qwen3_5/test_frontend.cpp
+index 0133b46..aff3a3a 100644
+--- a/tests/models/qwen3_5/test_frontend.cpp
++++ b/tests/models/qwen3_5/test_frontend.cpp
+@@ -1276,6 +1276,15 @@ int test_source_recording_provenance() {
+     failures += check(FrontendFactory::inspect(disabled).source_events.empty() &&
+         FrontendFactory::inspect(disabled).source_configuration == kvmem::SourceConfiguration{},
+         "disabled source recording collected provenance");
++    failures += check(frontend.archive_source_configuration(prepared) == data.source_configuration &&
++        frontend.archive_source_configuration(raw) == raw_data.source_configuration,
++        "archive reference did not use actual frontend raw/chat configuration");
++    for (const auto* foreign : {&altered,&disabled}) {
++        bool rejected = false;
++        try { (void)frontend.archive_source_configuration(*foreign); }
++        catch (const kvmem::MemoryError& error) { rejected = error.code() == kvmem::MemoryErrorCode::Unsupported; }
++        failures += check(rejected,"archive accepted a changed/disabled source frontend reference");
++    }
+     return failures;
+ }
+ 
+diff --git a/tests/test_engine_source_archive_real.cpp b/tests/test_engine_source_archive_real.cpp
+new file mode 100644
+index 0000000..7d7c140
+--- /dev/null
++++ b/tests/test_engine_source_archive_real.cpp
+@@ -0,0 +1,168 @@
++#include "ninfer/engine.h"
++#include "kvmem/memory_contract.hpp"
++#include "kvmem/snapshot.hpp"
++#include <nlohmann/json.hpp>
++#include <algorithm>
++#include <cstdlib>
++#include <fstream>
++#include <iostream>
++#include <stdexcept>
++#include <system_error>
++
++namespace {
++void require(bool value,const char* message) { if (!value) throw std::runtime_error(message); }
++template<class F> void rejected(kvmem::MemoryErrorCode code,F work) {
++    try { work(); } catch (const kvmem::MemoryError& e) { require(e.code()==code,"wrong archive rejection");return; }
++    throw std::runtime_error("archive operation unexpectedly succeeded");
++}
++ninfer::HistoricalArchiveKey key(const nlohmann::json& j) {
++    return {j.at("space").get<std::array<std::uint8_t,16>>(),j.at("id").get<std::uint64_t>()};
++}
++nlohmann::json json_key(ninfer::HistoricalArchiveKey k) { return {{"space",k.space},{"id",k.id}}; }
++ninfer::RequestOptions request() {
++    ninfer::RequestOptions r; r.execution.requested_output_tokens=8;
++    r.execution.sampling.temperature=0; r.execution.sampling.seed=42;
++    r.execution.thinking.loop=ninfer::ReasoningLoopAction::Off; r.stop.include_model_defaults=false;
++    r.output.raw=r.output.preserve_special_tokens=true; return r;
++}
++int run(int argc,char** argv) {
++    const char* model=std::getenv("NINFER_SOURCE_ARCHIVE_ARTIFACT"); if (!model || !*model) return 77;
++    require(argc==3,"usage: source_archive_real mode work-directory");
++    const std::string mode=argv[1]; const std::filesystem::path root=argv[2];
++    const bool mtp=std::getenv("NINFER_SOURCE_ARCHIVE_MTP")!=nullptr;
++    const bool redundancy=std::getenv("NINFER_SOURCE_ARCHIVE_REDUNDANCY")!=nullptr;
++    ninfer::EngineOptions o; o.artifact_path=model; o.max_context=65536;
++    o.kv_capacity=ninfer::KvCapacityPolicy::explicit_capacity(2560); o.prefill_chunk=512;
++    o.max_concurrency=1; o.max_pending_requests=4; o.device_profile="off"; o.context_cache.enabled=false;
++    o.kv_cache=ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
++    auto& m=o.kvmem; m.selected_tokens=2048; m.reserve_tokens=512; m.host_bytes=96ULL<<20;
++    m.checkpoint_bytes=2048ULL<<20; m.source_bytes=16ULL<<20; m.recovery_bytes=1ULL<<20;
++    if(mode=="low-r") m.recovery_bytes=64;
++    m.historical_gc_aux_bytes=64ULL<<20; m.retained_sessions=8;
++    m.query_meanq_cosine=m.score_agg_max=true; m.graph_alpha=0;
++    m.historical_gc_lru=!redundancy; m.historical_gc_redundancy=redundancy; m.verify_transfers=true;
++    if(mtp) { o.speculative.backend=ninfer::SpeculativeBackend::Mtp; o.speculative.draft_tokens=4; }
++    ninfer::Engine engine(o);
++    const auto token=engine.tokenize_text(" Memory").front();
++    auto reference=engine.prepare_tokens({token});
++    ninfer::HistoricalArchiveOptions archive;
++    archive.directory=root/"archive"; archive.disk_bytes=64ULL<<20; archive.metadata_bytes=1ULL<<20;
++    archive.create=(mode=="write" || mode=="quota");
++    if(mode=="quota") archive.disk_bytes=64ULL<<10;
++    if(mode=="wrong-config") {
++        ninfer::PromptInput input; ninfer::ChatMessage message;message.role=ninfer::ChatRole::User;
++        message.parts.push_back({.kind=ninfer::MessagePartKind::Text,.text="configuration reference",.media={}});
++        input.messages.push_back(std::move(message)); auto chat=engine.prepare(std::move(input));
++        rejected(kvmem::MemoryErrorCode::InvalidPlan,[&] { engine.attach_historical_archive(archive,chat); });
++        require(engine.is_available(),"configuration refusal poisoned Engine");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode}}<<std::endl;return 0;
++    }
++    if(mode=="deny-corrupt") {
++        bool refused=false;try { engine.attach_historical_archive(archive,reference); }
++        catch(const kvmem::SnapshotCorrupt&) { refused=true; }
++        require(refused && engine.is_available(),"incomplete authority pair was accepted or poisoned Engine");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode}}<<std::endl;return 0;
++    }
++    engine.attach_historical_archive(archive,reference);
++    const auto save=[&](ninfer::HistoricalSourceRef ref) {
++        auto ticket=engine.begin_historical_save(ref);const auto result=ticket.key();ticket.wait();
++        require(ticket.status()==ninfer::HistoricalArchiveSaveStatus::Complete,"file I/O did not complete");
++        engine.finish_historical_save(ticket);return result;
++    };
++    if(mode=="quota") {
++        const auto generated=engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(1024,token)),request());
++        require(generated.accepted_source.has_value(),"quota fixture lacks source");
++        rejected(kvmem::MemoryErrorCode::BudgetExceeded,[&] { (void)engine.begin_historical_save(*generated.accepted_source); });
++        require(engine.is_available() && engine.historical_sources().size()==1,"archive quota forgot source or poisoned Engine");
++        const auto follow=engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(128,token)),request());
++        require(follow.generated_token_ids.size()==8,"quota refusal broke next request");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode}}<<std::endl;return 0;
++    }
++    if(mode=="write") {
++        const auto original=engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(32768,token)),request());
++        require(original.accepted_source && engine.historical_sources().front().retired_native_pages>0,"fixture did not retire native pages");
++        std::cerr<<"ARCHIVE_NATIVE_WRITE_ROOT source="<<original.accepted_source->id<<std::endl;
++        auto ticket=engine.begin_historical_save(*original.accepted_source);const auto root_key=ticket.key();
++        auto active=engine.submit(engine.prepare_tokens(std::vector<ninfer::TokenId>(128,token)),request());
++        rejected(kvmem::MemoryErrorCode::Pending,[&] { engine.finish_historical_save(ticket); });
++        (void)active.wait(); ticket.wait();engine.finish_historical_save(ticket);ticket={};
++        const auto child=engine.generate(engine.prepare_source_rebuild(*original.accepted_source,1024,32),request());
++        require(child.accepted_source.has_value(),"child lacks source"); const auto child_key=save(*child.accepted_source);
++        auto distinct=std::vector<ninfer::TokenId>(512,token);distinct.front()=engine.tokenize_text(" unrelated").front();
++        const auto independent=engine.generate(engine.prepare_tokens(distinct),request());
++        require(independent.accepted_source.has_value(),"independent fixture lacks source");const auto independent_key=save(*independent.accepted_source);
++        const auto canonical=engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(1024,token)),request());
++        require(!mtp || (original.speculative.rounds && child.speculative.rounds && canonical.speculative.rounds),"MTP fell back to ordinary decode");
++        nlohmann::json metadata{{"root",json_key(root_key)},{"child",json_key(child_key)},{"independent",json_key(independent_key)},
++            {"canonical_ids",canonical.generated_token_ids},{"independent_ids",independent.generated_token_ids}};
++        std::ofstream out(root/"fixture.json");out<<metadata;out.close();require(out.good(),"fixture metadata write failed");
++        require(engine.historical_archives().size()==3 && engine.historical_archive_usage().healthy,"archive catalog lost entries");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode},{"mtp",mtp},{"redundancy",redundancy},{"archives",3}}<<std::endl;return 0;
++    }
++    nlohmann::json metadata;{std::ifstream in(root/"fixture.json");in>>metadata;}
++    const auto root_key=key(metadata.at("root")),child_key=key(metadata.at("child")),other_key=key(metadata.at("independent"));
++    if(mode=="low-r") {
++        rejected(kvmem::MemoryErrorCode::BudgetExceeded,[&] { (void)engine.import_historical_source(root_key); });
++        require(engine.historical_sources().empty() && engine.historical_archive_usage().healthy && engine.is_available(),
++            "R refusal published a source/binding or poisoned Engine");
++        const auto follow=engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(128,token)),request());
++        require(follow.generated_token_ids.size()==8,"R refusal damaged subsequent inference");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode}}<<std::endl;return 0;
++    }
++    if(mode=="deny") {
++        rejected(kvmem::MemoryErrorCode::Stale,[&] { (void)engine.import_historical_source(root_key); });
++        rejected(kvmem::MemoryErrorCode::Stale,[&] { (void)engine.import_historical_source(child_key); });
++        require(engine.historical_archives().size()==1,"persistent forget lost independent archive");
++        const auto other=engine.import_historical_source(other_key);
++        const auto generated=engine.generate(engine.prepare_source_rebuild(other,512,32),request());
++        require(generated.generated_token_ids==metadata.at("independent_ids").get<std::vector<ninfer::TokenId>>(),"independent restore output changed");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode}}<<std::endl;return 0;
++    }
++    require(mode=="restore" || mode=="fault","unknown mode");
++    const auto parent=engine.import_historical_source(root_key),child=engine.import_historical_source(child_key),other=engine.import_historical_source(other_key);
++    const auto imported=engine.historical_sources();
++    require(imported.size()==3 && std::all_of(imported.begin(),imported.end(),[](const auto& s) {
++        return s.computed_tokens==0 && s.parent.id==0 && s.retained_native_domains==0;
++    }),"import revived old RAM lineage or native state");
++    const auto expected=metadata.at("canonical_ids").get<std::vector<ninfer::TokenId>>();
++    const auto rebuilt=engine.generate(engine.prepare_source_rebuild(parent,1024,32),request());
++    const auto rebuilt_child=engine.generate(engine.prepare_source_rebuild(child,1024,32),request());
++    const auto independent=engine.generate(engine.prepare_source_rebuild(other,512,32),request());
++    require(rebuilt.reused_prompt_tokens==0 && rebuilt.generated_token_ids==expected && rebuilt_child.generated_token_ids==expected,
++        "archive canonical rebuild reused old KV or changed output");
++    require(independent.generated_token_ids==metadata.at("independent_ids").get<std::vector<ninfer::TokenId>>(),"independent rebuild changed output");
++    require(!mtp || (rebuilt.speculative.rounds && rebuilt_child.speculative.rounds),"restored MTP did not speculate");
++    const auto old_sequence=engine.historical_archives().front().saved_sequence;
++    (void)save(parent); require(engine.historical_archives().front().saved_sequence>old_sequence,"restart save did not advance durable version");
++    auto stale_parent=engine.prepare_source_rebuild(parent,1024,32),stale_child=engine.prepare_source_rebuild(child,1024,32);
++    auto late=engine.begin_historical_save(child);late.wait();
++    const auto before=engine.historical_sources();require(before.size()==6,"restored family fixture lost sources");
++    ninfer::HistoricalSourceForgetResult forgotten;
++    if(mode=="fault") {
++        require(std::filesystem::create_directory(archive.directory/"seal.tmp"),"fault injection could not occupy seal temp");
++        bool failed=false;try { (void)engine.forget_historical_archive(root_key); }catch(const std::system_error&) {failed=true;}
++        require(failed && !engine.historical_archive_usage().healthy,"ambiguous commit did not report archive failure");
++    } else {
++        forgotten=engine.forget_historical_source(parent);
++        require(forgotten.forgotten_sources==4 && forgotten.discarded_native_domains==2 && forgotten.forgotten_archives==2,
++            "unified forget missed an imported RAM root or durable descendant");
++        rejected(kvmem::MemoryErrorCode::Stale,[&] { engine.finish_historical_save(late); });
++    }
++    require(engine.historical_sources().size()==2 && engine.memory_summary().kvmem.retained_sessions==1,"online family not revoked or unrelated data lost");
++    require(engine.memory_summary().kvmem.recovery_bytes==8192,"forget refunded owned prepared data early");
++    rejected(kvmem::MemoryErrorCode::Stale,[&] { (void)engine.generate(std::move(stale_parent),request()); });
++    rejected(kvmem::MemoryErrorCode::Stale,[&] { (void)engine.generate(std::move(stale_child),request()); });
++    require(engine.is_available() && engine.memory_summary().kvmem.recovery_bytes==0,"revoked preparations damaged Engine or leaked R");
++    if(mode=="restore") {
++        engine.collect_historical_archives();const auto pinned=engine.historical_archive_usage().reserved_bytes;
++        late={};engine.collect_historical_archives();require(engine.historical_archive_usage().reserved_bytes<pinned,"late writer reservation refunded before final receipt exit or never released");
++    }
++    const auto follow=engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(128,token)),request());
++    require(follow.generated_token_ids.size()==8,"forget/failure poisoned subsequent inference");
++    std::cout<<nlohmann::json{{"status","passed"},{"mode",mode},{"mtp",mtp},{"redundancy",redundancy},
++        {"forgotten_sources",forgotten.forgotten_sources},{"discarded_domains",forgotten.discarded_native_domains},
++        {"forgotten_archives",forgotten.forgotten_archives},{"rebuild_ids",rebuilt.generated_token_ids},
++        {"speculative_rounds",rebuilt.speculative.rounds}}<<std::endl;return 0;
++}
++}
++int main(int argc,char** argv) { try {return run(argc,argv);}catch(const std::exception& e){std::cerr<<"ARCHIVE_NATIVE_FATAL: "<<e.what()<<std::endl;return 1;} }

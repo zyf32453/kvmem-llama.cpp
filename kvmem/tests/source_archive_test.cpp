@@ -606,6 +606,26 @@ void separate_exec_restart() {
     }
     std::puts("four separate executable processes: save/import-append/reimport-forget/reopen-deny PASS");
 }
+void owner_queries_and_structural_queue_limit() {
+    Temp temp; Fixture f; auto archive = SourceArchive::create(temp.path(),config(),limits());
+    const auto root = archive.enroll(f.store,f.ref); const auto branch = f.store.branch(f.ref,300);
+    const auto child = archive.enroll(f.store,branch);
+    CHECK(archive.slots() == limits().max_sources && archive.key_for(f.store,f.ref) == root);
+    CHECK(archive.bound_source(child,f.store) == branch && archive.family_contains(root,child));
+    CHECK(!archive.family_contains(child,root));
+    const int32_t token = 17; f.ref = f.store.append(f.ref,&token,1,nullptr,0,0);
+    CHECK(archive.bound_source(root,f.store) == f.ref);
+    const auto before = archive.stats(); const auto r = f.staging.charged_bytes();
+    StorageIoQueue impossible(1,1);
+    CHECK(impossible.capacity_bytes() == 1);
+    rejects(MemoryErrorCode::BudgetExceeded,[&] { (void)archive.save(impossible,f.store,f.ref,f.staging); });
+    CHECK(archive.stats().objects == before.objects && archive.stats().object_bytes == before.object_bytes);
+    CHECK(f.staging.charged_bytes() == r && archive.stats().healthy);
+    StorageIoQueue queue(1,1<<20); auto write = archive.save(queue,f.store,branch,f.staging);
+    CHECK(write.key() == child); write.wait(); archive.publish(write,f.store);
+    CHECK(archive.forget(root) == 2);
+    rejects(MemoryErrorCode::Stale,[&] { (void)archive.bound_source(child,f.store); });
+}
 }
 int main(int argc, char ** argv) {
     if (argc == 3) { restart_child(argv[1],argv[2]); return 0; }
@@ -614,5 +634,6 @@ int main(int argc, char ** argv) {
     rollback_and_missing_authority(); error_and_process_crash_boundaries(); actual_save_io_failures(); allocation_failures();
     shared_metadata_and_cleanup_retry();
     import_receipt_version_and_family(); import_allocation_rollback(); separate_exec_restart();
+    owner_queries_and_structural_queue_limit();
     std::puts("source archive lifecycle, quotas, durable authority and failure boundaries PASS");
 }

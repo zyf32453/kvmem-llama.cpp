@@ -40,6 +40,7 @@ public:
     StorageTaskStatus status() const noexcept;
     void wait() const;
     bool cancel() const;
+    SourceArchiveKey key() const noexcept;
 private:
     friend class SourceArchive;
     SourceArchiveWrite(std::shared_ptr<detail::SourceArchiveState>, size_t);
@@ -108,6 +109,10 @@ public:
     // binding returns Pending; no implicit replacement, alias or decoded-origin
     // matching. Durable lineage remains in the archive, not old RAM parent refs.
     SourceRef import_source(const SourceArchiveRead &, SourceJournalStore &);
+    size_t slots() const noexcept;
+    std::optional<SourceArchiveKey> key_for(const SourceJournalStore &, SourceRef) const;
+    std::optional<SourceRef> bound_source(SourceArchiveKey, const SourceJournalStore &) const;
+    bool family_contains(SourceArchiveKey ancestor, SourceArchiveKey member) const;
     std::optional<SourceArchiveSnapshot> inspect(size_t slot) const;
     // Durable archive-family revocation ONLY. An Engine adapter must then revoke
     // its online aliases/source family; this is not system-wide ForgetSource.

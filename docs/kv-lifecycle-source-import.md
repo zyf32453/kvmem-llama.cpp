@@ -1,6 +1,6 @@
 # C7：原子源导入与跨进程续存
 
-日期：2026-10-31。接续 [C6 源归档](kv-lifecycle-source-archive.md)，本批实现源镜像到 S 的原子导入、当前归档读回执授权的 binding，以及重启后保存的持久顺序。公共组件已通过 Windows/Linux 功能、Linux ASan/UBSan/泄漏和四次独立 executable 检查；原生 C++20 回归及 GPU 结果见本批执行摘要。Engine 尚无归档保存/导入接口，阶段 C 和整个 A–F 目标仍未完成。
+日期：2026-10-31。接续 [C6 源归档](kv-lifecycle-source-archive.md)，本批实现源镜像到 S 的原子导入、当前归档读回执授权的 binding，以及重启后保存的持久顺序。公共组件已通过 Windows/Linux 功能、Linux ASan/UBSan/泄漏和四次独立 executable 检查；原生 C++20 回归及 GPU 结果见本批执行摘要。C7 当时尚无 Engine 归档入口；后续 [C8](kv-lifecycle-native-archive.md) 已接通并提供独立模型证据。下文保持 C7 原候选归属，阶段 C 和整个 A–F 目标仍未完成。
 
 ## 修改前后
 

@@ -85,6 +85,7 @@ public:
     void wait_for_completion(uint64_t epoch, std::chrono::milliseconds timeout) const;
     size_t pending_jobs() const;
     uint64_t pinned_bytes() const;
+    uint64_t capacity_bytes() const noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
