@@ -2,7 +2,7 @@
 
 更新：2026-11-01。状态：第一阶段基线与契约、第二阶段首批支持档位已落实；第三阶段 C1/C2 源记录、C3 规范前缀新域重建、C4 进程内源家族/原生别名撤销及 C5 首批 checkpoint owner 总预算已通过各自功能检查。源镜像、C6 持久源归档及 C7 原子源导入/跨进程续存组件已提供独立验证；[C8](kv-lifecycle-native-archive.md) 已接通 Engine 归档入口、跨重启规范前缀推理和统一持久/在线家族遗忘，17 个实际模型进程已通过。[C9](kv-lifecycle-source-replay.md) 已提供固定窗口内完整 32K 前缀的新域分块重放证据；[C10](kv-lifecycle-source-cool.md) 已补齐保留当前经校验归档的显式 RAM/native 家族转冷与同 owner 重新导入，10 项新增模型进程和当前 14+17+7 项回归通过；[C11a](kv-lifecycle-checkpoint-persistence.md) 已补齐源快照绑定的 checkpoint 发布、读取和退休权限组件；C11b 原生保存候选已写入，三项本地 CPU 检查通过；C11c 已补有预算的私有 CPU 输入组件，独立字节/依赖/容量检查通过，完整原生 adapter 与模型验收仍因 SSH 中断待完成；原生解码/Engine 持久恢复、精确旧轨迹、自动源保留策略及完整版本闭环仍未完成。TSan、完整生产及其他配置仍有未完成门槛，完整状态见 [六阶段进度](kv-lifecycle-progress.md)。
 
-C11d/C11e 已补私有逻辑对象、实际原生 Window/目录及预算/别名；C11f 再接 CPU checkpoint 导入候选和 S/native 发布协议。四项 Windows CPU 检查通过，物理 buffer 为普通 CPU 替身，S 数据回调不代表 Linux 归档授权验收；完整 Linux Native、最终权限、请求级续算与 GPU/模型循环仍未完成。该候选仅按 [checkpoint 当前范围](kv-lifecycle-checkpoint-persistence.md) 理解，不关闭阶段 C。
+C11d/C11e 已补私有逻辑对象、实际原生 Window/目录及预算/别名；C11f 再接 CPU checkpoint 导入候选和 S/native 发布协议。C11g 已接显式请求续算、源父子分支和失效拒绝候选，四项 Windows CPU 检查通过，新增准备/分支故障与 C/R 配额覆盖。物理 buffer 为普通 CPU 替身，S 数据回调不代表 Linux 归档授权验收；前端/模型测试源语法检查有结果，Program/GPU 代码因缺 CUDA 头文件未验证。完整 Linux Native、最终权限、实际 Engine 取消/资源失败与 GPU/模型循环仍未完成。额外 R/C/S 及未测性能/RSS 的代价保留，该候选仅按 [checkpoint 当前范围](kv-lifecycle-checkpoint-persistence.md) 理解，不关闭阶段 C。
 
 第一阶段已确定 NInfer 为主后端，固定版本、模型身份、首批支持档位并完成主机契约检查，见 [第一阶段基线](kv-lifecycle-baseline.md)。新基线已有公共 MemoryStamp、BlockDescriptor、CheckpointIdentity 和 HostKvStorage，后续在这些类型上扩展，不重复建设。下文保留原总体设计及其边界。
 

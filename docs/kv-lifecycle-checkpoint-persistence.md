@@ -4,7 +4,8 @@
 本地 CPU 检查通过，最新原生完整编译和真实模型检查因 SSH 再次中断尚未完成。
 后续 C11c 已补私有 CPU 读取准备组件，C11d 已补实际逻辑对象及其 C/M 准备，均只有本地组件证据；
 C11e 已补私有原生 Window/目录及 owner 转移，CPU 数据装配检查通过；
-C11f 已接通 Engine CPU checkpoint 导入候选与新身份发布协议，完整 Linux/模型恢复仍未验收，
+C11f 已接通 Engine CPU checkpoint 导入候选与新身份发布协议；C11g 已补请求级显式续算候选及源分支，
+完整 Linux/模型恢复仍未验收，
 阶段 C 与完整六阶段目标继续开放。
 执行范围、结果和不利发现见 [本批摘要](experiments/2026-10-31-lifecycle-checkpoint-authority/summary.json)。
 
@@ -260,13 +261,49 @@ I/O、性能、RSS 未测。接口/源码现为候选，完整 Native build、�
 均待 SSH 恢复验证；请求级显式续算、取消/资源故障及长期质量仍未完成。
 见 [C11f 实现、证据与未验证项](experiments/2026-11-01-lifecycle-checkpoint-publish/summary.json)。
 
+## C11g：显式续算与源分支候选
+
+新增 `Engine::prepare_checkpoint_resume(source, prefix_tokens, output_reserve_tokens)`，先准备，
+再走既有 submit/generate、模型资源预约及原生恢复路径。它既能引用已有的完整 retained CP，
+也能引用 C11f 导入的新 CPU 域。首批仍为 Linux、单 GPU/运行请求、文本/RAM、普通或 MTP、
+关闭 legacy context cache；只重用 raw-token 配置的规范源前缀，不能把 chat 配置默认为 raw。
+需要至少一个已接受、位于所选 CP 之后的规范 token，用正常前向取得 logits。
+
+- 准备对象保存真实 R 前缀副本，其固定对象/控制开销另计 C；不持有历史 Window、CP image 或
+  H 页。缓存失效后旧准备对象仍可能占 R/C，但不能阻止淘汰或获得新的恢复许可。
+- 固定当前 SourceRef/revision、配置、Window stamp 和所选 CP stamp。准入核对规范 token、
+  输出及 MTP workspace 预留，不接受关闭 reuse 或 branched read。历史查找只能选择该源/域/CP；
+  准入或 materialization 找不到时拒绝，禁止转为普通的隐藏重算。
+- 沿用原历史的 Query 来源及 CP 恢复后的 attention parser 状态。普通 raw 输入仍走自己的
+  可选缓存路径；此次显式续算不能冒充 SourceReplayAsNew。
+- 实际 native restore 后才创建 S 子分支，记录 parent/prefix 和真实计算边界；分支创建/
+  计算进度提交失败撤销新子分支。成功接受输出后结束请求持有的恢复准备，退款取决于所有
+  真实共享 owner。取消/失败未完成整段提交时不保留该请求的半成品 native history。
+
+Windows GNU16.2.0/C++20 下四项 CPU 检查通过：输入/逻辑准备、实际 Window/发布/续算组件，
+以及 SourceJournal/SourceImage 回归。续算新覆盖 3 个准备分配失败点、4 个 S 分支分配失败点，
+真实 C/R 额度拒绝及退款、规范 token/输出预留/owner/revision/stamp/家族遗忘 fence、父分支与
+计算进度。物理 image 使用普通 CPU buffer 代替 pinned buffer，未执行 CUDA。完整前端与真实
+模型测试源的 Windows 语法检查通过；`-Wall -Wextra` 报告三处未改动的前端初始化警告。
+Program/GPU 文件因本机缺少 `cuda_runtime.h` 未完成语法/链接检查。
+
+真实模型 save/restore 流程改用显式接口：原始 retained CP 续算作为保存/恢复对照，要求实际
+history hit、冷却后的旧准备拒绝、子分支关系和 R 退出退款；新子分支先持久保存，再做家族转冷。
+该测试及取消、准入/执行资源不足的完整 Engine 场景仍未运行。SSH 未恢复，未重试/替换旧任务。
+这些是候选代码，不能据 CPU 检查开启 `state_checkpoint` 能力或宣布跨进程模型恢复成功。
+
+代价包括一个额外 R 前缀副本、C 固定准备对象、逐次规范行比对、S 子分支的复制/容量和恢复时
+正常 CPU/GPU 工作；prepared-input 工作区另计，不承诺全进程 RSS 或性能。真实恢复中发生
+资源失败可能已消费原缓存，当前不承诺撤销此前的缓存消费；完整故障/取消门槛尚待验证。
+见 [C11g 证据与缺口](experiments/2026-11-01-lifecycle-checkpoint-request/summary.json)。
+
 ## 下一步的完整原生链路
 
 1. SSH 恢复后先取回已启动任务的最终状态和日志，再编译最新保存候选。真实模型检查完整
    文件、退休标记、全部合法目录引用、C/H/D 边界与迟到工单拒绝，不复用旧模型二进制。
-2. 验收 C11f 的最终授权与 S/native 原子发布/回滚，再接通请求级原生续算及正常执行资源预约、
-   GPU 上传及最终许可复核；成功才发布新 S/native 身份，失败不暴露半恢复状态。
-3. 接通 Engine 新域恢复入口；验证普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程
-   恢复及独立输出基线，旧版本、遗忘和退休不得绕过新身份许可。
+2. 验收 C11f 的最终授权与 S/native 原子发布/回滚，以及 C11g 的实际请求准入、资源预约、
+   GPU 上传、取消及资源失败，核对最终许可和源分支，不以 CPU 组件代替 Engine 证明。
+3. 执行普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程恢复及原始 native continuation
+   对照，旧版本、遗忘和退休不得绕过新身份许可。完成前不打开恢复能力标记。
 4. 再完成自动源保留策略及任务价值、分层/多会话、长期资源/性能/Agent 验收。当前组件不能
    证明任意旧稀疏轨迹精确回放、全进程 RSS 上界或完整生产 GC。
