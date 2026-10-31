@@ -18,6 +18,7 @@ namespace {
 constexpr uint64_t catalog_magic = 0x3143524153564bULL; // KVSARC1
 constexpr uint64_t seal_magic = 0x314c414553564bULL; // KVSEAL1
 constexpr uint64_t version = 1, record_bytes = 120, header_bytes = 112, seal_bytes = 64;
+constexpr uint64_t checkpoint_magic = 0x3154504341524353ULL, checkpoint_fixed_bytes = 104;
 constexpr size_t absent = SIZE_MAX;
 [[noreturn]] void io_error(const char * what) { throw std::system_error(errno, std::generic_category(), what); }
 struct File {
@@ -93,6 +94,19 @@ uint64_t blob_id(const char * name) {
     }
     return id;
 }
+std::string checkpoint_name(uint64_t id, bool published, bool retired=false) {
+    return std::string(retired ? "checkpoint-retired." : published ? "checkpoint." : "checkpoint-pending.") + std::to_string(id);
+}
+uint64_t checkpoint_id(const char * name, const char * prefix) {
+    const auto n=std::strlen(prefix);
+    if (std::strncmp(name,prefix,n) || !name[n] || name[n]=='0') return 0;
+    uint64_t id=0;
+    for (auto p=name+n;*p;++p) {
+        if (*p<'0' || *p>'9' || id>(UINT64_MAX-uint64_t(*p-'0'))/10) return 0;
+        id=id*10+uint64_t(*p-'0');
+    }
+    return id;
+}
 }
 
 namespace detail {
@@ -111,6 +125,11 @@ struct SourceArchiveState {
         SourceState origin;
         StorageTicket ticket;
         std::atomic<size_t> handles{0};
+        // One attachment shares this source blob's slot, lifetime and D/M
+        // account. Its independent ticket must not replace source-write status.
+        uint64_t checkpoint_reserved = 0, checkpoint_removed = 0;
+        StorageTicket checkpoint_ticket;
+        bool checkpoint_claimed = false, checkpoint_published = false, checkpoint_unlinked = false, checkpoint_retired = false;
     };
     SourceArchiveLimits limits;
     SourceConfiguration configuration;
@@ -143,6 +162,8 @@ struct SourceArchiveState {
         control = 2*catalog_bytes + 2*seal_bytes;
         if (metadata > limits.metadata_bytes || control > limits.disk_bytes)
             throw MemoryError(MemoryErrorCode::BudgetExceeded, "source archive fixed tables/control exceed quota");
+        if (limits.max_checkpoint_bytes && limits.max_checkpoint_bytes<=checkpoint_fixed_bytes)
+            throw MemoryError(MemoryErrorCode::InvalidPlan,"checkpoint frame limit cannot hold a payload");
         entries_storage = std::make_unique<HistoricalKvAuxArray<Entry>>(limits.max_sources, auxiliary, HistoricalKvAuxKind::Metadata);
         scratch_storage = std::make_unique<HistoricalKvAuxArray<Entry>>(limits.max_sources, auxiliary, HistoricalKvAuxKind::Metadata);
         objects_storage = std::make_unique<HistoricalKvAuxArray<Object>>(limits.max_objects, auxiliary, HistoricalKvAuxKind::Metadata);
@@ -195,6 +216,24 @@ struct SourceArchiveState {
     size_t object_slot() const {
         for (size_t i = 0; i < limits.max_objects; ++i) if (!objects[i].id) return i;
         throw MemoryError(MemoryErrorCode::BudgetExceeded, "archive object/lease table is full");
+    }
+    size_t object_for(uint64_t id) const {
+        for (size_t i=0;i<limits.max_objects;++i) if (objects[i].id==id) return i;
+        throw SnapshotCorrupt("source archive lost an object ledger entry");
+    }
+    void remove_file(const std::string & name, uint64_t reserved, bool & unlinked, uint64_t & removed) {
+        if (unlinked) return;
+        struct stat value{};
+        if (::fstatat(directory.fd,name.c_str(),&value,AT_SYMLINK_NOFOLLOW)!=0) {
+            if (errno!=ENOENT) io_error("stat orphan archive file");
+        } else {
+            if (!S_ISREG(value.st_mode) || value.st_size<0 || uint64_t(value.st_size)>reserved) {
+                healthy=false;throw SnapshotCorrupt("orphan archive file exceeds its reservation");
+            }
+            if (::unlinkat(directory.fd,name.c_str(),0)==0) removed=uint64_t(value.st_size);
+            else if (errno!=ENOENT) io_error("remove orphan archive file");
+        }
+        unlinked=true;
     }
     uint64_t encode_catalog(int fd, uint64_t seq, uint64_t source_high, uint64_t blob_high) {
         SnapshotWriter out([&](const void * p, size_t n) { write_all(fd, p, n); });
@@ -308,12 +347,27 @@ struct SourceArchiveState {
                 if (bytes > (!std::strcmp(name, "catalog.tmp") ? catalog_bytes : seal_bytes))
                     throw SnapshotCorrupt("oversized archive control temporary");
             } else {
-                const auto id = blob_id(name);
-                if (!id || id >= next_blob || bytes > limits.image.max_bytes)
+                const auto blob = blob_id(name);
+                const auto published=checkpoint_id(name,"checkpoint.");
+                const auto pending=checkpoint_id(name,"checkpoint-pending.");
+                const auto retired=checkpoint_id(name,"checkpoint-retired.");
+                const auto id=blob ? blob : published ? published : pending ? pending : retired;
+                if (!id || id >= next_blob || (blob && bytes>limits.image.max_bytes))
                     throw SnapshotCorrupt("unknown or uncommitted archive file identity");
                 if (bytes > limits.disk_bytes - control - object_bytes)
                     throw MemoryError(MemoryErrorCode::BudgetExceeded, "existing archive files exceed disk quota");
-                auto & object = objects[object_slot()]; object.id = id; object.bytes = bytes; object_bytes += bytes;
+                size_t slot=absent;
+                for (size_t i=0;i<limits.max_objects;++i) if (objects[i].id==id) {slot=i;break;}
+                if (slot==absent) slot=object_slot();
+                auto & object=objects[slot];object.id=id;
+                if (blob) object.bytes=bytes;
+                else {
+                    if (object.checkpoint_claimed) throw SnapshotCorrupt("duplicate checkpoint publication paths");
+                    object.checkpoint_claimed=true;object.checkpoint_published=bool(published);
+                    object.checkpoint_retired=bool(retired);
+                    object.checkpoint_reserved=bytes;
+                }
+                object_bytes+=bytes;
             }
             errno = 0;
         }
@@ -476,6 +530,130 @@ void SourceArchive::validate(const SourceArchiveRead & read) const {
     const auto index = s.find(s.key(object.source));
     if (s.entries[index].blob != object.id) throw MemoryError(MemoryErrorCode::Stale, "archive read was replaced or forgotten");
 }
+SourceArchiveCheckpointWrite SourceArchive::save_checkpoint(StorageIoQueue & queue,
+    const SourceJournalStore & store, SourceRef ref, SourceArchiveCheckpointInput input) {
+    auto & s=*state_;s.check();
+    if (!s.limits.max_checkpoint_bytes)
+        throw MemoryError(MemoryErrorCode::Unsupported,"checkpoint archive is disabled");
+    if (!input.payload_bytes || input.payload_bytes>UINT64_MAX-checkpoint_fixed_bytes ||
+        input.retained_bytes<input.payload_bytes || !input.owner || !input.write ||
+        !std::any_of(input.schema.begin(),input.schema.end(),[](uint8_t x){return x!=0;}))
+        throw MemoryError(MemoryErrorCode::InvalidPlan,"checkpoint needs immutable charged payload and a schema");
+    const auto current=store.state(ref);const auto entry=s.binding(store,ref.source);
+    if (entry==absent) throw MemoryError(MemoryErrorCode::Stale,"checkpoint source is not bound");
+    const auto & e=s.entries[entry];
+    if (!e.blob || e.bound_snapshot_revision!=ref.revision || current.configuration!=s.configuration ||
+        current.accepted_frontier!=e.origin.accepted_frontier || current.events!=e.origin.events)
+        throw MemoryError(MemoryErrorCode::Pending,"checkpoint needs a complete current published source");
+    const auto slot=s.object_for(e.blob);auto & object=s.objects[slot];
+    if (object.checkpoint_claimed)
+        throw MemoryError(MemoryErrorCode::Pending,"source snapshot already claimed; publish a new source snapshot");
+    const auto bytes=input.payload_bytes+checkpoint_fixed_bytes;
+    if (bytes>s.limits.max_checkpoint_bytes || bytes>s.limits.disk_bytes-s.control-s.object_bytes ||
+        input.retained_bytes>queue.capacity_bytes())
+        throw MemoryError(MemoryErrorCode::BudgetExceeded,"checkpoint exceeds frame, disk or complete I/O queue bounds");
+    object.checkpoint_claimed=true;object.checkpoint_reserved=bytes;
+    s.object_bytes+=bytes;s.peak=std::max(s.peak,s.control+s.object_bytes);
+    // Refusal leaves a charged, unpublished claim for collect(), exactly as
+    // source save does. Only immutable adapter-owned bytes reach this worker.
+    const auto retained=input.retained_bytes;
+    object.checkpoint_ticket=queue.submit(retained,[owner=state_,slot,input=std::move(input)] {
+        auto & object=owner->objects[slot];
+        const auto name=checkpoint_name(object.id,false);
+        File file(open_file(owner->directory.fd,name.c_str(),O_WRONLY|O_CREAT|O_EXCL));
+        SnapshotWriter out([&](const void * p,size_t n){write_all(file.fd,p,n);});
+        put(out,checkpoint_magic);put(out,1);put(out,object.checkpoint_reserved);
+        out.write(owner->space.data(),owner->space.size());put(out,object.source);put(out,object.id);
+        put(out,input.payload_bytes);out.write(input.schema.data(),input.schema.size());
+        uint64_t written=0;
+        input.write([&](const void * p,size_t n) {
+            if (n>input.payload_bytes-written || (n && !p))
+                throw SnapshotCorrupt("checkpoint producer exceeded its declared payload");
+            out.write(p,n);written+=n;
+        });
+        if (written!=input.payload_bytes) throw SnapshotCorrupt("checkpoint producer ended before declared payload");
+        const auto hash=out.hash();put(out,hash);
+        if (out.bytes()!=object.checkpoint_reserved) throw std::logic_error("checkpoint frame size mismatch");
+        sync_file(file.fd);close_file(file);sync_file(owner->directory.fd);
+    });
+    return SourceArchiveCheckpointWrite(state_,slot,ref);
+}
+void SourceArchive::publish_checkpoint(const SourceArchiveCheckpointWrite & write, const SourceJournalStore & store) {
+    auto & s=*state_;s.check();
+    if (write.state_.get()!=state_.get()) throw MemoryError(MemoryErrorCode::Stale,"foreign checkpoint write receipt");
+    auto & object=s.objects[write.slot_];
+    if (object.checkpoint_retired) throw MemoryError(MemoryErrorCode::Stale,"checkpoint was retired");
+    if (!object.checkpoint_ticket.ready()) throw MemoryError(MemoryErrorCode::Pending,"checkpoint I/O is unfinished");
+    object.checkpoint_ticket.wait();
+    const auto current=store.state(write.binding_);const auto & e=s.entries[s.find(s.key(object.source))];
+    if (e.blob!=object.id || e.bound_store!=&store || !(e.bound_source==write.binding_.source) ||
+        e.bound_snapshot_revision!=write.binding_.revision || current.configuration!=s.configuration)
+        throw MemoryError(MemoryErrorCode::Stale,"checkpoint source version or binding changed");
+    if (object.checkpoint_published) return;
+    const auto pending=checkpoint_name(object.id,false),published=checkpoint_name(object.id,true);
+    try {
+        if (::renameat(s.directory.fd,pending.c_str(),s.directory.fd,published.c_str())!=0)
+            io_error("publish checkpoint attachment");
+        sync_file(s.directory.fd);object.checkpoint_published=true;
+    } catch (...) {s.healthy=false;throw;}
+}
+SourceArchiveCheckpointRead SourceArchive::read_checkpoint(const SourceArchiveRead & source,
+    const SourceConfiguration & schema, SnapshotWriter::Sink sink) {
+    validate(source);auto & s=*state_;
+    if (!s.limits.max_checkpoint_bytes) throw MemoryError(MemoryErrorCode::Unsupported,"checkpoint archive is disabled");
+    if (!sink || !std::any_of(schema.begin(),schema.end(),[](uint8_t x){return x!=0;}))
+        throw MemoryError(MemoryErrorCode::InvalidPlan,"checkpoint needs a schema and private payload sink");
+    auto & object=s.objects[source.slot_];
+    if (!object.checkpoint_published || object.checkpoint_retired)
+        throw MemoryError(MemoryErrorCode::Stale,"current source snapshot has no eligible checkpoint");
+    if (object.checkpoint_reserved<=checkpoint_fixed_bytes) throw SnapshotCorrupt("truncated checkpoint frame");
+    if (object.checkpoint_reserved>s.limits.max_checkpoint_bytes)
+        throw MemoryError(MemoryErrorCode::BudgetExceeded,"checkpoint frame exceeds current configured bound");
+    const auto name=checkpoint_name(object.id,true);File file(open_file(s.directory.fd,name.c_str(),O_RDONLY));
+    if (file_size(file.fd)!=object.checkpoint_reserved) throw SnapshotCorrupt("checkpoint file size changed");
+    SnapshotReader in([&](void * p,size_t n){read_all(file.fd,p,n);},object.checkpoint_reserved);
+    if (get(in)!=checkpoint_magic || get(in)!=1 || get(in)!=object.checkpoint_reserved)
+        throw SnapshotCorrupt("checkpoint frame is incompatible");
+    std::array<uint8_t,16> space{};in.read(space.data(),space.size());
+    if (space!=s.space || get(in)!=object.source || get(in)!=object.id)
+        throw SnapshotCorrupt("checkpoint belongs to another source snapshot");
+    const auto bytes=get(in);SourceConfiguration stored{};in.read(stored.data(),stored.size());
+    if (stored!=schema) throw MemoryError(MemoryErrorCode::InvalidPlan,"checkpoint backend schema differs");
+    if (bytes!=object.checkpoint_reserved-checkpoint_fixed_bytes) throw SnapshotCorrupt("checkpoint payload size disagrees");
+    SourceArchiveCheckpointRead result(state_,source.slot_,bytes);
+    std::array<uint8_t,8192> chunk{};
+    for (uint64_t left=bytes;left;) {
+        const auto n=size_t(std::min<uint64_t>(left,chunk.size()));in.read(chunk.data(),n);sink(chunk.data(),n);left-=n;
+    }
+    const auto hash=in.hash();
+    if (get(in)!=hash || in.remaining()) throw SnapshotCorrupt("checkpoint payload checksum mismatch");
+    close_file(file);validate(source);validate(result);return result;
+}
+void SourceArchive::validate(const SourceArchiveCheckpointRead & read) const {
+    auto & s=*state_;s.check();
+    if (read.state_.get()!=state_.get()) throw MemoryError(MemoryErrorCode::Stale,"foreign checkpoint read receipt");
+    const auto & object=s.objects[read.slot_];const auto & e=s.entries[s.find(s.key(object.source))];
+    if (e.blob!=object.id || !object.checkpoint_published || object.checkpoint_retired)
+        throw MemoryError(MemoryErrorCode::Stale,"checkpoint was replaced, retired or its source forgotten");
+}
+bool SourceArchive::retire_checkpoint(SourceArchiveKey key) {
+    auto & s=*state_;const auto & e=s.entries[s.find(key)];
+    if (!e.blob) return false;
+    auto & object=s.objects[s.object_for(e.blob)];
+    if (!object.checkpoint_claimed || object.checkpoint_retired) return false;
+    if (object.checkpoint_ticket && !object.checkpoint_ticket.ready())
+        throw MemoryError(MemoryErrorCode::Pending,"checkpoint writer must drain before attachment retirement");
+    const auto from=checkpoint_name(object.id,object.checkpoint_published),retired=checkpoint_name(object.id,false,true);
+    try {
+        if (::renameat(s.directory.fd,from.c_str(),s.directory.fd,retired.c_str())!=0) {
+            if (errno!=ENOENT) io_error("retire checkpoint attachment");
+            File marker(open_file(s.directory.fd,retired.c_str(),O_WRONLY|O_CREAT|O_EXCL));
+            sync_file(marker.fd);close_file(marker);
+        }
+        sync_file(s.directory.fd);object.checkpoint_published=false;object.checkpoint_retired=true;
+    } catch (...) {s.healthy=false;throw;}
+    return true;
+}
 SourceRef SourceArchive::import_source(const SourceArchiveRead & read, SourceJournalStore & store) {
     validate(read); auto & s = *state_;
     const auto index = s.find(read.key()); auto & entry = s.entries[index];
@@ -584,22 +762,38 @@ SourceArchive::Collection SourceArchive::collect() {
     auto & s = *state_; s.check(); Collection result;
     for (size_t i = 0; i < s.limits.max_objects; ++i) {
         auto & object = s.objects[i];
-        if (!object.id || s.referenced(object.id) || object.handles.load(std::memory_order_acquire) ||
-            (object.ticket && !object.ticket.ready())) continue;
-        auto name = blob_name(object.id);
-        if (!object.unlinked) {
-            struct stat value{};
-            if (::fstatat(s.directory.fd, name.c_str(), &value, AT_SYMLINK_NOFOLLOW) != 0) {
-                if (errno != ENOENT) io_error("stat orphan archive file");
-            } else {
-                if (!S_ISREG(value.st_mode) || value.st_size < 0 || uint64_t(value.st_size) > object.bytes) {
-                    s.healthy = false; throw SnapshotCorrupt("orphan archive file exceeds its reservation");
+        if (!object.id || object.handles.load(std::memory_order_acquire) ||
+            (object.ticket && !object.ticket.ready()) ||
+            (object.checkpoint_ticket && !object.checkpoint_ticket.ready())) continue;
+        const auto referenced=s.referenced(object.id);
+        if (object.checkpoint_claimed && (!object.checkpoint_published || !referenced)) {
+            const auto name=checkpoint_name(object.id,object.checkpoint_published,object.checkpoint_retired);
+            if (referenced && object.checkpoint_retired) {
+                // Keep a zero-byte durable tombstone for this source-blob ID.
+                // Never let an old completion re-grant this retired identity.
+                if (object.checkpoint_reserved) {
+                    File marker(open_file(s.directory.fd,name.c_str(),O_WRONLY));
+                    const auto bytes=file_size(marker.fd);
+                    if (bytes>object.checkpoint_reserved) {s.healthy=false;throw SnapshotCorrupt("checkpoint exceeds reservation");}
+                    if (::ftruncate(marker.fd,0)!=0) io_error("trim retired checkpoint payload");
+                    object.checkpoint_removed=std::max(object.checkpoint_removed,bytes);
+                    sync_file(marker.fd);close_file(marker);sync_file(s.directory.fd);
+                    s.object_bytes-=object.checkpoint_reserved;result.quota_released+=object.checkpoint_reserved;
+                    result.file_bytes_removed+=object.checkpoint_removed;
+                    object.checkpoint_reserved=object.checkpoint_removed=0;object.checkpoint_ticket={};
                 }
-                if (::unlinkat(s.directory.fd, name.c_str(), 0) == 0) object.removed_bytes = uint64_t(value.st_size);
-                else if (errno != ENOENT) io_error("remove orphan archive file");
+            } else {
+                s.remove_file(name,object.checkpoint_reserved,object.checkpoint_unlinked,object.checkpoint_removed);
+                sync_file(s.directory.fd);
+                s.object_bytes-=object.checkpoint_reserved;result.quota_released+=object.checkpoint_reserved;
+                result.file_bytes_removed+=object.checkpoint_removed;
+                object.checkpoint_reserved=object.checkpoint_removed=0;
+                object.checkpoint_ticket={};object.checkpoint_claimed=object.checkpoint_published=false;
+                object.checkpoint_unlinked=object.checkpoint_retired=false;
             }
-            object.unlinked = true;
         }
+        if (referenced) continue;
+        s.remove_file(blob_name(object.id),object.bytes,object.unlinked,object.removed_bytes);
         sync_file(s.directory.fd);
         s.object_bytes -= object.bytes; result.quota_released += object.bytes;
         result.file_bytes_removed += object.removed_bytes; ++result.objects;
@@ -643,6 +837,44 @@ void SourceArchiveWrite::wait() const {
 }
 bool SourceArchiveWrite::cancel() const { return state_ && state_->objects[slot_].ticket.cancel(); }
 SourceArchiveKey SourceArchiveWrite::key() const noexcept {
+    return state_ ? state_->key(state_->objects[slot_].source) : SourceArchiveKey{};
+}
+SourceArchiveCheckpointWrite::SourceArchiveCheckpointWrite(std::shared_ptr<State> state,size_t slot,SourceRef binding)
+    :state_(std::move(state)),slot_(slot),binding_(binding) {state_->objects[slot_].handles.fetch_add(1,std::memory_order_relaxed);}
+void SourceArchiveCheckpointWrite::reset() noexcept {
+    if (state_) state_->objects[slot_].handles.fetch_sub(1,std::memory_order_release);
+    state_.reset();binding_={};
+}
+SourceArchiveCheckpointWrite::~SourceArchiveCheckpointWrite(){reset();}
+SourceArchiveCheckpointWrite::SourceArchiveCheckpointWrite(SourceArchiveCheckpointWrite && other) noexcept
+    :state_(std::move(other.state_)),slot_(other.slot_),binding_(other.binding_) {}
+SourceArchiveCheckpointWrite & SourceArchiveCheckpointWrite::operator=(SourceArchiveCheckpointWrite && other) noexcept {
+    if(this!=&other){reset();state_=std::move(other.state_);slot_=other.slot_;binding_=other.binding_;}return *this;
+}
+StorageTaskStatus SourceArchiveCheckpointWrite::status() const noexcept {
+    return state_ ? state_->objects[slot_].checkpoint_ticket.status() : StorageTaskStatus::Cancelled;
+}
+void SourceArchiveCheckpointWrite::wait() const {
+    if(!state_) throw MemoryError(MemoryErrorCode::Stale,"empty checkpoint write receipt");
+    state_->objects[slot_].checkpoint_ticket.wait();
+}
+bool SourceArchiveCheckpointWrite::cancel() const {return state_ && state_->objects[slot_].checkpoint_ticket.cancel();}
+SourceArchiveKey SourceArchiveCheckpointWrite::key() const noexcept {
+    return state_ ? state_->key(state_->objects[slot_].source) : SourceArchiveKey{};
+}
+SourceArchiveCheckpointRead::SourceArchiveCheckpointRead(std::shared_ptr<State> state,size_t slot,uint64_t bytes)
+    :state_(std::move(state)),slot_(slot),bytes_(bytes) {state_->objects[slot_].handles.fetch_add(1,std::memory_order_relaxed);}
+void SourceArchiveCheckpointRead::reset() noexcept {
+    if(state_) state_->objects[slot_].handles.fetch_sub(1,std::memory_order_release);
+    state_.reset();bytes_=0;
+}
+SourceArchiveCheckpointRead::~SourceArchiveCheckpointRead(){reset();}
+SourceArchiveCheckpointRead::SourceArchiveCheckpointRead(SourceArchiveCheckpointRead && other) noexcept
+    :state_(std::move(other.state_)),slot_(other.slot_),bytes_(std::exchange(other.bytes_,0)) {}
+SourceArchiveCheckpointRead & SourceArchiveCheckpointRead::operator=(SourceArchiveCheckpointRead && other) noexcept {
+    if(this!=&other){reset();state_=std::move(other.state_);slot_=other.slot_;bytes_=std::exchange(other.bytes_,0);}return *this;
+}
+SourceArchiveKey SourceArchiveCheckpointRead::key() const noexcept {
     return state_ ? state_->key(state_->objects[slot_].source) : SourceArchiveKey{};
 }
 SourceArchiveRead::SourceArchiveRead(std::shared_ptr<State> state, size_t slot, SourceImage image)

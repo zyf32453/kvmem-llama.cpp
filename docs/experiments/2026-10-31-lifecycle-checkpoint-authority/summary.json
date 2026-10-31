@@ -1,0 +1,636 @@
+{
+  "date": "2026-10-31",
+  "stage": "C11a",
+  "status": "checkpoint_authority_component_qualified_native_restore_incomplete",
+  "component_only": true,
+  "full_goal_complete": false,
+  "stage_C_complete": false,
+  "production_qualified": false,
+  "gpu_model_tests_run": false,
+  "contract": {
+    "path": "docs/contracts/kv-lifecycle-checkpoint-authority-v1.json",
+    "sha256": "b81d1d06ad75cd37ce1b7ac5f6fd48193c00d5e14375203357a67c65d8f42c9a",
+    "source_pins": 148
+  },
+  "observations": [
+    {
+      "kind": "full-core",
+      "root": "/home/yifan/kvmem-validation/checkpoint-authority-core-20261031-f2422877",
+      "container": "kvmem-checkpoint-authority-core-f2422877",
+      "id": "396be929669be9431bda033d9b793d4149bd74097a7b7a4e034afc442e092853",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T14:55:14.94894233Z",
+      "finished": "2026-10-31T14:56:24.572677982Z",
+      "exit_code": 0,
+      "oom": false,
+      "valid_for_final": true,
+      "evidence_sha256": "583ba87aa3b832cb2070d6bdfcc634dd740dfcff8ed5551d02893a9476ef2f44"
+    },
+    {
+      "kind": "invalid-overlay",
+      "root": "/home/yifan/kvmem-validation/checkpoint-authority-core-20261031-a493b3b0",
+      "container": "kvmem-checkpoint-authority-core-a493b3b0",
+      "id": "e6124ac62be6fd77689625e417884aa9b3574268604da9bb568301c5f5012ecf",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T14:59:55.401325607Z",
+      "finished": "2026-10-31T15:01:00.19144304Z",
+      "exit_code": 0,
+      "oom": false,
+      "valid_for_final": false,
+      "evidence_sha256": "544165a533eac1ede532848c5fc90a40074f3eba9c5146d9d91d207918a953e6"
+    },
+    {
+      "kind": "path-fixed-intermediate",
+      "root": "/home/yifan/kvmem-validation/checkpoint-authority-core-20261031-01276e53",
+      "container": "kvmem-checkpoint-authority-core-01276e53",
+      "id": "a925498da04f457649d85604d4e2cace939bd425bb0f9e9bd8e29dc8ec4c141d",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T15:03:13.255100393Z",
+      "finished": "2026-10-31T15:03:59.818155486Z",
+      "exit_code": 0,
+      "oom": false,
+      "valid_for_final": false,
+      "evidence_sha256": "d49497aa726f2094bb989ee420798edea88e35dfbf6f82e4bd3c3cf89aff09d1"
+    },
+    {
+      "kind": "native-intermediate",
+      "root": "/home/yifan/kvmem-validation/checkpoint-authority-native-20261031-3711bfa7",
+      "container": "kvmem-checkpoint-authority-native-3711bfa7",
+      "id": "5487c64fce380cb54df222e821d7cd9826ceb4fe24b35fa98a93884dc6a88e73",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T15:00:10.106183791Z",
+      "finished": "2026-10-31T15:00:56.765533755Z",
+      "exit_code": 0,
+      "oom": false,
+      "valid_for_final": false,
+      "evidence_sha256": "5814280f3b3493719eea01e236e28d595506b306097a9a892b8fc320bfddcfd1"
+    },
+    {
+      "kind": "final-core",
+      "root": "/home/yifan/kvmem-validation/checkpoint-authority-core-20261031-89691cd1",
+      "container": "kvmem-checkpoint-authority-core-89691cd1",
+      "id": "34f1d2dad33c9c28fc584659d5a0a86ff292aa7e69cd7a401b25d4a785948e5f",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T15:16:55.314438604Z",
+      "finished": "2026-10-31T15:18:07.204296088Z",
+      "exit_code": 0,
+      "oom": false,
+      "valid_for_final": true,
+      "evidence_sha256": "2fe0592fec8cd4c499cec90980330d26ca6a5adbc7e83787f2bc3e6c9cd99e34"
+    },
+    {
+      "kind": "final-native",
+      "root": "/home/yifan/kvmem-validation/checkpoint-authority-native-20261031-6fb28c91",
+      "container": "kvmem-checkpoint-authority-native-6fb28c91",
+      "id": "436f5d057febea87d86025b4cbc44abdd34ba4758bd729a8415bdc0e31d95783",
+      "image": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "started": "2026-10-31T15:17:15.62590001Z",
+      "finished": "2026-10-31T15:18:01.905563512Z",
+      "exit_code": 0,
+      "oom": false,
+      "valid_for_final": true,
+      "evidence_sha256": "6b2d3a8e7a7c6ae35b15bede298eb96c2a5a86cfe26b70e1503f366ec2143b6d"
+    }
+  ],
+  "full_core": {
+    "passed": true,
+    "source_pins": 104,
+    "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+    "targets": [
+      "historical_gc_ninfer_core_test",
+      "memory_contract_test",
+      "native_kv_payload_test",
+      "host_kv_storage_test",
+      "spill_io_test",
+      "tiered_kv_storage_test",
+      "native_residency_test",
+      "kv_content_test",
+      "prefix_checkpoint_test",
+      "checkpoint_policy_test",
+      "checkpoint_image_test",
+      "historical_kv_boundary_mailbox_test",
+      "historical_kv_commit_conditions_test",
+      "historical_kv_range_lock_test",
+      "historical_kv_witness_lifecycle_test",
+      "historical_kv_score_evidence_test",
+      "historical_kv_auxiliary_budget_test",
+      "historical_kv_owner_budget_test",
+      "historical_kv_service_health_test",
+      "mean_key_retrieval_test",
+      "source_journal_test",
+      "source_recovery_test",
+      "source_image_test",
+      "source_archive_test"
+    ],
+    "sanitizers": "detect_leaks=1:halt_on_error=1 / halt_on_error=1:print_stacktrace=1",
+    "binaries": {
+      "build/kvmem-core/source_archive_test": "0c9aeeed35af12a3dae92bbd7a27da6e5c680a5aebe3a1177dcfb123dae8141f",
+      "build-asan/kvmem-core/source_archive_test": "8bcb9a021afa6a5016e1eca19d9044cc832f09e4a128d6d1ddc80dd74aed938c"
+    },
+    "scope": "Linux local-filesystem archive component; checkpoint attachment authority component; no native state codec/Engine restore/GPU, hardware power-loss, full-backup rollback or global forgetting claim"
+  },
+  "final_core": {
+    "passed": true,
+    "kind": "core",
+    "source_checkout": "/work/source",
+    "source_pins": 104,
+    "changed_inputs": [
+      "kvmem/src/host/source_archive.cpp",
+      "kvmem/tests/source_archive_test.cpp"
+    ],
+    "tests": [
+      {
+        "name": "source_archive_test",
+        "seconds": 21.9434
+      },
+      {
+        "name": "source_archive_test",
+        "seconds": 39.5024
+      }
+    ],
+    "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+    "reused_full_core": true,
+    "scope": "Final source_archive_test Debug/ASANUBSANleaks; other23+23 from same unchanged product code/full source equality, not rerun",
+    "stage_C_complete": false,
+    "full_goal_complete": false
+  },
+  "native_component": {
+    "passed": true,
+    "kind": "native",
+    "source_checkout": "/work",
+    "source_pins": 3455,
+    "changed_inputs": [
+      "kvmem/include/kvmem/checkpoint_image.hpp",
+      "kvmem/include/kvmem/checkpoint_policy.hpp",
+      "kvmem/include/kvmem/cli_options.h",
+      "kvmem/include/kvmem/graph_recall.hpp",
+      "kvmem/include/kvmem/historical_kv_audit.hpp",
+      "kvmem/include/kvmem/historical_kv_auxiliary.hpp",
+      "kvmem/include/kvmem/historical_kv_gc.hpp",
+      "kvmem/include/kvmem/historical_kv_page_features.hpp",
+      "kvmem/include/kvmem/historical_kv_page_gc.hpp",
+      "kvmem/include/kvmem/historical_kv_policy.hpp",
+      "kvmem/include/kvmem/historical_kv_redundancy.hpp",
+      "kvmem/include/kvmem/historical_kv_repository.hpp",
+      "kvmem/include/kvmem/host_kv_storage.hpp",
+      "kvmem/include/kvmem/kv_content.hpp",
+      "kvmem/include/kvmem/kvmem_backend.hpp",
+      "kvmem/include/kvmem/kvmem_runtime.hpp",
+      "kvmem/include/kvmem/kvmem_store.hpp",
+      "kvmem/include/kvmem/launch_contract.hpp",
+      "kvmem/include/kvmem/lrfu.hpp",
+      "kvmem/include/kvmem/mean_key_retrieval.hpp",
+      "kvmem/include/kvmem/monitor.hpp",
+      "kvmem/include/kvmem/monitor_hardware.hpp",
+      "kvmem/include/kvmem/monitor_rate.hpp",
+      "kvmem/include/kvmem/native_kv_payload.hpp",
+      "kvmem/include/kvmem/page_softmax_cuda.hpp",
+      "kvmem/include/kvmem/pinned_kv_tier.hpp",
+      "kvmem/include/kvmem/prefix_checkpoint.hpp",
+      "kvmem/include/kvmem/query_policy.hpp",
+      "kvmem/include/kvmem/raw_kv_store.hpp",
+      "kvmem/include/kvmem/request_control.hpp",
+      "kvmem/include/kvmem/retrieval_options.hpp",
+      "kvmem/include/kvmem/rope.hpp",
+      "kvmem/include/kvmem/session_memory.hpp",
+      "kvmem/include/kvmem/snapshot.hpp",
+      "kvmem/include/kvmem/snapshot_buffer.hpp",
+      "kvmem/include/kvmem/source_archive.hpp",
+      "kvmem/include/kvmem/source_image.hpp",
+      "kvmem/include/kvmem/speculative.hpp",
+      "kvmem/include/kvmem/token_options.hpp",
+      "kvmem/src/cuda/page_softmax.cu",
+      "kvmem/src/host/checkpoint_policy.cpp",
+      "kvmem/src/host/graph_recall.cpp",
+      "kvmem/src/host/historical_kv_auxiliary.cpp",
+      "kvmem/src/host/historical_kv_gc.cpp",
+      "kvmem/src/host/historical_kv_page_features.cpp",
+      "kvmem/src/host/historical_kv_page_gc.cpp",
+      "kvmem/src/host/historical_kv_policy_lru.cpp",
+      "kvmem/src/host/historical_kv_redundancy.cpp",
+      "kvmem/src/host/historical_kv_repository.cpp",
+      "kvmem/src/host/host_kv_storage.cpp",
+      "kvmem/src/host/kv_content.cpp",
+      "kvmem/src/host/kvmem_runtime.cpp",
+      "kvmem/src/host/kvmem_store.cpp",
+      "kvmem/src/host/mean_key_retrieval.cpp",
+      "kvmem/src/host/memory_contract.cpp",
+      "kvmem/src/host/native_kv_payload.cpp",
+      "kvmem/src/host/prefix_checkpoint.cpp",
+      "kvmem/src/host/raw_kv_store.cpp",
+      "kvmem/src/host/rope.cpp",
+      "kvmem/src/host/session_memory.cpp",
+      "kvmem/src/host/source_archive.cpp",
+      "kvmem/src/host/source_image.cpp",
+      "kvmem/tests/backend_rebind_test.cpp",
+      "kvmem/tests/checkpoint_image_test.cpp",
+      "kvmem/tests/checkpoint_policy_test.cpp",
+      "kvmem/tests/graph_recall_cuda_test.cpp",
+      "kvmem/tests/graph_recall_test.cpp",
+      "kvmem/tests/historical_gc_ninfer_core_test.cpp",
+      "kvmem/tests/historical_kv_auxiliary_budget_test.cpp",
+      "kvmem/tests/historical_kv_boundary_mailbox_test.cpp",
+      "kvmem/tests/historical_kv_commit_conditions_test.cpp",
+      "kvmem/tests/historical_kv_owner_budget_test.cpp",
+      "kvmem/tests/historical_kv_range_lock_test.cpp",
+      "kvmem/tests/historical_kv_score_evidence_test.cpp",
+      "kvmem/tests/historical_kv_service_health_test.cpp",
+      "kvmem/tests/historical_kv_witness_lifecycle_test.cpp",
+      "kvmem/tests/host_kv_storage_test.cpp",
+      "kvmem/tests/kv_content_test.cpp",
+      "kvmem/tests/kvmem_runtime_test.cpp",
+      "kvmem/tests/kvmem_store_test.cpp",
+      "kvmem/tests/mean_key_retrieval_test.cpp",
+      "kvmem/tests/memory_contract_test.cpp",
+      "kvmem/tests/memory_test_support.hpp",
+      "kvmem/tests/native_kv_payload_test.cpp",
+      "kvmem/tests/native_residency_test.cpp",
+      "kvmem/tests/pinned_kv_tier_test.cpp",
+      "kvmem/tests/prefix_checkpoint_test.cpp",
+      "kvmem/tests/query_policy_test.cpp",
+      "kvmem/tests/raw_kv_store_test.cpp",
+      "kvmem/tests/source_archive_test.cpp",
+      "kvmem/tests/source_journal_test.cpp",
+      "kvmem/tests/spill_io_test.cpp",
+      "kvmem/tests/tiered_kv_storage_test.cpp",
+      "kvmem/tests/token_options_test.cpp"
+    ],
+    "tests": [
+      {
+        "name": "source_archive_test",
+        "scope": "existing NInfer C++20 Release shared-core build"
+      }
+    ],
+    "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+    "reused_full_core": false,
+    "scope": "Native C++20 shared-core compilation/execution only; old model binaries not rebuilt, not current GPU qualification",
+    "stage_C_complete": false,
+    "full_goal_complete": false
+  },
+  "executions": {
+    "initial_debug24": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.00296217
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.00260542
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 0.00173629
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 1.12601
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 0.00213083
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.00181393
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.00143482
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.0133978
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.00769168
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.0158988
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.0016653
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.0403325
+      },
+      {
+        "name": "source_journal_test",
+        "seconds": 0.00181655
+      },
+      {
+        "name": "source_recovery_test",
+        "seconds": 0.00181276
+      },
+      {
+        "name": "source_image_test",
+        "seconds": 0.0619596
+      },
+      {
+        "name": "source_archive_test",
+        "seconds": 18.436
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.0157027
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.0040772
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.00353957
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.0216736
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.00876528
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.00195891
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.00177972
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.00496648
+      }
+    ],
+    "initial_sanitizers24": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.016341
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.00905611
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 0.0158514
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 1.15956
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 0.0128274
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.0095139
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.0102355
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.0664233
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.0261052
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.0319231
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.00918845
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.0569062
+      },
+      {
+        "name": "source_journal_test",
+        "seconds": 0.0157699
+      },
+      {
+        "name": "source_recovery_test",
+        "seconds": 0.0184226
+      },
+      {
+        "name": "source_image_test",
+        "seconds": 0.231407
+      },
+      {
+        "name": "source_archive_test",
+        "seconds": 18.3586
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.0276722
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.0121575
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.0136234
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.0360219
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.0363366
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.00796579
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.00620322
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.0128095
+      }
+    ],
+    "final_archive_debug": [
+      {
+        "name": "source_archive_test",
+        "seconds": 21.9434
+      }
+    ],
+    "final_archive_sanitizers": [
+      {
+        "name": "source_archive_test",
+        "seconds": 39.5024
+      }
+    ]
+  },
+  "faults": {
+    "worker_io_error_points": 13,
+    "publish_error_points": 2,
+    "process_crash_boundaries": 5,
+    "foreground_allocation_failures": 2,
+    "separate_exec_retirement_processes": 3
+  },
+  "source_equivalence": {
+    "raw_changed": [
+      "kvmem/include/kvmem/checkpoint_image.hpp",
+      "kvmem/include/kvmem/checkpoint_policy.hpp",
+      "kvmem/include/kvmem/cli_options.h",
+      "kvmem/include/kvmem/graph_recall.hpp",
+      "kvmem/include/kvmem/historical_kv_audit.hpp",
+      "kvmem/include/kvmem/historical_kv_auxiliary.hpp",
+      "kvmem/include/kvmem/historical_kv_gc.hpp",
+      "kvmem/include/kvmem/historical_kv_page_features.hpp",
+      "kvmem/include/kvmem/historical_kv_page_gc.hpp",
+      "kvmem/include/kvmem/historical_kv_policy.hpp",
+      "kvmem/include/kvmem/historical_kv_redundancy.hpp",
+      "kvmem/include/kvmem/historical_kv_repository.hpp",
+      "kvmem/include/kvmem/host_kv_storage.hpp",
+      "kvmem/include/kvmem/kv_content.hpp",
+      "kvmem/include/kvmem/kvmem_backend.hpp",
+      "kvmem/include/kvmem/kvmem_runtime.hpp",
+      "kvmem/include/kvmem/kvmem_store.hpp",
+      "kvmem/include/kvmem/launch_contract.hpp",
+      "kvmem/include/kvmem/lrfu.hpp",
+      "kvmem/include/kvmem/mean_key_retrieval.hpp",
+      "kvmem/include/kvmem/monitor.hpp",
+      "kvmem/include/kvmem/monitor_hardware.hpp",
+      "kvmem/include/kvmem/monitor_rate.hpp",
+      "kvmem/include/kvmem/native_kv_payload.hpp",
+      "kvmem/include/kvmem/page_softmax_cuda.hpp",
+      "kvmem/include/kvmem/pinned_kv_tier.hpp",
+      "kvmem/include/kvmem/prefix_checkpoint.hpp",
+      "kvmem/include/kvmem/query_policy.hpp",
+      "kvmem/include/kvmem/raw_kv_store.hpp",
+      "kvmem/include/kvmem/request_control.hpp",
+      "kvmem/include/kvmem/retrieval_options.hpp",
+      "kvmem/include/kvmem/rope.hpp",
+      "kvmem/include/kvmem/session_memory.hpp",
+      "kvmem/include/kvmem/snapshot.hpp",
+      "kvmem/include/kvmem/snapshot_buffer.hpp",
+      "kvmem/include/kvmem/source_archive.hpp",
+      "kvmem/include/kvmem/source_image.hpp",
+      "kvmem/include/kvmem/speculative.hpp",
+      "kvmem/include/kvmem/token_options.hpp",
+      "kvmem/src/cuda/page_softmax.cu",
+      "kvmem/src/host/checkpoint_policy.cpp",
+      "kvmem/src/host/graph_recall.cpp",
+      "kvmem/src/host/historical_kv_auxiliary.cpp",
+      "kvmem/src/host/historical_kv_gc.cpp",
+      "kvmem/src/host/historical_kv_page_features.cpp",
+      "kvmem/src/host/historical_kv_page_gc.cpp",
+      "kvmem/src/host/historical_kv_policy_lru.cpp",
+      "kvmem/src/host/historical_kv_redundancy.cpp",
+      "kvmem/src/host/historical_kv_repository.cpp",
+      "kvmem/src/host/host_kv_storage.cpp",
+      "kvmem/src/host/kv_content.cpp",
+      "kvmem/src/host/kvmem_runtime.cpp",
+      "kvmem/src/host/kvmem_store.cpp",
+      "kvmem/src/host/mean_key_retrieval.cpp",
+      "kvmem/src/host/memory_contract.cpp",
+      "kvmem/src/host/native_kv_payload.cpp",
+      "kvmem/src/host/prefix_checkpoint.cpp",
+      "kvmem/src/host/raw_kv_store.cpp",
+      "kvmem/src/host/rope.cpp",
+      "kvmem/src/host/session_memory.cpp",
+      "kvmem/src/host/source_archive.cpp",
+      "kvmem/src/host/source_image.cpp",
+      "kvmem/tests/backend_rebind_test.cpp",
+      "kvmem/tests/checkpoint_image_test.cpp",
+      "kvmem/tests/checkpoint_policy_test.cpp",
+      "kvmem/tests/graph_recall_cuda_test.cpp",
+      "kvmem/tests/graph_recall_test.cpp",
+      "kvmem/tests/historical_gc_ninfer_core_test.cpp",
+      "kvmem/tests/historical_kv_auxiliary_budget_test.cpp",
+      "kvmem/tests/historical_kv_boundary_mailbox_test.cpp",
+      "kvmem/tests/historical_kv_commit_conditions_test.cpp",
+      "kvmem/tests/historical_kv_owner_budget_test.cpp",
+      "kvmem/tests/historical_kv_range_lock_test.cpp",
+      "kvmem/tests/historical_kv_score_evidence_test.cpp",
+      "kvmem/tests/historical_kv_service_health_test.cpp",
+      "kvmem/tests/historical_kv_witness_lifecycle_test.cpp",
+      "kvmem/tests/host_kv_storage_test.cpp",
+      "kvmem/tests/kv_content_test.cpp",
+      "kvmem/tests/kvmem_runtime_test.cpp",
+      "kvmem/tests/kvmem_store_test.cpp",
+      "kvmem/tests/mean_key_retrieval_test.cpp",
+      "kvmem/tests/memory_contract_test.cpp",
+      "kvmem/tests/memory_test_support.hpp",
+      "kvmem/tests/native_kv_payload_test.cpp",
+      "kvmem/tests/native_residency_test.cpp",
+      "kvmem/tests/pinned_kv_tier_test.cpp",
+      "kvmem/tests/prefix_checkpoint_test.cpp",
+      "kvmem/tests/query_policy_test.cpp",
+      "kvmem/tests/raw_kv_store_test.cpp",
+      "kvmem/tests/source_archive_test.cpp",
+      "kvmem/tests/source_journal_test.cpp",
+      "kvmem/tests/spill_io_test.cpp",
+      "kvmem/tests/tiered_kv_storage_test.cpp",
+      "kvmem/tests/token_options_test.cpp"
+    ],
+    "normalized_changed": [
+      "kvmem/include/kvmem/source_archive.hpp",
+      "kvmem/src/host/source_archive.cpp",
+      "kvmem/tests/source_archive_test.cpp"
+    ],
+    "compiled_path": "/work/kvmem/tests/source_archive_test.cpp",
+    "compiled_path_present": true
+  },
+  "code_changes": [
+    "kvmem/include/kvmem/source_archive.hpp",
+    "kvmem/src/host/source_archive.cpp",
+    "kvmem/tests/source_archive_test.cpp"
+  ],
+  "evidence_reuse": "Other23Debug/23sanitizer tests retained from first full cohort; subsequent implementation changes are read_checkpoint oversize error classification and removal of an unused temporary hash field inside the archive, which they do not invoke. Current full archive test rerun Debug/ASANUBSANleaks/C++20. No old GPU/model result counted for this new feature.",
+  "invalid_execution": {
+    "container": "kvmem-checkpoint-authority-core-a493b3b0",
+    "exit_code": 0,
+    "accepted": false,
+    "reason": "Overlay was written under /work/kvmem but actual Ninja target used /work/source/kvmem. Success did not establish added-test coverage. Both source versions/logs preserved; corrected actual source path and reran.",
+    "compiled_test_sha256": "fd7086db9c5d125e28802c00583dc68d42c636169553ce2af5f7d68bf3bc98a4",
+    "unused_overlay_sha256": "35d9214902df4a7f5af7137817b04a4183d051df0dbf02d25d72b9fad74bb01b"
+  },
+  "binaries": {
+    "full-core": {
+      "build/kvmem-core/source_archive_test": "0c9aeeed35af12a3dae92bbd7a27da6e5c680a5aebe3a1177dcfb123dae8141f",
+      "build-asan/kvmem-core/source_archive_test": "8bcb9a021afa6a5016e1eca19d9044cc832f09e4a128d6d1ddc80dd74aed938c"
+    },
+    "final-core": {
+      "build/kvmem-core/source_archive_test": "4f52c72ed0c7687ee2f0efe3e40dc1e0c544309ea438172370a1d3c3463798c7",
+      "build-asan/kvmem-core/source_archive_test": "bdbe9ab0206564dc3d46f542d73bc0cf815ea1e6b29ae317be3ea6fb46ef37ea"
+    },
+    "final-native": {
+      "build-native/kvmem-core/source_archive_test": "d6ba0343b44eb0854e7cd43f5f7ae0fe89746ca45a3aea1ad8ff0eec565c3b77"
+    }
+  },
+  "adverse_and_limits": [
+    "Native codec/Engine checkpoint capture, private restore publication, real model restart recovery and numerical/quality/performance gates remain unimplemented; common attachment bytes are opaque. Current Native component cache contains old model executables and its phase is component_only_not_engine_qualified; do not treat them as current recovery binaries.",
+    "An intermediate core verification script tested an old source checkout despite a new overlay and returned0; result excluded after actual Ninja input-path inspection. Corrected path plus actual source byte checks used for final runs. Initial valid/intermediate/raw invalid artifacts retained.",
+    "Oversized existing valid attachment under smaller current frame limit was initially classified SnapshotCorrupt; fixed to BudgetExceeded, preserving source data and healthy owner, final branch tested in Debug/sanitizers/C++20.",
+    "Synchronous file read/checksum, publish/retirement metadata fsync and zero-tombstone trimming may block control. No latency/throughput/RSS improvement or unchanged claim. Added Object fields occupy the existing paid M array even when feature disabled.",
+    "Updating checkpoint requires publishing another source blob first, even for unchanged RAM data; this adds source-copy I/O and temporary D use. Source and attachment leases conservatively retain the whole shared object until all handles/jobs exit. Logical quota refund and file-byte removal/truncation are distinct.",
+    "Caller-provided immutable payload and target allocations must actually be charged to native C/H/M. retained_bytes and schema declarations alone do not prove that integration. Actual tested payload20017bytes, not real hundreds-of-MB/GB native states; queue capacity must admit whole retained footprint.",
+    "Source wire remainsv1; new reader can read old directories, but old readers reject new checkpoint filenames. Checkpoint-disabled current readers still account D and can read source data. No downgrade compatibility promise.",
+    "Trusted local POSIX fsync/rename/flock and FNV integrity model; no adversarial writer, hardware power-loss or coherent-directory backup rollback defense. Rename can commit before I/O acknowledgement fails; owner becomes unhealthy and no successful publication is falsely acknowledged.",
+    "Linux component and C++20 build evidence only, not native Windows, full CUDA/TSan instrumentation, arbitrary old sparse trajectories, concurrent/multisession or production/Agent qualification. Host debug settings unchanged; DeepSWE deferred."
+  ],
+  "next": "Implement full NInfer checkpoint dependency codec, private C/H/M prepare/admission and fresh-domain Engine restore; real model qualification, remaining C-D-F.",
+  "raw_evidence": {
+    "path": "artifacts/lifecycle-checkpoint-authority/evidence.zip",
+    "sha256": "8b25b648e13570acba61107949bc698daf30d0544e4976f0fae4c59fcdff8f79",
+    "bytes": 5501318
+  }
+}

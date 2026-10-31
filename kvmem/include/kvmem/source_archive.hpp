@@ -19,6 +19,7 @@ struct SourceArchiveLimits {
     uint64_t disk_bytes = 0, metadata_bytes = 0;
     size_t max_sources = 0, max_objects = 0;
     SourceImageLimits image;
+    uint64_t max_checkpoint_bytes = 0; // framed bytes; zero disables checkpoint I/O
 };
 struct SourceArchiveSnapshot {
     SourceArchiveKey key, parent;
@@ -67,6 +68,54 @@ private:
     SourceImage image_;
 };
 
+// Opaque backend state, not a generic model serializer. The adapter owns the
+// schema, immutable payload and its real C/H/M charges. The queue retains owner
+// and write until I/O drains; retained_bytes counts their entire pinned payload,
+// not merely the amount written. No private staging allocation is made here.
+struct SourceArchiveCheckpointInput {
+    SourceConfiguration schema{};
+    uint64_t payload_bytes = 0, retained_bytes = 0;
+    std::shared_ptr<const void> owner;
+    std::function<void(const SnapshotWriter::Sink &)> write;
+};
+class SourceArchiveCheckpointWrite {
+public:
+    SourceArchiveCheckpointWrite() = default;
+    ~SourceArchiveCheckpointWrite();
+    SourceArchiveCheckpointWrite(SourceArchiveCheckpointWrite &&) noexcept;
+    SourceArchiveCheckpointWrite & operator=(SourceArchiveCheckpointWrite &&) noexcept;
+    SourceArchiveCheckpointWrite(const SourceArchiveCheckpointWrite &) = delete;
+    SourceArchiveCheckpointWrite & operator=(const SourceArchiveCheckpointWrite &) = delete;
+    StorageTaskStatus status() const noexcept;
+    void wait() const;
+    bool cancel() const;
+    SourceArchiveKey key() const noexcept;
+private:
+    friend class SourceArchive;
+    SourceArchiveCheckpointWrite(std::shared_ptr<detail::SourceArchiveState>, size_t, SourceRef);
+    void reset() noexcept;
+    std::shared_ptr<detail::SourceArchiveState> state_;
+    size_t slot_ = 0;
+    SourceRef binding_;
+};
+class SourceArchiveCheckpointRead {
+public:
+    ~SourceArchiveCheckpointRead();
+    SourceArchiveCheckpointRead(SourceArchiveCheckpointRead &&) noexcept;
+    SourceArchiveCheckpointRead & operator=(SourceArchiveCheckpointRead &&) noexcept;
+    SourceArchiveCheckpointRead(const SourceArchiveCheckpointRead &) = delete;
+    SourceArchiveCheckpointRead & operator=(const SourceArchiveCheckpointRead &) = delete;
+    SourceArchiveKey key() const noexcept;
+    uint64_t payload_bytes() const noexcept { return bytes_; }
+private:
+    friend class SourceArchive;
+    SourceArchiveCheckpointRead(std::shared_ptr<detail::SourceArchiveState>, size_t, uint64_t);
+    void reset() noexcept;
+    std::shared_ptr<detail::SourceArchiveState> state_;
+    size_t slot_ = 0;
+    uint64_t bytes_ = 0;
+};
+
 // Linux local-filesystem archive, one serialized owner. Only immutable blob I/O
 // runs in StorageIoQueue; methods below may perform blocking metadata/file I/O
 // and belong outside a decode boundary. No Engine/model publication is done here.
@@ -104,6 +153,22 @@ public:
     // Required again immediately before an adapter imports/rebuilds from read().
     // A decoded image by itself is data and cannot replace this receipt check.
     void validate(const SourceArchiveRead &) const;
+    // One immutable attachment per CURRENT published source blob. To capture a
+    // newer checkpoint, publish a new source snapshot first, even for the same
+    // RAM revision. This uses the existing monotone source-blob clock and D/M
+    // ledger. Worker completion cannot grant checkpoint publication permission.
+    SourceArchiveCheckpointWrite save_checkpoint(StorageIoQueue &, const SourceJournalStore &,
+        SourceRef, SourceArchiveCheckpointInput);
+    void publish_checkpoint(const SourceArchiveCheckpointWrite &, const SourceJournalStore &);
+    // Sink must fill PRIVATE adapter-owned storage. It can see unverified bytes;
+    // native publication is forbidden until this returns and validate() passes.
+    // Current source authority, schema, size and full checksum are checked.
+    SourceArchiveCheckpointRead read_checkpoint(const SourceArchiveRead &,
+        const SourceConfiguration & schema, SnapshotWriter::Sink);
+    void validate(const SourceArchiveCheckpointRead &) const;
+    // Revoke just the derived attachment, preserving source data. Existing
+    // receipts immediately fail; actual D remains held until jobs/handles exit.
+    bool retire_checkpoint(SourceArchiveKey);
     // Explicit restart import: validate CURRENT receipt, atomically capture a
     // fresh S root with computed0, then bind this durable key to it. A live
     // binding returns Pending; no implicit replacement, alias or decoded-origin

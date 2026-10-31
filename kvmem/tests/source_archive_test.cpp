@@ -566,7 +566,9 @@ SourceArchiveKey client_key(const std::filesystem::path & path) {
     in.read(reinterpret_cast<char *>(key.space.data()),key.space.size());
     in.read(reinterpret_cast<char *>(&key.id),sizeof(key.id)); CHECK(in.good()); return key;
 }
+void checkpoint_restart(const char *,const std::filesystem::path &);
 void restart_child(const char * mode, const std::filesystem::path & path) {
+    if (!std::strncmp(mode,"--checkpoint-",13)) {checkpoint_restart(mode,path);return;}
     if (!std::strcmp(mode,"--restart-write")) {
         Fixture f; for (int i = 0; i < 3; ++i) f.append();
         auto archive = SourceArchive::create(path,config(),limits()); const auto key = archive.enroll(f.store,f.ref);
@@ -714,6 +716,321 @@ void cooldown_latest_copy_and_file_failures_are_atomic() {
     CHECK(imported.revision==1 && current.image().origin().ref.revision==3);
     CHECK(archive.cool_sources(f.store,&imported,1)==1 && f.store.stats().sources==0);
 }
+SourceArchiveLimits checkpoint_limits() {auto value=limits();value.max_checkpoint_bytes=65536;return value;}
+SourceConfiguration checkpoint_schema() {auto value=config();value[1]=91;return value;}
+constexpr size_t checkpoint_payload=20017;
+SourceArchiveCheckpointInput checkpoint_input(HostKvStorage & ram) {
+    auto record=ram.allocate(checkpoint_payload);
+    for (size_t i=0;i<checkpoint_payload;++i) record.writable_data()[i]=uint8_t(i*31+7);
+    record.seal();auto owner=std::make_shared<HostKvRecord>(std::move(record));
+    SourceArchiveCheckpointInput input;
+    input.schema=checkpoint_schema();input.payload_bytes=input.retained_bytes=checkpoint_payload;input.owner=owner;
+    input.write=[owner](const SnapshotWriter::Sink & sink) {
+        sink(owner->data(),7777);sink(owner->data()+7777,owner->size()-7777);
+    };
+    return input;
+}
+SourceArchiveKey checkpoint_source(SourceArchive & archive,Fixture & f,StorageIoQueue & queue) {
+    const auto key=archive.enroll(f.store,f.ref);auto write=archive.save(queue,f.store,f.ref,f.staging);
+    write.wait();archive.publish(write,f.store);return key;
+}
+SourceArchiveCheckpointRead checkpoint_read(SourceArchive & archive,const SourceArchiveRead & source) {
+    std::vector<uint8_t> private_bytes;
+    auto read=archive.read_checkpoint(source,checkpoint_schema(),[&](const void * p,size_t n) {
+        CHECK(n<=8192);const auto bytes=static_cast<const uint8_t *>(p);private_bytes.insert(private_bytes.end(),bytes,bytes+n);
+    });
+    CHECK(private_bytes.size()==checkpoint_payload && read.payload_bytes()==checkpoint_payload && read.key()==source.key());
+    for (size_t i=0;i<private_bytes.size();++i) CHECK(private_bytes[i]==uint8_t(i*31+7));
+    archive.validate(read);return read;
+}
+void checkpoint_publication_and_owned_lifetimes() {
+    Temp temp;Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(2,1<<20);
+    auto archive=SourceArchive::create(temp.path(),config(),checkpoint_limits());
+    const auto key=checkpoint_source(archive,f,queue);const auto base=archive.stats().object_bytes;
+    const auto catalog=contents(temp.path()/"catalog"),seal=contents(temp.path()/"seal");
+    Gate gate;auto occupied=gate.occupy(queue);
+    auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));
+    CHECK(ram.charged_bytes()==checkpoint_payload && queue.pinned_bytes()==checkpoint_payload+1);
+    CHECK(archive.stats().object_bytes==base+checkpoint_payload+104 && archive.stats().objects==1);
+    rejects(MemoryErrorCode::Pending,[&]{archive.publish_checkpoint(write,f.store);});
+    rejects(MemoryErrorCode::Pending,[&]{archive.retire_checkpoint(key);});
+    {
+        auto source=archive.read(key,f.staging);
+        rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(archive,source);});
+        CHECK(!archive.collect().quota_released);
+        gate.released.set_value();occupied.wait();write.wait();
+        CHECK(!ram.charged_bytes());
+        rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(archive,source);}); // I/O completion is not publication
+        archive.publish_checkpoint(write,f.store);archive.publish_checkpoint(write,f.store);
+        CHECK(contents(temp.path()/"catalog")==catalog && contents(temp.path()/"seal")==seal);
+        const auto r=f.staging.charged_bytes();auto checkpoint=checkpoint_read(archive,source);
+        CHECK(f.staging.charged_bytes()==r); // no full-payload R copy in the archive
+        CHECK(archive.cool_sources(f.store,&f.ref,1)==1);archive.validate(checkpoint);
+        rejects(MemoryErrorCode::Stale,[&]{archive.publish_checkpoint(write,f.store);});
+        const auto imported=archive.import_source(source,f.store);CHECK(!f.store.state(imported).computed_frontier);
+        archive.validate(checkpoint);CHECK(archive.forget(key)==1);
+        rejects(MemoryErrorCode::Stale,[&]{archive.validate(checkpoint);});
+        CHECK(!archive.collect().quota_released && archive.stats().object_bytes==base+checkpoint_payload+104);
+        f.store.forget(imported);
+    }
+    CHECK(!archive.collect().quota_released);write={};
+    const auto freed=archive.collect();CHECK(freed.quota_released==base+checkpoint_payload+104 && freed.file_bytes_removed==freed.quota_released);
+    CHECK(!archive.stats().object_bytes && !archive.stats().objects);
+}
+void checkpoint_versions_retirement_and_corruption() {
+    Temp temp;Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+    auto archive=SourceArchive::create(temp.path(),config(),checkpoint_limits());
+    const auto key=checkpoint_source(archive,f,queue);const auto source_bytes=archive.stats().object_bytes;
+    auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();archive.publish_checkpoint(write,f.store);
+    const auto file=temp.path()/"checkpoint.1";const auto bytes=contents(file);
+    {
+        auto source=archive.read(key,f.staging);auto held=checkpoint_read(archive,source);
+        auto wrong=checkpoint_schema();wrong[1]^=1;size_t callbacks=0;
+        rejects(MemoryErrorCode::InvalidPlan,[&]{(void)archive.read_checkpoint(source,wrong,[&](const void *,size_t){++callbacks;});});CHECK(!callbacks);
+        auto damaged=bytes;damaged[123]^=1;replace(file,damaged);
+        corrupt([&]{(void)checkpoint_read(archive,source);});archive.validate(source);replace(file,bytes);
+        damaged.pop_back();replace(file,damaged);corrupt([&]{(void)checkpoint_read(archive,source);});replace(file,bytes);
+        CHECK(archive.retire_checkpoint(key) && !archive.retire_checkpoint(key));
+        rejects(MemoryErrorCode::Stale,[&]{archive.validate(held);});
+        rejects(MemoryErrorCode::Stale,[&]{archive.publish_checkpoint(write,f.store);});
+        rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(archive,source);});
+        CHECK(!archive.collect().quota_released && archive.stats().sources==1);
+    }
+    write={};const auto retired=archive.collect();
+    CHECK(retired.quota_released==bytes.size() && retired.file_bytes_removed==bytes.size());
+    CHECK(archive.stats().object_bytes==source_bytes && std::filesystem::file_size(temp.path()/"checkpoint-retired.1")==0);
+    rejects(MemoryErrorCode::Pending,[&]{(void)archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));});
+    CHECK(!ram.charged_bytes());
+    // A new committed source blob grants a distinct attachment identity, even
+    // when saving the same live RAM revision and identical source bytes.
+    checkpoint_source(archive,f,queue);
+    auto next=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));next.wait();archive.publish_checkpoint(next,f.store);
+    {
+        auto source=archive.read(key,f.staging);auto read=checkpoint_read(archive,source);
+        f.append();
+        rejects(MemoryErrorCode::Stale,[&]{archive.publish_checkpoint(next,f.store);});
+        rejects(MemoryErrorCode::Pending,[&]{(void)archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));});
+        checkpoint_source(archive,f,queue);
+        rejects(MemoryErrorCode::Stale,[&]{archive.validate(read);});
+        rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(archive,source);});
+    }
+    next={};archive.collect();CHECK(!std::filesystem::exists(temp.path()/"checkpoint-retired.1"));
+    CHECK(!std::filesystem::exists(temp.path()/"checkpoint.2"));
+}
+void checkpoint_bounds_producer_failures_and_late_writer() {
+    Temp temp;Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(2,1<<20);
+    auto archive=SourceArchive::create(temp.path(),config(),checkpoint_limits());
+    const auto key=checkpoint_source(archive,f,queue);const auto charged=archive.stats().object_bytes;
+    StorageIoQueue small(1,checkpoint_payload-1);
+    rejects(MemoryErrorCode::BudgetExceeded,[&]{(void)archive.save_checkpoint(small,f.store,f.ref,checkpoint_input(ram));});
+    CHECK(archive.stats().object_bytes==charged && !ram.charged_bytes());
+    auto invalid=checkpoint_input(ram);invalid.retained_bytes=1;
+    rejects(MemoryErrorCode::InvalidPlan,[&]{(void)archive.save_checkpoint(queue,f.store,f.ref,std::move(invalid));});
+    CHECK(!ram.charged_bytes());
+    for (const bool too_long:{false,true}) {
+        auto input=checkpoint_input(ram);input.write=[too_long](const SnapshotWriter::Sink & sink) {
+            uint8_t byte=7;sink(&byte,too_long ? checkpoint_payload+1 : 1);
+        };
+        auto failed=archive.save_checkpoint(queue,f.store,f.ref,std::move(input));
+        corrupt([&]{failed.wait();});corrupt([&]{archive.publish_checkpoint(failed,f.store);});
+        CHECK(!ram.charged_bytes() && archive.stats().healthy);failed={};archive.collect();
+        CHECK(archive.stats().object_bytes==charged);
+    }
+    auto late=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));late.wait();
+    CHECK(archive.cool_sources(f.store,&f.ref,1)==1);
+    {
+        auto source=archive.read(key,f.staging);const auto fresh=archive.import_source(source,f.store);
+        rejects(MemoryErrorCode::Stale,[&]{archive.publish_checkpoint(late,f.store);});
+        rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(archive,source);});
+        CHECK(archive.cool_sources(f.store,&fresh,1)==1);
+    }
+    CHECK(!archive.collect().quota_released);late={};
+    CHECK(archive.collect().quota_released==checkpoint_payload+104 && archive.stats().object_bytes==charged);
+    CHECK(archive.stats().healthy && archive.stats().sources==1);
+}
+void checkpoint_restart(const char * mode,const std::filesystem::path & path) {
+    Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+    if (!std::strcmp(mode,"--checkpoint-write")) {
+        auto archive=SourceArchive::create(path,config(),checkpoint_limits());
+        const auto key=checkpoint_source(archive,f,queue);write_client_key(path,key);
+        auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();archive.publish_checkpoint(write,f.store);return;
+    }
+    auto archive=SourceArchive::open(path,config(),checkpoint_limits());const auto key=client_key(path);
+    auto source=archive.read(key,f.staging);rows_match(source.image(),f.rows);
+    if (!std::strncmp(mode,"--checkpoint-crash-",19)) {
+        const std::string action=mode+19;
+        if (action.rfind("publish",0)==0 || action=="write") {
+            const auto imported=archive.import_source(source,f.store);
+            if (action=="write") {
+                fault::Scope crash(fault::Crash,0);
+                auto write=archive.save_checkpoint(queue,f.store,imported,checkpoint_input(ram));write.wait();
+            } else {
+                auto write=archive.save_checkpoint(queue,f.store,imported,checkpoint_input(ram));write.wait();
+                fault::Scope crash(fault::Crash,size_t(action.back()-'0'));archive.publish_checkpoint(write,f.store);
+            }
+        } else {
+            CHECK(action.rfind("retire",0)==0);
+            fault::Scope crash(fault::Crash,size_t(action.back()-'0'));archive.retire_checkpoint(key);
+        }
+        CHECK(false);
+    }
+    if (!std::strcmp(mode,"--checkpoint-read")) {(void)checkpoint_read(archive,source);return;}
+    if (!std::strcmp(mode,"--checkpoint-retire")) {
+        auto read=checkpoint_read(archive,source);CHECK(archive.retire_checkpoint(key));
+        rejects(MemoryErrorCode::Stale,[&]{archive.validate(read);});return;
+    }
+    CHECK(!std::strcmp(mode,"--checkpoint-deny"));
+    rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(archive,source);});
+    const auto imported=archive.import_source(source,f.store);CHECK(!f.store.state(imported).computed_frontier);
+}
+void checkpoint_exec_and_source_only_reopen() {
+    Temp temp;
+    for (const auto mode:{"--checkpoint-write","--checkpoint-retire","--checkpoint-deny"}) {
+        const auto child=::fork();CHECK(child>=0);
+        if (!child){::execl("/proc/self/exe","source_archive_test",mode,temp.path().c_str(),static_cast<char *>(nullptr));::_exit(74);}
+        int result=0;CHECK(::waitpid(child,&result,0)==child && WIFEXITED(result) && WEXITSTATUS(result)==0);
+    }
+    {auto archive=SourceArchive::open(temp.path(),config(),checkpoint_limits());archive.collect();}
+    CHECK(std::filesystem::file_size(temp.path()/"checkpoint-retired.1")==0);
+    {auto archive=SourceArchive::open(temp.path(),config(),checkpoint_limits());Fixture f;
+     auto source=archive.read(client_key(temp.path()),f.staging);
+     rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(archive,source);});}
+    // The optional derived-state feature does not change the v1 source format.
+    auto data_only=SourceArchive::open(temp.path(),config(),limits());Fixture f;
+    auto source=data_only.read(client_key(temp.path()),f.staging);rows_match(source.image(),f.rows);
+    rejects(MemoryErrorCode::Unsupported,[&]{(void)checkpoint_read(data_only,source);});
+    CHECK(data_only.forget(source.key())==1);
+    std::puts("checkpoint separate exec: write/read-retire/reopen-deny, source-data fallback PASS");
+}
+void checkpoint_actual_io_failure_and_crash_boundaries() {
+    Temp temp;size_t points=0;
+    {
+        Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+        auto archive=SourceArchive::create(temp.path("count"),config(),checkpoint_limits());checkpoint_source(archive,f,queue);
+        {fault::Scope count(fault::Count);auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();points=fault::calls.load();}
+    }
+    CHECK(points>0 && points<64);
+    for (size_t point=0;point<points;++point) {
+        Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+        auto archive=SourceArchive::create(temp.root/("checkpoint-io-"+std::to_string(point)),config(),checkpoint_limits());
+        const auto key=checkpoint_source(archive,f,queue);const auto charged=archive.stats().object_bytes;
+        {
+            fault::Scope error(fault::Error,point);auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));
+            io_failure([&]{write.wait();});CHECK(fault::fired);
+        }
+        CHECK(!ram.charged_bytes() && archive.stats().healthy && f.store.state(f.ref).accepted_frontier==513);
+        {auto source=archive.read(key,f.staging);rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(archive,source);});}
+        archive.collect();CHECK(archive.stats().object_bytes==charged);
+    }
+    for (size_t point=0;point<2;++point) {
+        const auto path=temp.root/("checkpoint-publish-"+std::to_string(point));SourceArchiveKey key;
+        {
+            Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+            auto archive=SourceArchive::create(path,config(),checkpoint_limits());key=checkpoint_source(archive,f,queue);
+            auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();
+            {fault::Scope error(fault::Error,point);io_failure([&]{archive.publish_checkpoint(write,f.store);});CHECK(fault::fired);}
+            CHECK(!archive.stats().healthy);
+        }
+        auto reopened=SourceArchive::open(path,config(),checkpoint_limits());Fixture f;auto source=reopened.read(key,f.staging);
+        if(point==0) rejects(MemoryErrorCode::Stale,[&]{(void)checkpoint_read(reopened,source);});
+        else (void)checkpoint_read(reopened,source); // rename committed but acknowledgement failed, never reported as success
+    }
+    for (const auto mode:{"--checkpoint-crash-write","--checkpoint-crash-publish0","--checkpoint-crash-publish1",
+                           "--checkpoint-crash-retire0","--checkpoint-crash-retire1"}) {
+        const auto path=temp.root/mode;bool retire=std::strstr(mode,"retire")!=nullptr;
+        {
+            Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+            auto archive=SourceArchive::create(path,config(),checkpoint_limits());const auto key=checkpoint_source(archive,f,queue);write_client_key(path,key);
+            if (retire) {auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();archive.publish_checkpoint(write,f.store);}
+        }
+        auto child=::fork();CHECK(child>=0);
+        if(!child){::execl("/proc/self/exe","source_archive_test",mode,path.c_str(),static_cast<char *>(nullptr));::_exit(74);}
+        int result=0;CHECK(::waitpid(child,&result,0)==child && WIFEXITED(result) && WEXITSTATUS(result)==71);
+        child=::fork();CHECK(child>=0);
+        const char * check=retire || std::strstr(mode,"write") ? "--checkpoint-deny" : "--checkpoint-read";
+        if(!child){::execl("/proc/self/exe","source_archive_test",check,path.c_str(),static_cast<char *>(nullptr));::_exit(74);}
+        CHECK(::waitpid(child,&result,0)==child && WIFEXITED(result) && WEXITSTATUS(result)==0);
+    }
+    std::printf("checkpoint actual worker I/O error points=%zu publication error points=2 process-crash boundaries=5 PASS\n",points);
+}
+void checkpoint_foreground_allocation_and_queue_rollback() {
+    Temp temp;size_t failures=0;
+    for(size_t point=0;point<32;++point) {
+        Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+        auto archive=SourceArchive::create(temp.root/("checkpoint-alloc-"+std::to_string(point)),config(),checkpoint_limits());
+        checkpoint_source(archive,f,queue);const auto charged=archive.stats().object_bytes;
+        auto input=checkpoint_input(ram);bool failed=false;std::optional<SourceArchiveCheckpointWrite> write;
+        allocation::calls=0;allocation::fail_at=point;
+        try {write.emplace(archive.save_checkpoint(queue,f.store,f.ref,std::move(input)));}
+        catch(const std::bad_alloc &){failed=true;}
+        allocation::fail_at=SIZE_MAX;
+        if(!failed){write->wait();break;}
+        ++failures;CHECK(archive.stats().healthy && !ram.charged_bytes());archive.collect();
+        CHECK(archive.stats().object_bytes==charged && f.store.state(f.ref).accepted_frontier==513);
+    }
+    CHECK(failures>0 && failures<32);
+    {
+        Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+        auto archive=SourceArchive::create(temp.path(),config(),checkpoint_limits());checkpoint_source(archive,f,queue);
+        const auto charged=archive.stats().object_bytes;Gate gate;auto occupied=gate.occupy(queue);
+        rejects(MemoryErrorCode::Pending,[&]{(void)archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));});
+        CHECK(!ram.charged_bytes() && archive.stats().healthy);
+        archive.collect();CHECK(archive.stats().object_bytes==charged);
+        gate.released.set_value();occupied.wait();
+    }
+    std::printf("checkpoint foreground allocation failure points=%zu queue refusal rollback PASS\n",failures);
+}
+void checkpoint_disk_bounds_and_midread_revocation() {
+    Temp temp;uint64_t control=0;
+    {auto probe=SourceArchive::create(temp.path("probe"),config(),checkpoint_limits());control=probe.stats().control_reserved;}
+    for (const bool disk:{false,true}) {
+        Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);auto bounds=checkpoint_limits();
+        if(disk) bounds.disk_bytes=control+source_image_bytes(f.store.state(f.ref),bounds.image)+checkpoint_payload+103;
+        else bounds.max_checkpoint_bytes=checkpoint_payload+103;
+        auto archive=SourceArchive::create(temp.path(disk ? "disk" : "frame"),config(),bounds);
+        const auto key=checkpoint_source(archive,f,queue);const auto before=archive.stats();
+        rejects(MemoryErrorCode::BudgetExceeded,[&]{(void)archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));});
+        CHECK(!ram.charged_bytes() && archive.stats().charged==before.charged && archive.stats().objects==before.objects);
+        auto source=archive.read(key,f.staging);rows_match(source.image(),f.rows);
+    }
+    for(const bool forget:{false,true}) {
+        Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+        auto archive=SourceArchive::create(temp.path(forget ? "mid-forget" : "mid-retire"),config(),checkpoint_limits());
+        const auto key=checkpoint_source(archive,f,queue);
+        auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();archive.publish_checkpoint(write,f.store);
+        {
+            auto source=archive.read(key,f.staging);bool revoked=false;size_t copied=0;
+            rejects(MemoryErrorCode::Stale,[&]{
+                (void)archive.read_checkpoint(source,checkpoint_schema(),[&](const void *,size_t n) {
+                    copied+=n;
+                    if(!revoked){revoked=true;if(forget) archive.forget(key);else archive.retire_checkpoint(key);}
+                });
+            });
+            CHECK(revoked && copied==checkpoint_payload && !archive.collect().quota_released);
+            if(!forget) archive.validate(source);
+        }
+        write={};CHECK(archive.collect().quota_released>=checkpoint_payload+104);
+    }
+    SourceArchiveKey key;uint64_t bytes=0;
+    {
+        Fixture f;HostKvStorage ram(65536);StorageIoQueue queue(1,1<<20);
+        auto archive=SourceArchive::create(temp.path("data-only"),config(),checkpoint_limits());key=checkpoint_source(archive,f,queue);
+        auto write=archive.save_checkpoint(queue,f.store,f.ref,checkpoint_input(ram));write.wait();archive.publish_checkpoint(write,f.store);
+        bytes=archive.stats().object_bytes;
+    }
+    {
+        auto bounds=checkpoint_limits();bounds.max_checkpoint_bytes=checkpoint_payload+103;
+        auto archive=SourceArchive::open(temp.path("data-only"),config(),bounds);Fixture f;
+        auto source=archive.read(key,f.staging);
+        rejects(MemoryErrorCode::BudgetExceeded,[&]{(void)checkpoint_read(archive,source);});
+        CHECK(archive.stats().healthy);rows_match(source.image(),f.rows);
+    }
+    {
+        auto archive=SourceArchive::open(temp.path("data-only"),config(),limits());Fixture f;
+        CHECK(archive.stats().object_bytes==bytes);auto source=archive.read(key,f.staging);rows_match(source.image(),f.rows);
+        rejects(MemoryErrorCode::Unsupported,[&]{(void)checkpoint_read(archive,source);});
+    }
+}
 }
 int main(int argc, char ** argv) {
     if (argc == 3) { restart_child(argv[1],argv[2]); return 0; }
@@ -725,5 +1042,9 @@ int main(int argc, char ** argv) {
     owner_queries_and_structural_queue_limit();
     current_family_cooldown_rebind_and_old_receipts();
     cooldown_latest_copy_and_file_failures_are_atomic();
+    checkpoint_publication_and_owned_lifetimes();checkpoint_versions_retirement_and_corruption();
+    checkpoint_bounds_producer_failures_and_late_writer();checkpoint_exec_and_source_only_reopen();
+    checkpoint_actual_io_failure_and_crash_boundaries();checkpoint_foreground_allocation_and_queue_rollback();
+    checkpoint_disk_bounds_and_midread_revocation();
     std::puts("source archive lifecycle, quotas, durable authority and failure boundaries PASS");
 }
