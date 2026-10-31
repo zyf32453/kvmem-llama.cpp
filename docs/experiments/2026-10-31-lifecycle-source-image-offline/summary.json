@@ -1,0 +1,204 @@
+{
+  "date": "2026-10-31",
+  "recorded_at": "2026-10-31T11:51:19.126081+08:00",
+  "stage": "C_source_image_offline_prerequisite",
+  "status": "host_component_contracts_passed_not_integrated",
+  "base_commit": "57a2f514baf73d7b6b5a08fca5bdd2b27aa67739",
+  "branch": "codex/kv-lifecycle-offline-source-image",
+  "complete_stage_C": false,
+  "production_qualified": false,
+  "checkpoint_budget_candidate_qualified_by_this_run": false,
+  "native_or_gpu_tests_run": false,
+  "durable_recovery_implemented": false,
+  "source_pins": 102,
+  "manifest": "docs/contracts/kv-lifecycle-source-image-offline-v1.json",
+  "manifest_sha256": "d9ec41896b0edb46d0391a642f8d1b1cd9699a67a1003901f8b5bbe403f0b253",
+  "host_contracts": {
+    "passed": 23,
+    "failed": 0,
+    "skipped": 0,
+    "wall_seconds": 31.52,
+    "results": [
+      {
+        "name": "checkpoint_policy_test",
+        "seconds": 0.441411
+      },
+      {
+        "name": "checkpoint_image_test",
+        "seconds": 0.586781
+      },
+      {
+        "name": "historical_gc_ninfer_core_test",
+        "seconds": 0.790211
+      },
+      {
+        "name": "historical_kv_boundary_mailbox_test",
+        "seconds": 16.0176
+      },
+      {
+        "name": "historical_kv_commit_conditions_test",
+        "seconds": 0.865841
+      },
+      {
+        "name": "historical_kv_range_lock_test",
+        "seconds": 0.754322
+      },
+      {
+        "name": "historical_kv_witness_lifecycle_test",
+        "seconds": 0.785182
+      },
+      {
+        "name": "historical_kv_score_evidence_test",
+        "seconds": 0.752366
+      },
+      {
+        "name": "historical_kv_auxiliary_budget_test",
+        "seconds": 0.748981
+      },
+      {
+        "name": "historical_kv_owner_budget_test",
+        "seconds": 0.848374
+      },
+      {
+        "name": "historical_kv_service_health_test",
+        "seconds": 0.750725
+      },
+      {
+        "name": "memory_contract_test",
+        "seconds": 0.906715
+      },
+      {
+        "name": "source_journal_test",
+        "seconds": 0.878101
+      },
+      {
+        "name": "source_recovery_test",
+        "seconds": 0.966073
+      },
+      {
+        "name": "source_image_test",
+        "seconds": 0.204134
+      },
+      {
+        "name": "native_kv_payload_test",
+        "seconds": 0.822229
+      },
+      {
+        "name": "host_kv_storage_test",
+        "seconds": 0.607923
+      },
+      {
+        "name": "spill_io_test",
+        "seconds": 0.660964
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "seconds": 0.67049
+      },
+      {
+        "name": "native_residency_test",
+        "seconds": 0.690418
+      },
+      {
+        "name": "kv_content_test",
+        "seconds": 0.533264
+      },
+      {
+        "name": "prefix_checkpoint_test",
+        "seconds": 0.449856
+      },
+      {
+        "name": "mean_key_retrieval_test",
+        "seconds": 0.736643
+      }
+    ],
+    "binary_sha256": {
+      "historical_gc_ninfer_core_test": "f03b9741aa8613851ed683a73ac04ee37141c4e522a4fc1bba129f6def636472",
+      "memory_contract_test": "a0f4cdb4663b02f925750e7f0222510d5aa21195770dcd21976ad3d3f8a76532",
+      "native_kv_payload_test": "f10d020b6eb38ee470e66604a9fd843d64b2f8765e5d1b1fbe78cc54fc7bcc5a",
+      "host_kv_storage_test": "a1acaff8269e6b3e3db385463015dbfb8cf8e9edb8a856e61b3e61c47deb2438",
+      "spill_io_test": "1e060626019ec1cdf08a81775b3787d2fff1c532dff787dc94fbd93f3938a267",
+      "tiered_kv_storage_test": "3b44f4e05063dbde15c28f15e60fef698a04a9e0fbf2072b6991b77674f11004",
+      "native_residency_test": "7f7af34046d532ee454e798773a4113659eb62769d687011cc78fbd89d5d6f36",
+      "kv_content_test": "783c32636ffcfd507b00504aa9276ec6a4b2519cdff312e649dcb74b071b9320",
+      "prefix_checkpoint_test": "9bd0974d86607f26581f855954df9209871a58d4a82fe723a238a21fe8e18141",
+      "checkpoint_policy_test": "e3fbc1282173d9000037e48348766f2cb5cc7f863dcc848e925317f56b7538e5",
+      "checkpoint_image_test": "534b292a6c35829284b84e835765c95f686f2f953aba04faad7710742620ecde",
+      "historical_kv_boundary_mailbox_test": "8b9f6276feb12a42edfa8ae79319402fde4db4f5b1308a139a5cc35d05759bed",
+      "historical_kv_commit_conditions_test": "6c8527e98be75088ec7ddc9112ab5b80b070155c7a6e9bb611cfb50b25ee638d",
+      "historical_kv_range_lock_test": "a94dd4caa0aceec5e59eb7b5e8d5f7f3271e2bde1421962de2dc8f9f817b71e5",
+      "historical_kv_witness_lifecycle_test": "3595ddb936b41e1702cadc5563a2b27d9a5c6330b75e51bb4525e422ed93b8b8",
+      "historical_kv_score_evidence_test": "0299a20fe47a66dcb73dd6f79561dafdbd5278f893cdeba3597ebcc84ee89131",
+      "historical_kv_auxiliary_budget_test": "85de9d9ca13004e4aae4df7b89a836271eff28b325737b9d067a01d1d46557a7",
+      "historical_kv_owner_budget_test": "e830314fd7fcdc6de79a958a6d1787172a19b4e091cf96e4d24801c4265766d9",
+      "historical_kv_service_health_test": "29f55098a71eb1d6dcdc59e8228ddd42b5f7bfe3ca60a78bf8815223a2ae6d6e",
+      "mean_key_retrieval_test": "ffc31ebf993f298c700f9e19250e3321a10d567db28cadf11107ef78db58c96f",
+      "source_journal_test": "61f2beed2fcfd08d1317fb5affed39a43389b2e34abe5da93ce0eeb75d30451c",
+      "source_recovery_test": "863edfa71d344c47fe531bddbc230c7eefbe0346b9a62e4f63cea28546711a67",
+      "source_image_test": "d820e5a90a90a073c7e6f61149a427d8fab31e60fe48f320b5f765abdab6362b"
+    },
+    "toolchain": {
+      "compiler": "g++ (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r2) 16.2.0",
+      "cmake": "cmake version 4.4.3",
+      "ninja": "1.13.2",
+      "build_type": "Debug",
+      "host": "Windows x86_64",
+      "features": {
+        "KVMEM_BUILD_LLAMA": false,
+        "KVMEM_BUILD_SERVER_TESTS": false,
+        "KVMEM_CUDA_TESTS": false
+      }
+    },
+    "warning_check": "g++ -Wall -Wextra -Wpedantic -fsyntax-only, both new translation units, exit 0 no diagnostics",
+    "whitespace_check": "git diff --check, exit 0"
+  },
+  "source_image_test": {
+    "sample_image_bytes": 2274,
+    "independent_corruption_flips_rejected": 2274,
+    "truncated_lengths_rejected": 2274,
+    "rechecksummed_semantic_forgeries_rejected": 11,
+    "transport_failures": {
+      "callback_positions": 33,
+      "writer_paths": 2,
+      "reader_paths": 1,
+      "total": 99
+    },
+    "actual_allocation_failure_points": {
+      "decode": 4,
+      "prepare": 4
+    },
+    "other_contracts": [
+      "actual tmpfile roundtrip",
+      "little-endian golden bytes and chunk boundary",
+      "exact/shared R quota and delayed release/move",
+      "branch/empty image",
+      "configuration/revision refusal",
+      "RAM-only staging rejection",
+      "prepared data unchanged after source append/local forget",
+      "async writer touches only immutable image",
+      "account outlives storage wrapper"
+    ]
+  },
+  "adverse_findings": [
+    "HostKvStorage tiered records cannot use the synchronous RAM data() accessor; explicitly reject tiered staging before reservation and test zero RAM/disk charge.",
+    "A prepared DATA owner can finish encoding after local source forget. This is intentionally not authorization to publish/import; persistent authority and final fence checks are mandatory before Engine integration.",
+    "An intermediate follow-up test build failed due to a missing spill-header include and obsolete assertion after test refactoring; fixed before the final fresh build and 23 passing tests."
+  ],
+  "evidence": {
+    "local_path": "artifacts/source-image-offline/evidence.zip",
+    "sha256": "550bbfcb8e6ca9a6e5f5b8143b2b3c9e34f485b420e90f3656c8a5f6df01222a",
+    "bytes": 316010,
+    "contains": "frozen host/core source, manifest, commands, toolchain, raw build/CTest/JUnit/configuration logs; no model evidence"
+  },
+  "remaining": [
+    "Linux sanitizer",
+    "CUDA/model",
+    "power-loss recovery",
+    "persistent manifest",
+    "durable identity/retirement/forget fences",
+    "source import",
+    "long-run/performance/Agent",
+    "complete_stage_C_or_production_GC"
+  ],
+  "resume": "Wait for user SSH-restored notification. Observe the existing C5 task before any restart, qualify it separately, then integrate persistent authority/fences and run remote sanitizer/model checks as appropriate."
+}

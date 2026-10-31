@@ -19,6 +19,7 @@ add_library(kvmem
     src/host/session_memory.cpp
     src/host/source_journal.cpp
     src/host/source_recovery.cpp
+    src/host/source_image.cpp
     src/host/prefix_checkpoint.cpp
     src/host/checkpoint_policy.cpp
     src/host/rope.cpp
@@ -114,6 +115,7 @@ kvmem_add_test(pinned_kv_tier_test)
 kvmem_add_test(memory_contract_test)
 kvmem_add_test(source_journal_test)
 kvmem_add_test(source_recovery_test)
+kvmem_add_test(source_image_test)
 kvmem_add_test(native_kv_payload_test)
 kvmem_add_test(host_kv_storage_test)
 kvmem_add_test(spill_io_test)
