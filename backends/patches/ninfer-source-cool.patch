@@ -1,0 +1,510 @@
+diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
+index 6302f7b..c22de60 100644
+--- a/docs/maintainer/engine-architecture.md
++++ b/docs/maintainer/engine-architecture.md
+@@ -51,6 +51,21 @@ history；源分支和 accepted/computed 事实按正常请求回执保留。此
+ 归档采用单本地 owner 和固定上界，不提供自动修复、跨 Engine 共享、HTTP/CLI 控制或全进程 RSS
+ 上界。catalog/seal 不完整会拒绝重开整个归档；一致目录备份回滚仍需要外部单调锚点才能识别。
+ 
++`cool_historical_source` / `cool_historical_archive` 是独立于永久遗忘的空闲 owner 操作。
++先展开持久家族的所有在线 binding 与 RAM 子孙，预检查 native continuation/传输并准备替换对象；
++每条目标源必须已有完整当前发布快照，文件大小与流式校验也必须通过，否则不释放任何在线资源。
++归档在共享 M 的现有固定表内保存运行期 binding snapshot revision；导入时绑定到已验证新 RAM
++revision，发布时绑定到其当前快照，追加后旧快照不能用于冷却。该运行期字段不写入 catalog/seal，
++旧 v1 文件格式不变，固定表计费按实际 sizeof 更新。
++
++全部检查成功后，以同一串行 owner 关闭旧 RAM 引用、清除 binding 并清理原生 KV/checkpoint/
++coverage 别名。RAM 源按当前同一 journal 的单调 ID 从叶到父删除，不能留下悬空 RAM parent；
++导入的 durable 子项虽是独立 RAM 根，也按持久家族纳入。持久源和 key 保留，同一 Engine 可以再
++导入为新 RAM 根、新计算域；旧 prepared/source refs 和旧 binding 的迟到 writer 不因此复活。
++现有 read receipt 仍受当前持久版本授权检查。验证使用固定栈流式读，不复制另一整份 R；读取可
++阻塞该控制调用，不能放入 decode 边界。已有准备、writer/reader、checkpoint 空闲池仍按真实
++owner 记账，不将冷却计数冒充所有 CPU/磁盘字节的立即退款。这是显式控制路径，尚无自动冷却策略。
++
+ Generation purpose 的 NInfer Engine 固定运行：
+ 
+ - 一张 GPU，或 Linux 上按层切成最多八个 pipeline stage 的多张 GPU（见第 8 节）；
+diff --git a/include/ninfer/engine.h b/include/ninfer/engine.h
+index 83d27bd..1245a0f 100644
+--- a/include/ninfer/engine.h
++++ b/include/ninfer/engine.h
+@@ -114,6 +114,12 @@ public:
+     // without mutation. Revokes retained KV/checkpoints and prepared rebuilds.
+     // No secure erasure or caller-owned token/transcript deletion is implied.
+     [[nodiscard]] HistoricalSourceForgetResult forget_historical_source(HistoricalSourceRef source);
++    // Idle-owner RAM/native-cache eviction preserving the complete CURRENT
++    // archive family. Unsaved/stale/corrupt/missing copies reject before any
++    // release. Durable keys stay valid and may import again in this same owner;
++    // old RAM refs/preparations/writers cannot acquire new execution rights.
++    [[nodiscard]] HistoricalSourceCoolResult cool_historical_source(HistoricalSourceRef source);
++    [[nodiscard]] HistoricalSourceCoolResult cool_historical_archive(HistoricalArchiveKey key);
+     // Explicit canonical rebuild into a NEW domain, never exact old-state reuse.
+     // Prepares accepted source IDs under R; submit/generate subsequently reserves
+     // actual model resources and revalidates. No model state changes here. The
+diff --git a/include/ninfer/historical_source.h b/include/ninfer/historical_source.h
+index 48ddf34..198e881 100644
+--- a/include/ninfer/historical_source.h
++++ b/include/ninfer/historical_source.h
+@@ -23,6 +23,11 @@ struct HistoricalSourceForgetResult {
+     std::uint64_t discarded_native_domains = 0;
+     std::uint64_t forgotten_archives = 0;
+ };
++struct HistoricalSourceCoolResult {
++    std::uint64_t cooled_sources = 0;
++    std::uint64_t discarded_native_domains = 0;
++    std::uint64_t preserved_archives = 0; // current snapshots of the cooled RAM records
++};
+ 
+ struct HistoricalArchiveKey {
+     std::array<std::uint8_t,16> space{};
+diff --git a/include/ninfer/types_fwd.h b/include/ninfer/types_fwd.h
+index 27bf92b..53288ad 100644
+--- a/include/ninfer/types_fwd.h
++++ b/include/ninfer/types_fwd.h
+@@ -14,6 +14,7 @@ namespace ninfer {
+ struct HistoricalSourceRef;
+ struct HistoricalSourceSummary;
+ struct HistoricalSourceForgetResult;
++struct HistoricalSourceCoolResult;
+ struct HistoricalArchiveKey;
+ struct HistoricalArchiveOptions;
+ struct HistoricalArchiveRecord;
+diff --git a/src/models/qwen3_5/program/program.cpp b/src/models/qwen3_5/program/program.cpp
+index 536adc1..d37a8e2 100644
+--- a/src/models/qwen3_5/program/program.cpp
++++ b/src/models/qwen3_5/program/program.cpp
+@@ -748,6 +748,8 @@ std::vector<HistoricalSourceSummary> Program::historical_sources() const { retur
+ HistoricalSourceForgetResult Program::forget_historical_source(HistoricalSourceRef source) {
+     return impl_->forget_historical_source(source);
+ }
++HistoricalSourceCoolResult Program::cool_historical_source(HistoricalSourceRef source) { return impl_->cool_historical_source(source); }
++HistoricalSourceCoolResult Program::cool_historical_archive(HistoricalArchiveKey key) { return impl_->cool_historical_archive(key); }
+ std::optional<HistoricalSourceRef> Program::source_receipt(SequenceHandle sequence) const noexcept { return impl_->source_receipt(sequence); }
+ SourceRebuildInput Program::prepare_source_rebuild(HistoricalSourceRef source, std::uint32_t prefix, std::uint32_t reserve) {
+     return impl_->prepare_source_rebuild(source, prefix, reserve);
+diff --git a/src/models/qwen3_5/program/program.h b/src/models/qwen3_5/program/program.h
+index 363f6e0..412f8e6 100644
+--- a/src/models/qwen3_5/program/program.h
++++ b/src/models/qwen3_5/program/program.h
+@@ -1282,6 +1282,8 @@ public:
+     [[nodiscard]] MemorySummary memory_summary() const noexcept;
+     [[nodiscard]] std::vector<HistoricalSourceSummary> historical_sources() const;
+     [[nodiscard]] HistoricalSourceForgetResult forget_historical_source(HistoricalSourceRef);
++    [[nodiscard]] HistoricalSourceCoolResult cool_historical_source(HistoricalSourceRef);
++    [[nodiscard]] HistoricalSourceCoolResult cool_historical_archive(HistoricalArchiveKey);
+     [[nodiscard]] std::optional<HistoricalSourceRef> source_receipt(SequenceHandle) const noexcept;
+     [[nodiscard]] SourceRebuildInput prepare_source_rebuild(HistoricalSourceRef, std::uint32_t, std::uint32_t);
+     [[nodiscard]] SourceRebuildInput prepare_source_replay(HistoricalSourceRef, std::uint32_t, std::uint32_t);
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index e3c64ed..cddbc57 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -1184,6 +1184,8 @@ public:
+     void capture_source(SequenceState&, RequestControl&);
+     std::vector<HistoricalSourceSummary> historical_sources() const;
+     HistoricalSourceForgetResult forget_historical_source(HistoricalSourceRef);
++    HistoricalSourceCoolResult cool_historical_source(HistoricalSourceRef);
++    HistoricalSourceCoolResult cool_historical_archive(HistoricalArchiveKey);
+     std::optional<HistoricalSourceRef> source_receipt(SequenceHandle) const noexcept;
+     SourceRebuildInput prepare_source_rebuild(HistoricalSourceRef, std::uint32_t, std::uint32_t);
+     SourceRebuildInput prepare_source_replay(HistoricalSourceRef, std::uint32_t, std::uint32_t);
+@@ -1197,7 +1199,9 @@ public:
+     HistoricalArchiveUsage historical_archive_usage() const;
+     HistoricalSourceRef import_historical_source(HistoricalArchiveKey);
+     HistoricalSourceForgetResult forget_historical_archive(HistoricalArchiveKey);
+-    HistoricalSourceForgetResult forget_source_family(std::optional<kvmem::SourceRef>, std::optional<kvmem::SourceArchiveKey>);
++    enum class SourceFamilyAction { Forget, Cool };
++    struct SourceFamilyRelease { std::uint64_t sources=0,native_domains=0,archives=0; };
++    SourceFamilyRelease release_source_family(std::optional<kvmem::SourceRef>, std::optional<kvmem::SourceArchiveKey>,SourceFamilyAction);
+     void collect_historical_archives();
+     void validate_source_rebuild(const kvmem::PreparedSourceRecovery&) const;
+     kvmem::MemoryDescriptor memory_descriptor() const;
+diff --git a/src/models/qwen3_5/program/storage/source_journal.cpp b/src/models/qwen3_5/program/storage/source_journal.cpp
+index 89b91f2..1988cd0 100644
+--- a/src/models/qwen3_5/program/storage/source_journal.cpp
++++ b/src/models/qwen3_5/program/storage/source_journal.cpp
+@@ -94,7 +94,17 @@ std::optional<HistoricalSourceRef> ProgramImpl::source_receipt(SequenceHandle se
+ 
+ HistoricalSourceForgetResult ProgramImpl::forget_historical_source(HistoricalSourceRef source) {
+     const kvmem::SourceRef ancestor{{source.id, source.incarnation}, source.revision};
+-    return forget_source_family(ancestor, std::nullopt);
++    const auto r=release_source_family(ancestor,std::nullopt,SourceFamilyAction::Forget);
++    return {r.sources,r.native_domains,r.archives};
++}
++HistoricalSourceCoolResult ProgramImpl::cool_historical_source(HistoricalSourceRef source) {
++    const kvmem::SourceRef ancestor{{source.id,source.incarnation},source.revision};
++    const auto r=release_source_family(ancestor,std::nullopt,SourceFamilyAction::Cool);
++    return {r.sources,r.native_domains,r.archives};
++}
++HistoricalSourceCoolResult ProgramImpl::cool_historical_archive(HistoricalArchiveKey key) {
++    const auto r=release_source_family(std::nullopt,kvmem::SourceArchiveKey{key.space,key.id},SourceFamilyAction::Cool);
++    return {r.sources,r.native_domains,r.archives};
+ }
+ void ProgramImpl::require_source_control() const {
+     if (!source_journal)
+@@ -105,8 +115,8 @@ void ProgramImpl::require_source_control() const {
+         }))
+         throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending, "source control requires a quiescent Program");
+ }
+-HistoricalSourceForgetResult ProgramImpl::forget_source_family(std::optional<kvmem::SourceRef> ancestor,
+-    std::optional<kvmem::SourceArchiveKey> archive_root) {
++ProgramImpl::SourceFamilyRelease ProgramImpl::release_source_family(std::optional<kvmem::SourceRef> ancestor,
++    std::optional<kvmem::SourceArchiveKey> archive_root, SourceFamilyAction action) {
+     require_source_control();
+     if (ancestor) (void)source_journal->state(*ancestor);
+     constexpr std::size_t max_sources = 256;
+@@ -121,6 +131,8 @@ HistoricalSourceForgetResult ProgramImpl::forget_source_family(std::optional<kvm
+ #if defined(__linux__)
+     if (source_archive) {
+         if (!archive_root && ancestor) archive_root = source_archive->key_for(*source_journal,*ancestor);
++        if (action==SourceFamilyAction::Cool && !archive_root)
++            throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending,"cooldown needs an archived source family");
+         if (archive_root) {
+             // Validate the persistent family before allocating/revoking anything.
+             (void)source_archive->family_contains(*archive_root,*archive_root);
+@@ -133,9 +145,9 @@ HistoricalSourceForgetResult ProgramImpl::forget_source_family(std::optional<kvm
+                     if (refs[i].source.id && source_journal->family_contains(*binding,refs[i].source)) marked[i] = true;
+             }
+         }
+-    } else if (archive_root) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"no source archive attached");
++    } else if (archive_root || action==SourceFamilyAction::Cool) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"no source archive attached");
+ #else
+-    if (archive_root) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
++    if (archive_root || action==SourceFamilyAction::Cool) throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported,"source archive requires Linux");
+ #endif
+     for (std::size_t i = 0; i < max_sources; ++i) if (marked[i]) {
+         roots[i] = true;
+@@ -156,41 +168,53 @@ HistoricalSourceForgetResult ProgramImpl::forget_source_family(std::optional<kvm
+         if (!member(sequence.window.source)) continue;
+         if (sequence.kv)
+             throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending,
+-                "source forget requires its native continuations to be released");
++                "source release requires its native continuations to be released");
+         empty_windows.emplace_back(i, KvmemWindowState{});
+     }
+     std::array<bool, std::tuple_size_v<decltype(memory_histories)>> discard{};
+-    HistoricalSourceForgetResult result;
++    SourceFamilyRelease result;
+     for (std::size_t i = 0; i < memory_histories.size(); ++i)
+         if (memory_histories[i] && member(memory_histories[i]->source)) {
+             discard[i] = true;
+-            ++result.discarded_native_domains;
++            ++result.native_domains;
+         }
+     const bool clear_last = member(source_last.ref);
+     static_assert(std::is_nothrow_move_assignable_v<KvmemWindowState>);
+     std::exception_ptr persistence_error;
+ #if defined(__linux__)
+-    if (archive_root) {
+-        try { result.forgotten_archives = source_archive->forget(*archive_root); }
++    if (action==SourceFamilyAction::Cool) {
++        std::array<kvmem::SourceRef,max_sources> cooling{};std::size_t count=0;
++        for (std::size_t i=0;i<max_sources;++i) if (marked[i]) cooling[count++]=refs[i];
++        // All native checks/replacement allocations have finished. The core
++        // validates every latest blob, then closes RAM refs/unbinds without I/O
++        // writes or allocation. No new execution can observe the interval before
++        // the following nonthrowing native-alias cleanup under this same owner.
++        result.sources=source_archive->cool_sources(*source_journal,cooling.data(),count);
++        result.archives=count;
++    } else if (archive_root) {
++        try { result.archives = source_archive->forget(*archive_root); }
+         catch (...) { persistence_error = std::current_exception(); }
+     }
+ #endif
+-    // Nonallocating owner commit: revoke KV/checkpoint/coverage aliases first,
+-    // then erase the source family. Monotonic source IDs are never reissued.
++    // Nonallocating owner cleanup, never observable by new execution halfway.
++    // Forget clears aliases then RAM; Cool has already closed RAM references in
++    // its verified core commit and now clears all preflighted native aliases.
+     for (auto& [i, empty] : empty_windows) continuation_states[i].window = std::move(empty);
+     for (std::size_t i = 0; i < discard.size(); ++i)
+         if (discard[i]) memory_histories[i].reset();
+     if (clear_last) { source_last = {}; source_last_tokens_fnv1a64 = 14695981039346656037ULL; }
+-    for (std::size_t i = 0; i < max_sources; ++i) if (roots[i]) result.forgotten_sources += source_journal->forget(refs[i]);
++    if (action==SourceFamilyAction::Forget)
++        for (std::size_t i = 0; i < max_sources; ++i) if (roots[i]) result.sources += source_journal->forget(refs[i]);
+     advance_resource_revision();
+     // A disk error can mean revocation committed but acknowledgement failed.
+     // Preflighted online aliases must still be closed; the archive is unhealthy
+     // and the caller receives the original UNACKNOWLEDGED failure afterward.
+     if (persistence_error) std::rethrow_exception(persistence_error);
+     if (kvmem_options.verify_transfers)
+-        std::fprintf(stderr, "KVMEM_SOURCE_FORGET root=%llu records=%llu native_domains=%llu\n",
+-            (unsigned long long)(ancestor ? ancestor->source.id : archive_root->id), (unsigned long long)result.forgotten_sources,
+-            (unsigned long long)result.discarded_native_domains);
++        std::fprintf(stderr, "%s root=%llu records=%llu native_domains=%llu\n",
++            action==SourceFamilyAction::Forget ? "KVMEM_SOURCE_FORGET" : "KVMEM_SOURCE_COOL",
++            (unsigned long long)(ancestor ? ancestor->source.id : archive_root->id), (unsigned long long)result.sources,
++            (unsigned long long)result.native_domains);
+     return result;
+ }
+ 
+@@ -311,7 +335,8 @@ HistoricalSourceRef ProgramImpl::import_historical_source(HistoricalArchiveKey k
+ #endif
+ }
+ HistoricalSourceForgetResult ProgramImpl::forget_historical_archive(HistoricalArchiveKey key) {
+-    return forget_source_family(std::nullopt,kvmem::SourceArchiveKey{key.space,key.id});
++    const auto r=release_source_family(std::nullopt,kvmem::SourceArchiveKey{key.space,key.id},SourceFamilyAction::Forget);
++    return {r.sources,r.native_domains,r.archives};
+ }
+ void ProgramImpl::collect_historical_archives() {
+ #if defined(__linux__)
+diff --git a/src/runtime/engine/engine.cpp b/src/runtime/engine/engine.cpp
+index f34fd9f..8da8a0e 100644
+--- a/src/runtime/engine/engine.cpp
++++ b/src/runtime/engine/engine.cpp
+@@ -788,6 +788,14 @@ HistoricalSourceForgetResult Engine::forget_historical_source(HistoricalSourceRe
+     if (!impl_) throw std::logic_error("Engine is moved from");
+     return impl_->generation_core().forget_historical_source(source);
+ }
++HistoricalSourceCoolResult Engine::cool_historical_source(HistoricalSourceRef source) {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    return impl_->generation_core().cool_historical_source(source);
++}
++HistoricalSourceCoolResult Engine::cool_historical_archive(HistoricalArchiveKey key) {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    return impl_->generation_core().cool_historical_archive(key);
++}
+ PreparedPrompt Engine::prepare_source_rebuild(HistoricalSourceRef source, std::uint32_t prefix,
+                                              std::uint32_t reserve) const {
+     if (!impl_) throw std::logic_error("Engine is moved from");
+diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
+index ffb4531..eae55d9 100644
+--- a/src/runtime/engine/engine_core.h
++++ b/src/runtime/engine/engine_core.h
+@@ -707,6 +707,12 @@ public:
+     void collect_historical_archives() {
+         source_archive_control([&] { instance_.program->collect_historical_archives(); });
+     }
++    HistoricalSourceCoolResult cool_historical_source(HistoricalSourceRef source) {
++        return source_archive_control([&] { return instance_.program->cool_historical_source(source); });
++    }
++    HistoricalSourceCoolResult cool_historical_archive(HistoricalArchiveKey key) {
++        return source_archive_control([&] { return instance_.program->cool_historical_archive(key); });
++    }
+ 
+     // Served from the snapshot the worker publishes at unit boundaries: the execution mutex is
+     // held for most of a running request, so a reader that waited on it would stall behind a
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+index 9cef6a1..a9fb3a7 100644
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -69,6 +69,10 @@ ninfer_add_test(ninfer_engine_source_forget_real_test STANDALONE
+   LIBRARIES ninfer_engine kvmem ninfer::json)
+ set_tests_properties(ninfer_engine_source_forget_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++  ninfer_add_test(ninfer_engine_source_cool_real_test STANDALONE
++    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_cool_real.cpp"
++    LIBRARIES ninfer_engine kvmem ninfer::json)
++  set_tests_properties(ninfer_engine_source_cool_real_test PROPERTIES SKIP_RETURN_CODE 77)
+   ninfer_add_test(ninfer_engine_source_replay_real_test STANDALONE
+     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_replay_real.cpp"
+     LIBRARIES ninfer_engine kvmem ninfer::json)
+diff --git a/tests/test_engine_source_cool_real.cpp b/tests/test_engine_source_cool_real.cpp
+new file mode 100644
+index 0000000..10ca4e3
+--- /dev/null
++++ b/tests/test_engine_source_cool_real.cpp
+@@ -0,0 +1,156 @@
++#include "ninfer/engine.h"
++#include "kvmem/memory_contract.hpp"
++#include "kvmem/snapshot.hpp"
++#include <nlohmann/json.hpp>
++#include <algorithm>
++#include <atomic>
++#include <cstdlib>
++#include <fstream>
++#include <iostream>
++#include <stdexcept>
++#include <system_error>
++
++namespace {
++void require(bool value,const char* message) {if(!value)throw std::runtime_error(message);}
++template<class F> void rejected(kvmem::MemoryErrorCode code,F work) {
++    try {work();}catch(const kvmem::MemoryError& e){require(e.code()==code,"wrong cooldown rejection");return;}
++    throw std::runtime_error("cooldown operation unexpectedly succeeded");
++}
++ninfer::RequestOptions request() {
++    ninfer::RequestOptions r;r.execution.requested_output_tokens=8;r.execution.sampling.temperature=0;r.execution.sampling.seed=42;
++    r.execution.thinking.loop=ninfer::ReasoningLoopAction::Off;r.stop.include_model_defaults=false;
++    r.output.raw=r.output.preserve_special_tokens=true;return r;
++}
++nlohmann::json json_key(ninfer::HistoricalArchiveKey k){return{{"space",k.space},{"id",k.id}};}
++ninfer::HistoricalArchiveKey key(const nlohmann::json& j){return{j.at("space").get<std::array<std::uint8_t,16>>(),j.at("id").get<std::uint64_t>()};}
++struct BusyCool final:ninfer::OutputSink {
++    ninfer::Engine& engine;ninfer::HistoricalSourceRef source;bool observed=false;
++    BusyCool(ninfer::Engine& e,ninfer::HistoricalSourceRef s):engine(e),source(s){}
++    void start(ninfer::GenerationStart)override{}
++    void progress(ninfer::PromptProgress p)override{
++        if(!observed && p.processed_prompt_tokens && p.processed_prompt_tokens<p.total_prompt_tokens){
++            rejected(kvmem::MemoryErrorCode::Pending,[&]{(void)engine.cool_historical_source(source);});observed=true;
++        }
++    }
++    void timing(ninfer::GenerationTimingObservation)override{}
++    void publish(ninfer::OutputDelta)override{}
++};
++int run(int argc,char** argv){
++    const char* model=std::getenv("NINFER_SOURCE_COOL_ARTIFACT");if(!model || !*model)return 77;
++    require(argc==3,"usage: source_cool_real cycle|deny work-directory");
++    const std::string mode=argv[1];const std::filesystem::path root=argv[2];
++    const bool mtp=std::getenv("NINFER_SOURCE_COOL_MTP")!=nullptr;
++    const bool redundancy=std::getenv("NINFER_SOURCE_COOL_REDUNDANCY")!=nullptr;
++    ninfer::EngineOptions o;o.artifact_path=model;o.max_context=65536;o.kv_capacity=ninfer::KvCapacityPolicy::explicit_capacity(2560);
++    o.prefill_chunk=512;o.max_concurrency=1;o.max_pending_requests=4;o.device_profile="off";o.context_cache.enabled=false;
++    o.kv_cache=ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
++    auto& m=o.kvmem;m.selected_tokens=2048;m.reserve_tokens=512;m.host_bytes=96ULL<<20;m.checkpoint_bytes=2048ULL<<20;
++    m.source_bytes=16ULL<<20;m.recovery_bytes=1ULL<<20;m.historical_gc_aux_bytes=64ULL<<20;m.retained_sessions=8;
++    m.query_meanq_cosine=m.score_agg_max=true;m.graph_alpha=0;m.historical_gc_lru=!redundancy;m.historical_gc_redundancy=redundancy;m.verify_transfers=true;
++    if(mtp){o.speculative.backend=ninfer::SpeculativeBackend::Mtp;o.speculative.draft_tokens=4;}
++    ninfer::Engine engine(o);const auto token=engine.tokenize_text(" Memory").front();auto reference=engine.prepare_tokens({token});
++    ninfer::HistoricalArchiveOptions archive;archive.directory=root/"archive";archive.disk_bytes=64ULL<<20;archive.metadata_bytes=1ULL<<20;archive.create=mode=="cycle";
++    engine.attach_historical_archive(archive,reference);
++    const auto save=[&](ninfer::HistoricalSourceRef ref){auto ticket=engine.begin_historical_save(ref);const auto k=ticket.key();ticket.wait();engine.finish_historical_save(ticket);return k;};
++    if(mode=="legacy" || mode=="legacy-reopen"){
++        nlohmann::json j;{std::ifstream in(root/"fixture.json");in>>j;}
++        const ninfer::HistoricalArchiveKey legacy_key{j.at("space").get<std::array<std::uint8_t,16>>(),j.at("id").get<std::uint64_t>()};
++        auto source=engine.import_historical_source(legacy_key);
++        if(mode=="legacy"){
++            auto held=engine.prepare_source_replay(source,32768,32);
++            const auto cooled=engine.cool_historical_source(source);
++            require(cooled.cooled_sources==1 && !cooled.discarded_native_domains && cooled.preserved_archives==1,"C9 imported archive could not cool without resave");
++            require(engine.memory_summary().kvmem.recovery_bytes==131072,"legacy cooldown refunded live R early");
++            rejected(kvmem::MemoryErrorCode::Stale,[&]{(void)engine.generate(std::move(held),request());});
++            const auto previous=source;source=engine.import_historical_source(legacy_key);require(source.id>previous.id,"legacy same-owner import reused old ID");
++        }
++        const auto restored=engine.generate(engine.prepare_source_replay(source,32768,32),request());
++        require(!restored.reused_prompt_tokens && restored.computed_prompt_tokens==32768 &&
++            restored.generated_token_ids==j.at("ids").get<std::vector<ninfer::TokenId>>() && restored.accepted_source,"actual C9 archive full replay changed independent original-input output");
++        if(mode=="legacy"){
++            (void)save(*restored.accepted_source);
++            const auto cooled=engine.cool_historical_archive(legacy_key);
++            require(cooled.cooled_sources==2 && cooled.discarded_native_domains==1 && cooled.preserved_archives==2,"legacy mixed family cooldown lost data");
++            require(engine.historical_sources().empty() && engine.historical_archives().size()==2,"legacy cooldown forgot persistent family");
++        }
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode},{"prefix",32768},{"output_ids",restored.generated_token_ids}}<<std::endl;return 0;
++    }
++    if(mode=="deny"){
++        nlohmann::json j;{std::ifstream in(root/"fixture.json");in>>j;}
++        for(const auto name:{"root","child","rebuilt"})rejected(kvmem::MemoryErrorCode::Stale,[&]{(void)engine.import_historical_source(key(j.at(name)));});
++        require(engine.historical_archives().size()==1,"permanent forget after cooling lost unrelated archive");
++        const auto other=engine.import_historical_source(key(j.at("other")));
++        const auto restored=engine.generate(engine.prepare_source_replay(other,512,32),request());
++        require(restored.generated_token_ids==j.at("other_ids").get<std::vector<ninfer::TokenId>>(),"unrelated archived source changed after cooldown/restart");
++        std::cout<<nlohmann::json{{"status","passed"},{"mode",mode}}<<std::endl;return 0;
++    }
++    require(mode=="cycle","unknown cooldown mode");
++    const auto original=engine.generate(engine.prepare_tokens(std::vector<ninfer::TokenId>(1024,token)),request());require(original.accepted_source.has_value(),"root source missing");
++    const auto source=*original.accepted_source;const auto root_key=save(source);
++    BusyCool busy(engine,source);
++    auto child_handle=engine.submit(engine.prepare_source_rebuild(source,768,32),request(),ninfer::OutputConsumerMode::Streaming,{.prompt_progress=true});
++    const auto child=child_handle.wait(&busy);require(busy.observed && child.accepted_source,"busy cooldown was not tested");
++    auto unrelated=std::vector<ninfer::TokenId>(512,token);unrelated.front()=engine.tokenize_text(" unrelated").front();
++    const auto independent=engine.generate(engine.prepare_tokens(unrelated),request());require(independent.accepted_source.has_value(),"independent source missing");
++    const auto other_key=save(*independent.accepted_source);
++    const auto unchanged=[&]{
++        const auto s=engine.historical_sources();require(s.size()==3,"refused cooldown changed source family");
++        for(const auto ref:{source,*child.accepted_source,*independent.accepted_source})
++            require(std::any_of(s.begin(),s.end(),[&](const auto& row){return row.ref==ref && row.retained_native_domains==1;}),"refused cooldown changed native bindings");
++        require(engine.is_available(),"cooldown refusal poisoned Engine");
++    };
++    unchanged();const auto before_refusal=engine.memory_summary().kvmem;
++    rejected(kvmem::MemoryErrorCode::Pending,[&]{(void)engine.cool_historical_source(source);});unchanged();
++    require(engine.memory_summary().kvmem.source_bytes==before_refusal.source_bytes,"unsaved descendant refusal partially freed S");
++    const auto child_key=save(*child.accepted_source);
++    const auto records=engine.historical_archives();const auto saved=std::find_if(records.begin(),records.end(),[&](const auto& r){return r.key==child_key;});
++    require(saved!=records.end(),"saved child archive missing");
++    const auto blob=archive.directory/("blob."+std::to_string(saved->saved_sequence));
++    char byte=0;{std::fstream f(blob,std::ios::binary|std::ios::in|std::ios::out);f.seekg(200);f.read(&byte,1);require(f.good(),"fault fixture could not read blob");const char changed=char(byte^1);f.seekp(200);f.write(&changed,1);require(f.good(),"fault fixture could not alter blob");}
++    bool corrupt=false;try{(void)engine.cool_historical_source(source);}catch(const kvmem::SnapshotCorrupt&){corrupt=true;}
++    require(corrupt,"cooldown trusted corrupted archive");unchanged();
++    {std::fstream f(blob,std::ios::binary|std::ios::in|std::ios::out);f.seekp(200);f.write(&byte,1);require(f.good(),"fault fixture could not restore blob");}
++    auto held_root=engine.prepare_source_rebuild(source,1024,32),held_child=engine.prepare_source_rebuild(*child.accepted_source,768,32);
++    auto late=engine.begin_historical_save(*child.accepted_source);late.wait();
++    const auto before=engine.memory_summary().kvmem;require(before.recovery_bytes==7168,"owned R fixture charge missing");
++    const auto cooled=engine.cool_historical_source(source);const auto after=engine.memory_summary().kvmem;
++    require(cooled.cooled_sources==2 && cooled.discarded_native_domains==2 && cooled.preserved_archives==2,"cooldown missed source/native/archive binding");
++    require(after.source_bytes<before.source_bytes && after.host_payload_bytes<before.host_payload_bytes && after.retained_sessions==1,"cooldown did not release actual S/H or lost unrelated native domain");
++    require(after.recovery_bytes==7168 && engine.historical_sources().size()==1 && engine.historical_archives().size()==3,"cooldown refunded live R early or deleted durable data");
++    const auto again=engine.cool_historical_archive(root_key);require(!again.cooled_sources && !again.discarded_native_domains,"already cold family was not idempotent");
++    rejected(kvmem::MemoryErrorCode::Stale,[&]{engine.finish_historical_save(late);});
++    rejected(kvmem::MemoryErrorCode::Stale,[&]{(void)engine.generate(std::move(held_root),request());});
++    rejected(kvmem::MemoryErrorCode::Stale,[&]{(void)engine.generate(std::move(held_child),request());});
++    require(engine.memory_summary().kvmem.recovery_bytes==0 && engine.is_available(),"old preparations leaked R or poisoned Engine");
++    const auto imported=engine.import_historical_source(root_key),imported_child=engine.import_historical_source(child_key);
++    require(imported.id>independent.accepted_source->id && imported_child.id>imported.id,"same-owner import reused old source IDs");
++    const auto rebound=engine.historical_sources();
++    for(const auto ref:{imported,imported_child})require(std::any_of(rebound.begin(),rebound.end(),[&](const auto& row){return row.ref==ref && !row.parent.id && !row.computed_tokens && !row.retained_native_domains;}),"same-owner import revived old computation");
++    rejected(kvmem::MemoryErrorCode::Stale,[&]{engine.finish_historical_save(late);});
++    const auto recool=engine.cool_historical_source(imported);
++    require(recool.cooled_sources==2 && !recool.discarded_native_domains && recool.preserved_archives==2,"imported current snapshot required an unnecessary resave or missed durable child root");
++    const auto restored_root=engine.import_historical_source(root_key),restored_child=engine.import_historical_source(child_key);(void)restored_child;
++    const auto restored=engine.generate(engine.prepare_source_replay(restored_root,1024,32),request());
++    require(!restored.reused_prompt_tokens && restored.computed_prompt_tokens==1024 && restored.generated_token_ids==original.generated_token_ids && restored.accepted_source,"same-owner cold restore failed independent original-input oracle");
++    require(!mtp || restored.speculative.rounds>0,"restored MTP fell back");
++    rejected(kvmem::MemoryErrorCode::Pending,[&]{(void)engine.cool_historical_archive(root_key);});
++    const auto rebuilt_key=save(*restored.accepted_source);
++    const auto mixed=engine.cool_historical_archive(root_key);
++    require(mixed.cooled_sources==3 && mixed.discarded_native_domains==1 && mixed.preserved_archives==3,"mixed imported roots/RAM descendants cooled incompletely");
++    require(engine.historical_sources().size()==1 && engine.historical_archives().size()==4,"cooldown did not preserve all durable family members");
++    const auto forgotten=engine.forget_historical_archive(root_key);
++    require(!forgotten.forgotten_sources && !forgotten.discarded_native_domains && forgotten.forgotten_archives==3,"permanent forget after cooldown differs from eviction");
++    rejected(kvmem::MemoryErrorCode::Stale,[&]{(void)engine.import_historical_source(root_key);});
++    engine.collect_historical_archives();const auto pinned=engine.historical_archive_usage().reserved_bytes;
++    late={};engine.collect_historical_archives();require(engine.historical_archive_usage().reserved_bytes<pinned,"late writer D lease released early or leaked");
++    const auto follow=engine.generate(engine.prepare_source_replay(*independent.accepted_source,512,32),request());
++    require(follow.generated_token_ids==independent.generated_token_ids && engine.is_available(),"unrelated source not usable after cooling/forget");
++    std::ofstream out(root/"fixture.json");out<<nlohmann::json{{"root",json_key(root_key)},{"child",json_key(child_key)},{"rebuilt",json_key(rebuilt_key)},{"other",json_key(other_key)},{"other_ids",independent.generated_token_ids}};out.close();require(out.good(),"fixture write failed");
++    std::cout<<nlohmann::json{{"status","passed"},{"mode",mode},{"mtp",mtp},{"redundancy",redundancy},
++        {"cooled_sources",cooled.cooled_sources},{"discarded_native_domains",cooled.discarded_native_domains},{"preserved_archives",cooled.preserved_archives},
++        {"source_bytes_before",before.source_bytes},{"source_bytes_after",after.source_bytes},{"host_bytes_before",before.host_payload_bytes},{"host_bytes_after",after.host_payload_bytes},
++        {"restored_output_ids",restored.generated_token_ids},{"speculative_rounds",restored.speculative.rounds},{"mixed_sources",mixed.cooled_sources}}<<std::endl;
++    return 0;
++}
++}
++int main(int argc,char** argv){try{return run(argc,argv);}catch(const std::exception& e){std::cerr<<"SOURCE_COOL_FATAL: "<<e.what()<<std::endl;return 1;}}
+diff --git a/tests/test_engine_source_replay_real.cpp b/tests/test_engine_source_replay_real.cpp
+index 51b8a57..9353257 100644
+--- a/tests/test_engine_source_replay_real.cpp
++++ b/tests/test_engine_source_replay_real.cpp
+@@ -23,12 +23,12 @@ ninfer::RequestOptions request(std::uint32_t tokens=8) {
+ }
+ struct CancelAcrossWindows final : ninfer::OutputSink {
+     std::atomic<bool> cancel{false};std::uint32_t processed=0;
+-    ninfer::Engine& engine;ninfer::HistoricalSourceRef source;
+-    CancelAcrossWindows(ninfer::Engine& e,ninfer::HistoricalSourceRef s):engine(e),source(s){}
+     void start(ninfer::GenerationStart s) override { require(!s.reused_prompt_tokens,"cancel replay reused old state"); }
+     void progress(ninfer::PromptProgress p) override {
+         if (!cancel.load() && p.processed_prompt_tokens>=4096 && p.processed_prompt_tokens<p.total_prompt_tokens) {
+-            rejected(kvmem::MemoryErrorCode::Pending,[&] { (void)engine.forget_historical_source(source); });
++            // wait() polls cancellation after this callback. A synchronous
++            // Engine control method here can wait on the worker's execution
++            // mutex until the whole prompt completes, delaying cancellation.
+             processed=p.processed_prompt_tokens;cancel.store(true,std::memory_order_release);
+         }
+     }
+@@ -89,6 +89,16 @@ int run(int argc,char** argv) {
+         std::cout<<nlohmann::json{{"status","passed"},{"mode",mode},{"charged_bytes",prefix*4ULL}}<<std::endl;return 0;
+     }
+     require(mode=="replay","unknown replay mode");
++    // Exercise the busy/unconsumed-handle fence independently of cancellation.
++    // Keep the handle outstanding until the control call returns; the worker
++    // may finish, but the family must still be protected. Never block the
++    // cancellation consumer inside its progress callback.
++    auto busy=engine.submit(engine.prepare_tokens(std::vector<ninfer::TokenId>(128,token)),request());
++    rejected(kvmem::MemoryErrorCode::Pending,[&] { (void)engine.forget_historical_source(source); });
++    const auto busy_result=busy.wait();require(busy_result.accepted_source.has_value(),"busy probe source missing");
++    const auto busy_forget=engine.forget_historical_source(*busy_result.accepted_source);
++    require(busy_forget.forgotten_sources==1 && !busy_forget.forgotten_archives && engine.historical_sources().size()==1,
++        "busy probe changed archived source family");
+     rejected(kvmem::MemoryErrorCode::BudgetExceeded,[&] { (void)engine.prepare_source_rebuild(source,prefix,32); });
+     rejected(kvmem::MemoryErrorCode::BudgetExceeded,[&] { (void)engine.prepare_source_replay(source,prefix,65536); });
+     auto stale=source;++stale.revision;
+@@ -104,7 +114,7 @@ int run(int argc,char** argv) {
+     require(rebuilt!=records.end() && rebuilt->parent==source && rebuilt->parent_prefix_tokens==prefix &&
+         rebuilt->computed_tokens>=prefix && rebuilt->retained_native_domains==1 && rebuilt->retired_native_pages>0,"long replay did not publish a fresh retired-page domain");
+     require(engine.memory_summary().kvmem.recovery_bytes==0,"successful replay retained R");
+-    CancelAcrossWindows sink(engine,source);
++    CancelAcrossWindows sink;
+     auto active=engine.submit(engine.prepare_source_replay(source,prefix,32),request(),ninfer::OutputConsumerMode::Streaming,{.prompt_progress=true});
+     const auto cancelled=active.wait(&sink,ninfer::CancellationView([&] {return sink.cancel.load(std::memory_order_acquire);}));
+     require(sink.processed>=4096 && cancelled.finish_reason==ninfer::FinishReason::Cancelled && cancelled.computed_prompt_tokens<prefix && cancelled.accepted_source,

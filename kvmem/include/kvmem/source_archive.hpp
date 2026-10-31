@@ -109,6 +109,14 @@ public:
     // binding returns Pending; no implicit replacement, alias or decoded-origin
     // matching. Durable lineage remains in the archive, not old RAM parent refs.
     SourceRef import_source(const SourceArchiveRead &, SourceJournalStore &);
+    // Explicit RAM eviction, not durable forgetting. Every selected current
+    // source must have a complete current published copy, and the selection
+    // must include all its RAM descendants. Verify all files/fences first,
+    // then nonallocating unbind + erase RAM leaves before parents. The adapter
+    // must preflight its native aliases and release them in this same serialized
+    // control operation, before any new execution. Archive keys/read authority
+    // remain valid; old RAM preparations and old-binding writers do not.
+    size_t cool_sources(SourceJournalStore &, const SourceRef *, size_t count);
     size_t slots() const noexcept;
     std::optional<SourceArchiveKey> key_for(const SourceJournalStore &, SourceRef) const;
     std::optional<SourceRef> bound_source(SourceArchiveKey, const SourceJournalStore &) const;

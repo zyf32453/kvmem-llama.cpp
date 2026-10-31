@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "c3ac2a35ce2f6a8e95b82fe3ba5562d768184e4e",
+    "patched_tree": "a7716a4a5b1b9684a6c35b6b57202d14cb858a47",
     "patches": [
       {
         "id": "kvmem",
@@ -378,6 +378,15 @@
           "source-archive"
         ],
         "after_tree": "c3ac2a35ce2f6a8e95b82fe3ba5562d768184e4e"
+      },
+      {
+        "id": "source-cool",
+        "path": "backends/patches/ninfer-source-cool.patch",
+        "sha256": "06f0b3c8fd65aab1b3e72ee8520ebdca137a82c74434f9545b6bb654e4d0426b",
+        "requires": [
+          "source-replay"
+        ],
+        "after_tree": "a7716a4a5b1b9684a6c35b6b57202d14cb858a47"
       }
     ]
   },

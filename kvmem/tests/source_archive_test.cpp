@@ -1,4 +1,5 @@
 #include "kvmem/source_archive.hpp"
+#include "kvmem/source_recovery.hpp"
 #include "memory_test_support.hpp"
 
 #include <atomic>
@@ -626,6 +627,93 @@ void owner_queries_and_structural_queue_limit() {
     CHECK(archive.forget(root) == 2);
     rejects(MemoryErrorCode::Stale,[&] { (void)archive.bound_source(child,f.store); });
 }
+void current_family_cooldown_rebind_and_old_receipts() {
+    Temp temp;Fixture f;auto archive=SourceArchive::create(temp.path(),config(),limits());
+    StorageIoQueue queue(2,1<<20);
+    const auto save=[&](SourceRef ref) {
+        const auto key=archive.enroll(f.store,ref);auto write=archive.save(queue,f.store,ref,f.staging);
+        write.wait();archive.publish(write,f.store);return key;
+    };
+    const auto root=save(f.ref);const auto child=f.store.branch(f.ref,300);const auto child_key=save(child);
+    const auto independent=f.store.capture(config(),f.rows.data(),17,nullptr,0,0);const auto other=save(independent);
+    const auto grandchild=f.store.branch(child,129);
+    const auto before=f.store.stats();
+    rejects(MemoryErrorCode::Pending,[&] { archive.cool_sources(f.store,&f.ref,1); });
+    CHECK(f.store.stats().charged==before.charged && archive.bound_source(root,f.store)==f.ref);
+    const std::array<SourceRef,3> family{f.ref,grandchild,child};
+    rejects(MemoryErrorCode::Pending,[&] { archive.cool_sources(f.store,family.data(),family.size()); });
+    CHECK(f.store.stats().sources==4 && archive.bound_source(child_key,f.store)==child);
+    const auto grand_key=save(grandchild);
+    auto read=archive.read(root,f.staging);
+    const SourceRecoveryContext current{{},config()};
+    const SourceRecoveryRequest request{f.ref,current,{91,1},128,SourceRecoveryMode::RebuildAsNew,{128,64,192,0}};
+    HostKvStorage prepared_ram(1024);auto preparation=prepare_source_recovery(
+        plan_source_recovery(f.store,descriptor(2),current,request),f.store,current,prepared_ram);
+    auto late=archive.save(queue,f.store,child,f.staging);late.wait();
+    const auto catalog=contents(temp.path()/"catalog"),seal=contents(temp.path()/"seal");
+    const auto disk=archive.stats().charged,r=f.staging.charged_bytes();
+    allocation::calls=0;allocation::fail_at=0;
+    const auto removed=archive.cool_sources(f.store,family.data(),family.size());
+    allocation::fail_at=SIZE_MAX;
+    CHECK(removed==3 && allocation::calls==0 && f.store.stats().sources==1);
+    CHECK(archive.stats().sources==4 && archive.stats().charged==disk && f.staging.charged_bytes()==r);
+    CHECK(contents(temp.path()/"catalog")==catalog && contents(temp.path()/"seal")==seal);
+    CHECK(!archive.bound_source(root,f.store) && !archive.bound_source(child_key,f.store));
+    CHECK(archive.bound_source(other,f.store)==independent && f.store.state(independent).accepted_frontier==17);
+    rejects(MemoryErrorCode::Stale,[&] { preparation.validate(f.store,current); });
+    CHECK(prepared_ram.charged_bytes()==512);
+    rejects(MemoryErrorCode::Stale,[&] { archive.publish(late,f.store); });
+    archive.validate(read);rows_match(read.image(),f.rows);
+    const auto fresh=archive.import_source(read,f.store);
+    auto child_read=archive.read(child_key,f.staging);const auto fresh_child=archive.import_source(child_read,f.store);
+    auto grand_read=archive.read(grand_key,f.staging);const auto fresh_grand=archive.import_source(grand_read,f.store);
+    CHECK(fresh.source.id>grandchild.source.id && fresh.revision==1 && !f.store.state(fresh).parent.source.id);
+    CHECK(!f.store.state(fresh).computed_frontier && !f.store.state(fresh_child).parent.source.id);
+    rejects(MemoryErrorCode::Stale,[&] { archive.publish(late,f.store); });
+    // No resave required: current read-authorized imported data is already
+    // fully persisted, despite old disk ref/revision/parent/computed provenance.
+    const std::array<SourceRef,3> imported{fresh_child,fresh,fresh_grand};
+    {fault::Scope count(fault::Count);CHECK(archive.cool_sources(f.store,imported.data(),imported.size())==3);CHECK(fault::calls==0);}
+    CHECK(archive.cool_sources(f.store,nullptr,0)==0 && f.store.stats().sources==1);
+    CHECK(contents(temp.path()/"catalog")==catalog && contents(temp.path()/"seal")==seal);
+    CHECK(archive.forget(root)==3);
+    rejects(MemoryErrorCode::Stale,[&] { archive.validate(read); });
+    rejects(MemoryErrorCode::Stale,[&] { archive.import_source(read,f.store); });
+    CHECK(archive.stats().sources==1 && archive.bound_source(other,f.store)==independent);
+}
+void cooldown_latest_copy_and_file_failures_are_atomic() {
+    Temp temp;Fixture f;auto archive=SourceArchive::create(temp.path(),config(),limits());
+    const auto key=archive.enroll(f.store,f.ref);StorageIoQueue queue(1,1<<20);
+    const auto save=[&] {auto write=archive.save(queue,f.store,f.ref,f.staging);write.wait();archive.publish(write,f.store);};
+    rejects(MemoryErrorCode::Pending,[&] { archive.cool_sources(f.store,&f.ref,1); });
+    save();f.append();
+    rejects(MemoryErrorCode::Pending,[&] { archive.cool_sources(f.store,&f.ref,1); });
+    save();const auto old=f.ref;f.ref=f.store.append(f.ref,nullptr,0,nullptr,0,513);
+    rejects(MemoryErrorCode::Pending,[&] { archive.cool_sources(f.store,&f.ref,1); });
+    rejects(MemoryErrorCode::Stale,[&] { archive.cool_sources(f.store,&old,1); });
+    save();const auto snapshot=*archive.inspect(0);
+    const auto blob=temp.path()/("blob."+std::to_string(snapshot.object));const auto bytes=contents(blob);
+    const auto charged=f.store.stats().charged;
+    auto verify_unchanged=[&] {
+        CHECK(f.store.stats().charged==charged && archive.bound_source(key,f.store)==f.ref && archive.stats().healthy);
+        std::vector<int32_t> rows(f.rows.size());f.store.read_tokens(f.ref,0,rows.data(),rows.size());CHECK(rows==f.rows);
+    };
+    auto shorter=bytes;shorter.pop_back();replace(blob,shorter);
+    corrupt([&] { archive.cool_sources(f.store,&f.ref,1); });verify_unchanged();replace(blob,bytes);
+    auto damaged=bytes;damaged.at(200)^=1;replace(blob,damaged);
+    corrupt([&] { archive.cool_sources(f.store,&f.ref,1); });verify_unchanged();replace(blob,bytes);
+    const auto held=temp.root/"held-blob";std::filesystem::rename(blob,held);
+    io_failure([&] { archive.cool_sources(f.store,&f.ref,1); });verify_unchanged();std::filesystem::rename(held,blob);
+    const std::array<SourceRef,2> duplicate{f.ref,f.ref};
+    rejects(MemoryErrorCode::InvalidPlan,[&] { archive.cool_sources(f.store,duplicate.data(),duplicate.size()); });verify_unchanged();
+    rejects(MemoryErrorCode::InvalidPlan,[&] { archive.cool_sources(f.store,nullptr,1); });verify_unchanged();
+    Fixture foreign;
+    rejects(MemoryErrorCode::Stale,[&] { archive.cool_sources(f.store,&foreign.ref,1); });verify_unchanged();
+    CHECK(archive.cool_sources(f.store,&f.ref,1)==1 && f.store.stats().buffer_bytes==0 && archive.stats().sources==1);
+    auto current=archive.read(key,f.staging);const auto imported=archive.import_source(current,f.store);
+    CHECK(imported.revision==1 && current.image().origin().ref.revision==3);
+    CHECK(archive.cool_sources(f.store,&imported,1)==1 && f.store.stats().sources==0);
+}
 }
 int main(int argc, char ** argv) {
     if (argc == 3) { restart_child(argv[1],argv[2]); return 0; }
@@ -635,5 +723,7 @@ int main(int argc, char ** argv) {
     shared_metadata_and_cleanup_retry();
     import_receipt_version_and_family(); import_allocation_rollback(); separate_exec_restart();
     owner_queries_and_structural_queue_limit();
+    current_family_cooldown_rebind_and_old_receipts();
+    cooldown_latest_copy_and_file_failures_are_atomic();
     std::puts("source archive lifecycle, quotas, durable authority and failure boundaries PASS");
 }

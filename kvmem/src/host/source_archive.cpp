@@ -102,6 +102,7 @@ struct SourceArchiveState {
         SourceState origin;
         const SourceJournalStore * bound_store = nullptr;
         SessionIdentity bound_source;
+        uint64_t bound_snapshot_revision = 0; // runtime binding clock, never serialized
     };
     struct Object {
         uint64_t id = 0, bytes = 0, source = 0, hash = 0;
@@ -172,6 +173,21 @@ struct SourceArchiveState {
         throw MemoryError(MemoryErrorCode::Stale, "source disappeared before archive publication");
     }
     void copy_entries() { std::copy_n(entries, limits.max_sources, scratch); }
+    void verify_published(const Entry & entry) const {
+        const auto name = blob_name(entry.blob);
+        File file(open_file(directory.fd,name.c_str(),O_RDONLY));
+        if (file_size(file.fd) != entry.bytes) throw SnapshotCorrupt("cooldown archive size changed");
+        std::array<uint8_t,8192> chunk{};
+        uint64_t remaining=entry.bytes, hash=14695981039346656037ULL;
+        while (remaining) {
+            const auto count=size_t(std::min<uint64_t>(remaining,chunk.size()));
+            read_all(file.fd,chunk.data(),count);
+            for (size_t i=0;i<count;++i) hash=(hash^chunk[i])*1099511628211ULL;
+            remaining-=count;
+        }
+        if (hash != entry.hash) throw SnapshotCorrupt("cooldown archive checksum changed");
+        close_file(file);
+    }
     bool referenced(uint64_t id) const {
         for (size_t i = 0; i < limits.max_sources; ++i) if (entries[i].blob == id) return true;
         return false;
@@ -433,6 +449,7 @@ void SourceArchive::publish(const SourceArchiveWrite & write, const SourceJourna
         throw MemoryError(MemoryErrorCode::Stale, "archive completion would regress saved version");
     s.copy_entries(); auto & next = s.scratch[index];
     next.blob = object.id; next.bytes = object.bytes; next.hash = object.hash; next.origin = object.origin;
+    next.bound_snapshot_revision = object.origin.ref.revision;
     s.commit(s.next_source, s.next_blob);
 }
 SourceArchiveRead SourceArchive::read(SourceArchiveKey key, HostKvStorage & staging) {
@@ -468,7 +485,57 @@ SourceRef SourceArchive::import_source(const SourceArchiveRead & read, SourceJou
     try { validate(read); }
     catch (...) { store.forget(imported); throw; }
     entry.bound_store = &store; entry.bound_source = imported.source;
+    // Imported token/event data is exactly the current authorized image, while
+    // its fresh RAM revision/parent/computed clock deliberately starts anew.
+    entry.bound_snapshot_revision = imported.revision;
     return imported;
+}
+size_t SourceArchive::cool_sources(SourceJournalStore & store, const SourceRef * sources, size_t count) {
+    auto & s=*state_;s.check();
+    if ((count && !sources) || count>s.limits.max_sources)
+        throw MemoryError(MemoryErrorCode::InvalidPlan,"invalid source cooldown selection");
+    s.copy_entries();
+    for (size_t i=0;i<count;++i) {
+        const auto current=store.state(sources[i]);
+        const auto slot=s.binding(store,sources[i].source);
+        if (slot==absent)
+            throw MemoryError(MemoryErrorCode::Pending,"cooldown source is not archived");
+        const auto & entry=s.entries[slot];auto & next=s.scratch[slot];
+        if (!next.bound_store)
+            throw MemoryError(MemoryErrorCode::InvalidPlan,"duplicate source cooldown selection");
+        if (!entry.blob || entry.bound_snapshot_revision!=sources[i].revision ||
+            entry.origin.accepted_frontier!=current.accepted_frontier || entry.origin.events!=current.events ||
+            current.configuration!=s.configuration)
+            throw MemoryError(MemoryErrorCode::Pending,"cooldown needs a current complete published source");
+        s.verify_published(entry); // no R copy; bounded stack streaming, before mutation
+        next.bound_store=nullptr;next.bound_source={};next.bound_snapshot_revision=0;
+    }
+    const auto selected=[&](SessionIdentity identity) {
+        const auto slot=s.binding(store,identity);
+        return slot!=absent && !s.scratch[slot].bound_store;
+    };
+    // Immediate-parent closure implies transitive closure in the RAM forest.
+    // Keep live parents until their children have been erased, not dangling refs.
+    for (size_t slot=0;slot<store.slots();++slot) if (const auto source=store.inspect(slot))
+        if (source->parent.source.id && selected(source->parent.source) && !selected(source->ref.source))
+            throw MemoryError(MemoryErrorCode::Pending,"cooldown must save and select every RAM descendant");
+    // Runtime-only publication: catalog/seal/blob identities never change.
+    s.entries_storage.swap(s.scratch_storage);std::swap(s.entries,s.scratch);
+    size_t removed=0;
+    for (;;) {
+        size_t leaf=absent;
+        for (size_t slot=0;slot<s.limits.max_sources;++slot)
+            if (s.scratch[slot].bound_store==&store && !s.entries[slot].bound_store &&
+                (leaf==absent || s.scratch[slot].bound_source.id>s.scratch[leaf].bound_source.id)) leaf=slot;
+        if (leaf==absent) break;
+        auto & old=s.scratch[leaf];
+        // Within THIS live journal, IDs are monotonic and parents predate their
+        // children. Descending IDs therefore erase leaves first. This is not a
+        // cross-process/durable clock comparison. All revisions were preflighted.
+        removed+=store.forget({old.bound_source,old.bound_snapshot_revision});
+        old.bound_store=nullptr;
+    }
+    return removed;
 }
 std::optional<SourceArchiveSnapshot> SourceArchive::inspect(size_t slot) const {
     auto & s = *state_; s.check();

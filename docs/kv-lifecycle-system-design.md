@@ -1,6 +1,6 @@
 # 分离式 KV 生命周期管理系统设计与实施计划
 
-日期：2026-10-31。状态：第一阶段基线与契约、第二阶段首批支持档位已落实；第三阶段 C1/C2 源记录、C3 规范前缀新域重建、C4 进程内源家族/原生别名撤销及 C5 首批 checkpoint owner 总预算已通过各自功能检查。源镜像、C6 持久源归档及 C7 原子源导入/跨进程续存组件已提供独立验证；[C8](kv-lifecycle-native-archive.md) 已接通 Engine 归档入口、跨重启规范前缀推理和统一持久/在线家族遗忘，17 个实际模型进程已通过。[C9](kv-lifecycle-source-replay.md) 已提供固定窗口内完整 32K 前缀的新域分块重放证据；精确旧轨迹重放、源冷却/同 owner 导回、checkpoint 持久化及完整版本闭环未完成。TSan、完整生产及其他配置仍有未完成门槛，完整状态见 [六阶段进度](kv-lifecycle-progress.md)。
+日期：2026-10-31。状态：第一阶段基线与契约、第二阶段首批支持档位已落实；第三阶段 C1/C2 源记录、C3 规范前缀新域重建、C4 进程内源家族/原生别名撤销及 C5 首批 checkpoint owner 总预算已通过各自功能检查。源镜像、C6 持久源归档及 C7 原子源导入/跨进程续存组件已提供独立验证；[C8](kv-lifecycle-native-archive.md) 已接通 Engine 归档入口、跨重启规范前缀推理和统一持久/在线家族遗忘，17 个实际模型进程已通过。[C9](kv-lifecycle-source-replay.md) 已提供固定窗口内完整 32K 前缀的新域分块重放证据；[C10](kv-lifecycle-source-cool.md) 已补齐保留当前经校验归档的显式 RAM/native 家族转冷与同 owner 重新导入，10 项新增模型进程和当前 14+17+7 项回归通过；精确旧轨迹重放、checkpoint 持久化、自动源保留策略及完整版本闭环未完成。TSan、完整生产及其他配置仍有未完成门槛，完整状态见 [六阶段进度](kv-lifecycle-progress.md)。
 
 第一阶段已确定 NInfer 为主后端，固定版本、模型身份、首批支持档位并完成主机契约检查，见 [第一阶段基线](kv-lifecycle-baseline.md)。新基线已有公共 MemoryStamp、BlockDescriptor、CheckpointIdentity 和 HostKvStorage，后续在这些类型上扩展，不重复建设。下文保留原总体设计及其边界。
 
