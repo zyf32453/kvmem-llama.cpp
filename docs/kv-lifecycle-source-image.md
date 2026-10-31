@@ -53,9 +53,13 @@ R 不包含固定 SourceImage 对象、HostKvStorage 的 account/control 对象�
 
 以下是下一批的接口约束，尚未实现，不能据此宣称已经可跨重启恢复：
 
+接线先冻结为当前 NInfer/Linux、单 Engine owner、文本 token/event、显式新域重建。后台传输复用 `StorageIoQueue` 的 jobs/bytes 上限及完成票据，不建立第二个线程池；完成票据只证明 I/O 结束，不直接发布归档资格。现有 `SpillFile` 的合同明确为 ephemeral/process-local、无 crash/restart 保证，不能把临时 extent 和 checksum 升格为持久恢复权威。
+
+持久清单使用自己的稳定 namespace、单调 ID/revision 和已提交 high-water mark；映射到现有 RAM 源目录的当前引用。删除记录后不复用旧 durable ID，缺失记录即拒绝授权，避免新增无限增长的逐块墓碑表。清单打开失败不能通过扫描 blob 自动重建资格；文件扫描仅用于核对用量和清理孤立文件。读取 lease、排队写入和临时文件均应在实际所有权退出前保持相应 R/D 计费，磁盘额度不足不自动永久遗忘源。
+
 1. 在现有 owner 上建立有界的持久归档清单和 durable identity 映射。它记录源 lineage、提交序号、配置、内容摘要、归档位置及当前遗忘/版本 fence。进程内 SourceRef 不充当 durable key；不另建与现有历史目录争夺权威的第二套 KV 目录。
-2. owner 发出带当前 revision/fence 的保存任务，任务持有实际计费的 SourceImage。后台仅写未发布对象并返回完成回执；完成回执进入 owner 的有界交接队列，worker 不自行修改源、退休状态或归档资格。
-3. owner 在提交清单前重验任务身份、当前 revision、配置与持久遗忘 fence。过期、已遗忘、取消或不完整写入只成为待清理的孤立对象，不能发布。清单更新与进程重启后的恢复次序必须有明确的原子提交和持久化保证，不能把 rename 等同于所有平台上的掉电保证。
+2. owner 从当前源发出带 revision/fence 的保存任务，任务持有实际计费的 SourceImage。工单须有 owner 产生的许可；解码镜像里的 origin 只是来源注释，不能因它的 ID 与当前源相同就冒充保存权限。后台仅写未发布对象并返回完成回执；完成回执进入 owner 的有界交接队列，worker 不自行修改源、退休状态或归档资格。
+3. owner 在提交清单前重验任务身份、内容版本、配置与持久遗忘 fence。源数据快照需要区分“同一源的追加”和“身份/内容失效”：已有 SourceJournalStore 保证 accepted token 前缀不可改写，因此同一 owner/source、配置和遗忘 fence 均有效时，较早的不可变前缀可以作为明确的旧版快照发布；不能因每次末尾追加就永久饿死后台保存。新任务不得用较旧版本覆盖较新的已发布快照；过期身份、已遗忘、取消或不完整写入只成为待清理的孤立对象。这个规则不放宽现有 C3 的当前 SourceRef 准入校验，也不授权旧 checkpoint；恢复方必须明确知道快照的保存 frontier，不能冒充最新接受状态。清单更新与进程重启后的恢复次序必须有明确的原子提交和持久化保证，不能把 rename 等同于所有平台上的掉电保证。
 4. ForgetSource 先持久关闭家族的后续发布和恢复资格，再撤销在线别名及清理归档；故障时宁可留下不可恢复的待清理文件，也不能留下仍可授权恢复的旧清单。遗忘 fence 不能因对象文件删除、目录槽位复用或重启而倒退。
 5. 导入前先查询权威清单及当前配置/遗忘/退休规则，再用本 codec 解析数据；发布前再次核对。显式源重建取得新身份和正常资源准入，不能把旧 origin 直接装回 repository，不能把 computed frontier 当作已有 KV 覆盖证明。派生 checkpoint 恢复仍需要自己的完整覆盖与 MemoryStamp 校验。
 6. 缺失/损坏权威清单、旧清单回滚、晚到 writer、读取中遗忘、配置变化及清单提交失败均须明确拒绝并回收暂存。单个镜像通过 checksum 不允许绕过这些条件。普通内存压力仍只回收允许的副本或退休历史，不自动永久遗忘原始恢复依据。
@@ -68,7 +72,9 @@ R 不包含固定 SourceImage 对象、HostKvStorage 的 account/control 对象�
 
 损坏测试对 2,274-byte 样本逐字节翻转，以及逐长度截断；另构造 11 类重算 footer 后仍不合法的语义镜像。故障注入逐一中断读取、直接导出和镜像导出的 33 个传输回调位置，并枚举 prepare 与 decode 的实际内存分配失败点，检查旧源和真实计费保持一致。
 
-执行结果及源码/二进制身份见 [本批摘要](experiments/2026-10-31-lifecycle-source-image-offline/summary.json)。本地 Windows/GCC Debug 的结果只归属公共组件和主机契约；未运行这批代码的 Linux sanitizer、CUDA、真实模型、掉电恢复、性能或 Agent 检查。SSH 恢复后先接回原 C5 任务并取得终态，再安排本组件的远程 sanitizer 及持久清单接线。
+执行结果及源码/二进制身份见 [本批摘要](experiments/2026-10-31-lifecycle-source-image-offline/summary.json)。本地 Windows/GCC Debug 的结果只归属公共组件和主机契约。SSH 恢复后，另在固定构建镜像的 Linux/GCC 13.3、Python 3.11.18 下对整个公共 kvmem host library 和 source_image_test 启用 ASan/UBSan；启用 detect_leaks 后的一项组件目标全部通过，实测 0.28 秒。已核对动态链接包含 libasan.so.8 与 libubsan.so.1，所有 102 项输入与 Windows 冻结源码逐字节一致；两种环境的故障注入数量一致。
+
+新增 Linux 原始日志、JUnit、运行脚本与 CMake 配置保存在 `artifacts/source-image-offline/linux-evidence.tar.gz`，SHA-256 为 `ba3191f19801173697b516373fb9c05cd31efaf708fe97aa2b97ecbfb6ade1eb`。输入清单保留初次 Windows 冻结时的状态；后续资格以执行摘要为准。尚未运行本组件的 CUDA、真实模型、掉电恢复、性能或 Agent 检查，尚无 Engine/持久清单接线；本次 sanitizer 通过不代替 C5 的预算或模型验收。
 
 本批最终重新构建并运行 23 项主机契约，全部通过，CTest 总耗时 31.52 秒。prepare/decode 各覆盖 4 个真实分配失败点，三条传输路径共覆盖 99 次回调故障。原始证据保存在 `artifacts/source-image-offline/evidence.zip`，SHA-256 为 `550bbfcb8e6ca9a6e5f5b8143b2b3c9e34f485b420e90f3656c8a5f6df01222a`；[离线组件清单](contracts/kv-lifecycle-source-image-offline-v1.json) 冻结 102 项主机/core 源输入，未冻结或验收新的原生 GPU tree。源码 hash 按实际输入字节计算；Git 换行转换可能改变 checkout 字节，逐字节复现应使用证据包内的冻结副本。
 

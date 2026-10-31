@@ -191,7 +191,6 @@
     "contains": "frozen host/core source, manifest, commands, toolchain, raw build/CTest/JUnit/configuration logs; no model evidence"
   },
   "remaining": [
-    "Linux sanitizer",
     "CUDA/model",
     "power-loss recovery",
     "persistent manifest",
@@ -200,5 +199,33 @@
     "long-run/performance/Agent",
     "complete_stage_C_or_production_GC"
   ],
-  "resume": "Wait for user SSH-restored notification. Observe the existing C5 task before any restart, qualify it separately, then integrate persistent authority/fences and run remote sanitizer/model checks as appropriate."
+  "resume": "SSH restored; original C5 container exit=1 with build-result filesystem I/O error, no recorded OOM. Same candidate is rebuilding in a persistent isolated directory; source-image sanitizer success does not qualify C5 or GPU.",
+  "linux_sanitizers": {
+    "passed": true,
+    "compiler": "GNU 13.3.0",
+    "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+    "tests": 1,
+    "failures": 0,
+    "seconds": 0.28,
+    "binary_sha256": "e8ebea6386277d73c67f0694d66e74a372a808c739557cc0ce5448f5c91da1a1",
+    "source_pins_verified": 102,
+    "input_evidence_sha256": "550bbfcb8e6ca9a6e5f5b8143b2b3c9e34f485b420e90f3656c8a5f6df01222a",
+    "instrumented": "entire public kvmem host library and source_image_test",
+    "environment": {
+      "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1",
+      "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"
+    },
+    "linkage_verified": [
+      "libasan.so.8",
+      "libubsan.so.1"
+    ],
+    "scope": "source image host lifetime/corruption; no Engine integration, CUDA, durable restore or model claim",
+    "container_exit": 0,
+    "OOMKilled": false,
+    "evidence": {
+      "local_path": "artifacts/source-image-offline/linux-evidence.tar.gz",
+      "sha256": "ba3191f19801173697b516373fb9c05cd31efaf708fe97aa2b97ecbfb6ade1eb",
+      "bytes": 5944
+    }
+  }
 }
