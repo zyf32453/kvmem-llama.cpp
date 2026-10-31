@@ -1,0 +1,1233 @@
+{
+  "date": "2026-10-31",
+  "stage": "C3_native_canonical_source_rebuild",
+  "status": "frozen_scope_functionally_qualified",
+  "full_goal_complete": false,
+  "stage_C_complete": false,
+  "production_qualified": false,
+  "based_on_commit": "198cfce24648c1475e18e4831eeee90524b04060",
+  "primary_backend": "ninfer",
+  "native_patched_tree": "d508d9b98aff4606f415777344d2f6ad12182df8",
+  "native_patch_count": 28,
+  "candidate_manifest": {
+    "path": "docs/contracts/kv-lifecycle-native-recovery-candidate-v1.json",
+    "sha256": "56f4b05faf4ba1ac0302001463aca4c886bf68b4f05a9158acc9c995242a5e05",
+    "pinned_source_files": 104
+  },
+  "changes": [
+    "Reuse existing source store, fresh native window identity allocator, Program reservation and Engine execution; no parallel allocator/history catalog/worker.",
+    "Explicit source-only new-domain canonical rebuild remains possible after old KV window eviction; no exact or sparse state replay fallback.",
+    "Separate real R staging, independent S branch charge and ordinary prepared-input workspace; strict source revision/local-forget fences and complete capacity check.",
+    "Per-request GenerationResult.accepted_source and parent/prefix ancestry; stable receipts include accepted but only partly computed cancelled input.",
+    "First prefill branches source under fresh identity; incomplete recovery cannot enter retained native history; whole successful Program commit refunds staging.",
+    "Public in-tree C++ Engine methods and opt-in recovery CLI/observability; no HTTP or external SDK."
+  ],
+  "checks": {
+    "source": {
+      "status": "passed",
+      "count": 104,
+      "report_sha256": "fe292c2492c8873a90db04acbc6a134a9d1a388b97630975a3b4da360f79d6e0"
+    },
+    "windows_host": {
+      "status": "passed_reused_unchanged_core_sources",
+      "count": 22,
+      "report_sha256": "47fccdc0a4b7db8d5dc30740c25d762477b494536464297aa83d96c1d0975e89",
+      "original_native_tree": "35e37af644d60325317e2b749cbd2d3c06afb544",
+      "reason": "Only native CUDA options defining-header dependency changed; every frozen kvmem/ and tests/ file is byte-identical. Not a rerun of 22 tests on final native tree.",
+      "compiler": "MinGW GCC 16.2",
+      "build_type": "Debug",
+      "results": [
+        {
+          "name": "checkpoint_policy_test",
+          "seconds": 0.0572128
+        },
+        {
+          "name": "checkpoint_image_test",
+          "seconds": 0.0434011
+        },
+        {
+          "name": "historical_gc_ninfer_core_test",
+          "seconds": 0.0732492
+        },
+        {
+          "name": "historical_kv_boundary_mailbox_test",
+          "seconds": 15.5746
+        },
+        {
+          "name": "historical_kv_commit_conditions_test",
+          "seconds": 0.0564813
+        },
+        {
+          "name": "historical_kv_range_lock_test",
+          "seconds": 0.0545157
+        },
+        {
+          "name": "historical_kv_witness_lifecycle_test",
+          "seconds": 0.0572585
+        },
+        {
+          "name": "historical_kv_score_evidence_test",
+          "seconds": 0.0899067
+        },
+        {
+          "name": "historical_kv_auxiliary_budget_test",
+          "seconds": 0.0694511
+        },
+        {
+          "name": "historical_kv_owner_budget_test",
+          "seconds": 0.0618053
+        },
+        {
+          "name": "historical_kv_service_health_test",
+          "seconds": 0.054817
+        },
+        {
+          "name": "memory_contract_test",
+          "seconds": 0.18134
+        },
+        {
+          "name": "source_journal_test",
+          "seconds": 0.05462
+        },
+        {
+          "name": "source_recovery_test",
+          "seconds": 0.0576731
+        },
+        {
+          "name": "native_kv_payload_test",
+          "seconds": 0.103085
+        },
+        {
+          "name": "host_kv_storage_test",
+          "seconds": 0.0576991
+        },
+        {
+          "name": "spill_io_test",
+          "seconds": 0.0734509
+        },
+        {
+          "name": "tiered_kv_storage_test",
+          "seconds": 0.114413
+        },
+        {
+          "name": "native_residency_test",
+          "seconds": 0.0693225
+        },
+        {
+          "name": "kv_content_test",
+          "seconds": 0.0590808
+        },
+        {
+          "name": "prefix_checkpoint_test",
+          "seconds": 0.0345135
+        },
+        {
+          "name": "mean_key_retrieval_test",
+          "seconds": 0.0633524
+        }
+      ]
+    },
+    "native": {
+      "status": "passed",
+      "count": 9,
+      "results": [
+        {
+          "name": "ninfer_cli_options_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_serve_options_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_kv_capacity_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_context_cache_defaults_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_unique_strings_test",
+          "exit": 0
+        },
+        {
+          "name": "ninfer_qwen3_5_frontend_test",
+          "exit": 0
+        },
+        {
+          "name": "source_journal_test",
+          "exit": 0
+        },
+        {
+          "name": "source_recovery_test",
+          "exit": 0
+        },
+        {
+          "name": "public_include_boundaries",
+          "exit": 0
+        }
+      ],
+      "binaries_sha256": {
+        "build-native/apps/ninfer-serve": "d446ffdb2ef5e2b474fc8210442e4141b11424402d2d4b2ff6ee3f8bcce21094",
+        "build-native/tests/ninfer_memory_policy_tests": "f43700123ca937c463fbc7e7f4f1003d83a41b62dc2c0d83f306d9c450a09ec4",
+        "build-native/tests/ninfer_engine_source_recovery_real_test": "4b4167ce3ffad6dd110e8ee650665290c09027bb65857dc2cc6f1d6a7ce4f46c"
+      },
+      "python": "3.11.18",
+      "compiler": "GCC 13.3",
+      "cuda": "13.2",
+      "architecture": "sm_86",
+      "build_type": "Release",
+      "default_build_parallelism": "-j"
+    },
+    "linux_core_sanitizers": {
+      "status": "passed",
+      "count": 3,
+      "tests": [
+        {
+          "name": "memory_contract_test",
+          "classname": "memory_contract_test",
+          "time": "0.164282",
+          "status": "run"
+        },
+        {
+          "name": "source_journal_test",
+          "classname": "source_journal_test",
+          "time": "0.0139857",
+          "status": "run"
+        },
+        {
+          "name": "source_recovery_test",
+          "classname": "source_recovery_test",
+          "time": "0.0159441",
+          "status": "run"
+        }
+      ],
+      "linked_libraries": [
+        "libasan.so.8",
+        "libubsan.so.1"
+      ],
+      "sanitizers": [
+        "ASan",
+        "UBSan",
+        "LeakSanitizer"
+      ],
+      "compiler": "GCC 13.3",
+      "build_type": "Debug",
+      "binary_sha256": {
+        "source_recovery_test": "3a42e6374ff395b46b4a52061392870e8a6acb57794ff0eebd6a8e2c99a122ab",
+        "source_journal_test": "b7c5d5211a5ec80310b8ca45e12590d9486f8d262d3fd73c90fa8a3017702f27",
+        "memory_contract_test": "b046a530e092ab5a04b910841149357a73723321620c0aaf48eb355333b8e819"
+      },
+      "scope": "Core host tests only; no TSan or GPU sanitizer result"
+    },
+    "real_model": {
+      "status": "passed",
+      "count": 4,
+      "binary_sha256": "4b4167ce3ffad6dd110e8ee650665290c09027bb65857dc2cc6f1d6a7ce4f46c",
+      "model": {
+        "name": "Qwen3.8-27B-GSQ-RCO-IQ3_S NInfer v3",
+        "bytes": 15017456896,
+        "sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+        "remote_path": "/home/yifan/models/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
+        "hash_observation": {
+          "date": "2026-10-31",
+          "host": "yifan@100.118.87.22",
+          "file_unchanged_during_hash": true
+        }
+      },
+      "image_id": "sha256:1362bdc619e69d3f17e7320fc7a2d201b1ee125766125974f4ee8c6b72672753",
+      "gpu": "RTX 3080 Ti Laptop 16 GiB",
+      "driver": "596.08",
+      "workload": "canonical raw-token new-domain rebuild; no persisted/sparse restore, performance or Agent claim",
+      "options": {
+        "input_tokens": 32768,
+        "rebuilt_prefix_tokens": 1024,
+        "output_tokens": 8,
+        "page_tokens": 64,
+        "kv_dtype": "rk4v4",
+        "context": 65536,
+        "B_tokens": 2048,
+        "generation_reserve_tokens": 512,
+        "H_mib": 96,
+        "S_mib": 16,
+        "R_bytes": 8192,
+        "prefill_chunk": 512,
+        "temperature": 0,
+        "seed": 42,
+        "context_cache": false,
+        "query": "meanq_cosine_max",
+        "graph_alpha": 0,
+        "lrfu": false
+      },
+      "cases": [
+        {
+          "config": "lru-none",
+          "passed": true,
+          "terminal_state": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-31T00:31:57.253802472Z",
+            "FinishedAt": "2026-10-31T00:33:08.619651885Z"
+          },
+          "result": {
+            "admission_reserve_rejected": true,
+            "cancel_computed": 512,
+            "cancel_processed": 512,
+            "cancelled_source_id": 2,
+            "canonical_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "final_source_records": 12,
+            "first_token_stop": true,
+            "fresh_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "history_evictions": 6,
+            "input_tokens": 32768,
+            "mtp": false,
+            "original_speculative_rounds": 0,
+            "rebuild_prefix": 1024,
+            "rebuilt_source_id": 3,
+            "rebuilt_speculative_rounds": 0,
+            "redundancy": false,
+            "retired_pages": 476,
+            "source_id": 1,
+            "source_only_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "source_only_speculative_rounds": 0,
+            "status": "passed"
+          },
+          "reclaimed_prefix_spans": [
+            {
+              "begin": 512,
+              "count": 64
+            },
+            {
+              "begin": 576,
+              "count": 64
+            },
+            {
+              "begin": 640,
+              "count": 64
+            },
+            {
+              "begin": 704,
+              "count": 64
+            },
+            {
+              "begin": 768,
+              "count": 64
+            },
+            {
+              "begin": 832,
+              "count": 64
+            },
+            {
+              "begin": 896,
+              "count": 64
+            },
+            {
+              "begin": 960,
+              "count": 64
+            },
+            {
+              "begin": 448,
+              "count": 64
+            },
+            {
+              "begin": 320,
+              "count": 64
+            },
+            {
+              "begin": 256,
+              "count": 64
+            },
+            {
+              "begin": 192,
+              "count": 64
+            },
+            {
+              "begin": 128,
+              "count": 64
+            },
+            {
+              "begin": 384,
+              "count": 64
+            },
+            {
+              "begin": 64,
+              "count": 64
+            }
+          ],
+          "gc_summaries": [
+            {
+              "committed": 20,
+              "reclaimed": 20
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            }
+          ],
+          "rebuild_begins": [
+            [
+              "1",
+              "2",
+              "7",
+              "1920"
+            ],
+            [
+              "1",
+              "3",
+              "8",
+              "1024"
+            ],
+            [
+              "1",
+              "5",
+              "9",
+              "1024"
+            ],
+            [
+              "1",
+              "12",
+              "16",
+              "1024"
+            ]
+          ],
+          "rebuild_completes": [
+            [
+              "3",
+              "8",
+              "1025",
+              "1024"
+            ],
+            [
+              "5",
+              "9",
+              "1025",
+              "1024"
+            ],
+            [
+              "12",
+              "16",
+              "1025",
+              "1024"
+            ]
+          ]
+        },
+        {
+          "config": "lru-mtp4",
+          "passed": true,
+          "terminal_state": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-31T00:33:09.545225382Z",
+            "FinishedAt": "2026-10-31T00:34:22.245636326Z"
+          },
+          "result": {
+            "admission_reserve_rejected": true,
+            "cancel_computed": 512,
+            "cancel_processed": 512,
+            "cancelled_source_id": 2,
+            "canonical_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "final_source_records": 12,
+            "first_token_stop": true,
+            "fresh_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "history_evictions": 6,
+            "input_tokens": 32768,
+            "mtp": true,
+            "original_speculative_rounds": 2,
+            "rebuild_prefix": 1024,
+            "rebuilt_source_id": 3,
+            "rebuilt_speculative_rounds": 2,
+            "redundancy": false,
+            "retired_pages": 480,
+            "source_id": 1,
+            "source_only_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "source_only_speculative_rounds": 2,
+            "status": "passed"
+          },
+          "reclaimed_prefix_spans": [
+            {
+              "begin": 512,
+              "count": 64
+            },
+            {
+              "begin": 576,
+              "count": 64
+            },
+            {
+              "begin": 640,
+              "count": 64
+            },
+            {
+              "begin": 704,
+              "count": 64
+            },
+            {
+              "begin": 768,
+              "count": 64
+            },
+            {
+              "begin": 832,
+              "count": 64
+            },
+            {
+              "begin": 896,
+              "count": 64
+            },
+            {
+              "begin": 960,
+              "count": 64
+            },
+            {
+              "begin": 448,
+              "count": 64
+            },
+            {
+              "begin": 320,
+              "count": 64
+            },
+            {
+              "begin": 256,
+              "count": 64
+            },
+            {
+              "begin": 192,
+              "count": 64
+            },
+            {
+              "begin": 128,
+              "count": 64
+            },
+            {
+              "begin": 384,
+              "count": 64
+            },
+            {
+              "begin": 64,
+              "count": 64
+            }
+          ],
+          "gc_summaries": [
+            {
+              "committed": 480,
+              "reclaimed": 480
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            }
+          ],
+          "rebuild_begins": [
+            [
+              "1",
+              "2",
+              "7",
+              "1920"
+            ],
+            [
+              "1",
+              "3",
+              "8",
+              "1024"
+            ],
+            [
+              "1",
+              "5",
+              "9",
+              "1024"
+            ],
+            [
+              "1",
+              "12",
+              "16",
+              "1024"
+            ]
+          ],
+          "rebuild_completes": [
+            [
+              "3",
+              "8",
+              "1025",
+              "1024"
+            ],
+            [
+              "5",
+              "9",
+              "1025",
+              "1024"
+            ],
+            [
+              "12",
+              "16",
+              "1025",
+              "1024"
+            ]
+          ]
+        },
+        {
+          "config": "redundancy-none",
+          "passed": true,
+          "terminal_state": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-31T00:34:22.921895488Z",
+            "FinishedAt": "2026-10-31T00:35:36.107470312Z"
+          },
+          "result": {
+            "admission_reserve_rejected": true,
+            "cancel_computed": 512,
+            "cancel_processed": 512,
+            "cancelled_source_id": 2,
+            "canonical_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "final_source_records": 12,
+            "first_token_stop": true,
+            "fresh_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "history_evictions": 6,
+            "input_tokens": 32768,
+            "mtp": false,
+            "original_speculative_rounds": 0,
+            "rebuild_prefix": 1024,
+            "rebuilt_source_id": 3,
+            "rebuilt_speculative_rounds": 0,
+            "redundancy": true,
+            "retired_pages": 476,
+            "source_id": 1,
+            "source_only_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "source_only_speculative_rounds": 0,
+            "status": "passed"
+          },
+          "reclaimed_prefix_spans": [
+            {
+              "begin": 512,
+              "count": 64
+            },
+            {
+              "begin": 576,
+              "count": 64
+            },
+            {
+              "begin": 640,
+              "count": 64
+            },
+            {
+              "begin": 704,
+              "count": 64
+            },
+            {
+              "begin": 768,
+              "count": 64
+            },
+            {
+              "begin": 832,
+              "count": 64
+            },
+            {
+              "begin": 896,
+              "count": 64
+            },
+            {
+              "begin": 960,
+              "count": 64
+            },
+            {
+              "begin": 448,
+              "count": 64
+            },
+            {
+              "begin": 320,
+              "count": 64
+            },
+            {
+              "begin": 256,
+              "count": 64
+            },
+            {
+              "begin": 192,
+              "count": 64
+            },
+            {
+              "begin": 128,
+              "count": 64
+            },
+            {
+              "begin": 384,
+              "count": 64
+            },
+            {
+              "begin": 64,
+              "count": 64
+            }
+          ],
+          "gc_summaries": [
+            {
+              "committed": 20,
+              "reclaimed": 20
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            }
+          ],
+          "rebuild_begins": [
+            [
+              "1",
+              "2",
+              "7",
+              "1920"
+            ],
+            [
+              "1",
+              "3",
+              "8",
+              "1024"
+            ],
+            [
+              "1",
+              "5",
+              "9",
+              "1024"
+            ],
+            [
+              "1",
+              "12",
+              "16",
+              "1024"
+            ]
+          ],
+          "rebuild_completes": [
+            [
+              "3",
+              "8",
+              "1025",
+              "1024"
+            ],
+            [
+              "5",
+              "9",
+              "1025",
+              "1024"
+            ],
+            [
+              "12",
+              "16",
+              "1025",
+              "1024"
+            ]
+          ]
+        },
+        {
+          "config": "redundancy-mtp4",
+          "passed": true,
+          "terminal_state": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-31T00:35:37.492629278Z",
+            "FinishedAt": "2026-10-31T00:36:51.758045339Z"
+          },
+          "result": {
+            "admission_reserve_rejected": true,
+            "cancel_computed": 512,
+            "cancel_processed": 512,
+            "cancelled_source_id": 2,
+            "canonical_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "final_source_records": 12,
+            "first_token_stop": true,
+            "fresh_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "history_evictions": 6,
+            "input_tokens": 32768,
+            "mtp": true,
+            "original_speculative_rounds": 2,
+            "rebuild_prefix": 1024,
+            "rebuilt_source_id": 3,
+            "rebuilt_speculative_rounds": 2,
+            "redundancy": true,
+            "retired_pages": 479,
+            "source_id": 1,
+            "source_only_output_ids": [
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453,
+              13453
+            ],
+            "source_only_speculative_rounds": 2,
+            "status": "passed"
+          },
+          "reclaimed_prefix_spans": [
+            {
+              "begin": 512,
+              "count": 64
+            },
+            {
+              "begin": 576,
+              "count": 64
+            },
+            {
+              "begin": 640,
+              "count": 64
+            },
+            {
+              "begin": 704,
+              "count": 64
+            },
+            {
+              "begin": 768,
+              "count": 64
+            },
+            {
+              "begin": 832,
+              "count": 64
+            },
+            {
+              "begin": 896,
+              "count": 64
+            },
+            {
+              "begin": 960,
+              "count": 64
+            },
+            {
+              "begin": 448,
+              "count": 64
+            },
+            {
+              "begin": 320,
+              "count": 64
+            },
+            {
+              "begin": 256,
+              "count": 64
+            },
+            {
+              "begin": 192,
+              "count": 64
+            },
+            {
+              "begin": 128,
+              "count": 64
+            },
+            {
+              "begin": 384,
+              "count": 64
+            },
+            {
+              "begin": 64,
+              "count": 64
+            }
+          ],
+          "gc_summaries": [
+            {
+              "committed": 479,
+              "reclaimed": 479
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            },
+            {
+              "committed": 0,
+              "reclaimed": 0
+            }
+          ],
+          "rebuild_begins": [
+            [
+              "1",
+              "2",
+              "7",
+              "1920"
+            ],
+            [
+              "1",
+              "3",
+              "8",
+              "1024"
+            ],
+            [
+              "1",
+              "5",
+              "9",
+              "1024"
+            ],
+            [
+              "1",
+              "12",
+              "16",
+              "1024"
+            ]
+          ],
+          "rebuild_completes": [
+            [
+              "3",
+              "8",
+              "1025",
+              "1024"
+            ],
+            [
+              "5",
+              "9",
+              "1025",
+              "1024"
+            ],
+            [
+              "12",
+              "16",
+              "1025",
+              "1024"
+            ]
+          ]
+        }
+      ]
+    }
+  },
+  "earlier_attempts": [
+    {
+      "archive": "initial-failure.tar.gz",
+      "sha256": "e3e48149a5d8a8bbbd8cbf3c445af5806094ef48462626533b472b5fe43db259",
+      "native_tree": "ea188bd9e2d44066a79f506ab67703415500aa31",
+      "status": "failed_configuration",
+      "disposition": "Container omitted the read-only CUDA toolkit mount; fixed launcher, no compiled model result."
+    },
+    {
+      "archive": "intermediate-evidence.tar.gz",
+      "sha256": "476aabb1d49f22fe07c5bda8be47fcabf76278a41f8f706d648ba08c977d50f4",
+      "native_tree": "8ba867037d25f6ba28ee269fe43e4355eb638ccc",
+      "status": "failed_engine_options",
+      "disposition": "Native eight checks passed; C++ fixture left native context_cache enabled, incompatible with KVMem; fixed fixture to match product CLI."
+    },
+    {
+      "archive": "stop-oracle-evidence.tar.gz",
+      "sha256": "af0f9b2d009729c79210b7356c650796b553cb71956d405744fb9665da6aaa85",
+      "native_tree": "44c50d582bd26815662e60581f7b83f1c5a8c27c",
+      "status": "failed_test_oracle",
+      "disposition": "Native eight checks passed; raw output intentionally publishes stop tokens; corrected terminal test to decoded output, without changing product stop rules."
+    },
+    {
+      "archive": "canonical-baseline-evidence.tar.gz",
+      "sha256": "ec02d93ab4ffebe357eab87333a8951f71e880b8198725662b9ba81959980751",
+      "native_tree": "42dbed56fa7b9224244bdfaf43cd994864f92926",
+      "status": "earlier_lru_none_pass",
+      "disposition": "Eight native checks and one real LRU canonical cohort passed before request-local source receipts; not final-candidate GPU evidence."
+    },
+    {
+      "archive": "include-check-evidence.tar.gz",
+      "sha256": "379f5a903d5abe23e2b48d0c6e9519343d312a0991a818c5f12fb396f9a51085",
+      "native_tree": "35e37af644d60325317e2b749cbd2d3c06afb544",
+      "status": "failed_public_header_boundary",
+      "disposition": "Receipt code built and eight behavioral checks passed; full public include checker exposed inherited umbrella include in CUDA options; fixed defining-header dependency."
+    }
+  ],
+  "resource_and_semantic_costs": [
+    "Canonical rebuild repeats model computation; no throughput/latency/performance gain claimed.",
+    "R charges full int32 prefix copy; prepared token vector separately consumes request workspace, branch copies source into S. Account/control/runtime/checkpoint allocations are not a whole-process bound.",
+    "32,768-token repeated input / 1,024-token rebuild / 8-token greedy oracle proves functional routes only, not long task or Agent quality.",
+    "Whole canonical prefix plus independently rounded generation/draft headroom must fit; long prefixes rejected even when source exists.",
+    "Sources retain request input including failed/cancelled/warmup records, fixed 256-entry cap, no expiry/dedup/public global forget."
+  ],
+  "remaining": [
+    "Checkpoint/archive retirement, invalidation and global forget fences; old snapshots must not revive retired identity.",
+    "Long/sparse source replay semantics, complete restore publication/rollback fault qualification.",
+    "Persisted source/state recovery, corruption and bounded archive/checkpoint resources.",
+    "HTTP source/rebuild control interface, task semantics/value policies, tier/multisession integration.",
+    "Long-duration paired performance and quality validation; stages D-F incomplete.",
+    "Earlier intermittent CUDA and TSan environment limitations remain unresolved; host debug settings unchanged.",
+    "DeepSWE setup/quality remains deferred by user."
+  ],
+  "raw_evidence": {
+    "local_directory": "artifacts/lifecycle-stage-c-native-recovery",
+    "remote_directory": "/tmp/kvmem-lifecycle-native-recovery-qualified-20261031-_h6brbfs",
+    "final_archive": "archives/qualified-evidence.tar.gz",
+    "final_archive_sha256": "ca17fdf96ee7fae8f90edffef13e6e31b59b596682445ab6e702daaf2d5d76de",
+    "cleanup": {
+      "removed_stopped_owned_containers": [
+        "kvmem-native-recovery-h6brbfs",
+        "kvmem-core-asan-h6brbfs"
+      ],
+      "gpu_cases_removed_by_driver": true
+    },
+    "terminal_containers": {
+      "kvmem-native-recovery-h6brbfs": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-31T00:28:57.770595946Z",
+        "FinishedAt": "2026-10-31T00:29:24.363861415Z"
+      },
+      "kvmem-core-asan-h6brbfs": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-31T00:30:00.319175031Z",
+        "FinishedAt": "2026-10-31T00:30:06.267833545Z"
+      }
+    },
+    "terminal_hardware": {
+      "gpu": "GPU-4181fa95-fe38-32fe-5e21-d3626630f030, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 596.08, 16384 MiB, 361 MiB",
+      "compute_apps": ""
+    }
+  }
+}

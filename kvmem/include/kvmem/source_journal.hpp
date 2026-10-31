@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace kvmem {
 
@@ -80,6 +81,10 @@ public:
     // event becomes incomplete and the new derived domain has no computed KV.
     SourceRef branch(SourceRef expected, uint64_t prefix);
     SourceState state(SourceRef) const;
+    size_t slots() const noexcept { return limits_.max_sources; }
+    // Owner-serialized bounded enumeration; empty physical directory slots have
+    // no record. The returned SourceRef remains subject to revision/forget fences.
+    std::optional<SourceState> inspect(size_t slot) const;
     void read_tokens(SourceRef, uint64_t begin, int32_t * out, size_t count) const;
     SourceEvent event(SourceRef, uint64_t index) const;
     // Explicitly forget this record and branches in THIS store. Backend KV,

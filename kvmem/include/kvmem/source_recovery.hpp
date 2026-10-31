@@ -12,6 +12,8 @@ enum class SourceRecoveryMode { ExactState, RebuildAsNew };
 // Snapshot of two existing authorities, not a second mutable catalog. The
 // adapter supplies its CURRENT execution configuration on every validation.
 struct SourceRecoveryContext {
+    // Empty for source-only creation with no derived domain to replace. A
+    // nonempty stamp is required/current only when replacing an existing domain.
     MemoryStamp stamp;
     SourceConfiguration configuration{};
 };

@@ -1,0 +1,1079 @@
+diff --git a/docs/cli.md b/docs/cli.md
+--- a/docs/cli.md
++++ b/docs/cli.md
+@@ -490,3 +490,11 @@
+ request through `service_unavailable` rather than silently selecting another
+ policy. A stream that already started reports its terminal error in the stream.
+ These counters describe allocator requests and retained capacity, not OS pages.
++
++### Accepted-source canonical rebuild
++
++`--kvmem-recovery-mib N` enables a separate, positive source preparation byte quota, requiring `--kvmem-source-mib`. Both default off. The in-tree Engine API exposes `historical_sources()` and `prepare_source_rebuild(receipt, prefix_tokens, output_reserve_tokens)`. Submit the resulting raw-token prompt normally to reserve model resources and execute a fresh domain. This API neither restores exact old sparse/recurrent state nor migrates a source between Programs/models. It requires the entire canonical prefix and independently rounded output/draft headroom to fit; chunking is no capacity substitute.
++
++The source is copied under the recovery quota, and the ordinary prepared-input vector remains separate bounded request workspace. Source branching incurs a further S copy. Receipts are process-local and revision-sensitive; old derived windows may already be gone. Admission and each prefill/commit boundary revalidate the receipt. No old derived KV is used. Incomplete rebuilds are not retained as reusable histories; a successful whole commit closes preparation, returns its quota and allows normal new-domain retention. The HTTP completion schemas do not yet expose this in-tree API.
++
++Every `GenerationResult::accepted_source` names that request's actual captured source revision, independently of later queued requests. `historical_sources()` includes explicit branch ancestry. A receipt is source provenance, not proof that its model computation completed or that any derived KV remains resident.
+diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
+--- a/docs/maintainer/engine-architecture.md
++++ b/docs/maintainer/engine-architecture.md
+@@ -756,3 +756,13 @@
+ mask must be nonempty. Raw-logit fast paths require a null mask. Draft proposal probabilities are
+ unchanged; target p is constrained and normalized before the existing p/q and residual calculation.
+ Existing KV, recurrence replay, token-count, and terminal-prefix commit rules remain authoritative.
++
++### Accepted-source rebuild ownership
++
++The opt-in KVMem source rebuild enters through `Engine::prepare_source_rebuild`, serialized with Engine units. Program reads its own SourceJournalStore, mints a fresh identity with the existing window allocator and prepares an independently charged immutable source copy. Frontend constructs ordinary linear raw-token rows without rendering a chat template again. Program and SourceJournalStore remain exclusive to the immutable model instance; cross-Program/store receipts fail incarnation validation. This is not a tokenizer/model migration mechanism.
++
++The prepared prompt owns preparation until admission. The normal ResourceManager/Program target planner reserves real main/draft/state resources. A recovery request always starts at an empty root and cannot quote or restore an old historical/native prefix. Before prefill the source is branched with separate S accounting, preserving the original source. RequestControl owns the preparation until the first successful whole accepted commit, revalidating on each prefill and before completion. Retention rejects unfinished rebuilds, including cancelled partial prefill; private intermediate checkpoints do not enter retained history. All GPU execution remains on the ordinary Program path.
++
++`historical_sources()` enumerates the existing bounded source directory and derives retained-domain/retired-page observations from current windows, without a second catalog. These are observations, never checkpoint permissions. Recovery/source metadata is process-local; persisted checkpoints, archive aliases and system-wide ForgetSource need their own fences. Full source staging and branch copies have real costs; recovery quota is not an RSS or model-workspace upper bound.
++
++Program publishes the current source receipt after prefill and accepted-output units. Engine copies that receipt into the owning RequestRecord and terminal GenerationResult; it never derives it from the global last-source gauge. This also preserves a partial cancelled input's receipt. The bounded directory reports explicit branch parent/prefix metadata, so clients can distinguish source branches from later independent requests without a second catalog.
+diff --git a/include/ninfer/engine.h b/include/ninfer/engine.h
+--- a/include/ninfer/engine.h
++++ b/include/ninfer/engine.h
+@@ -106,6 +106,15 @@
+                                                 bool allow_prefix_identity = true,
+                                                 bool anchor_prompt_end     = false,
+                                                 bool speculative_drafting  = true) const;
++
++    // Single-GPU text/RAM KVMem only. List retained, process-local source receipts.
++    [[nodiscard]] std::vector<HistoricalSourceSummary> historical_sources() const;
++    // Explicit canonical rebuild into a NEW domain, never exact old-state reuse.
++    // Prepares accepted source IDs under R; submit/generate subsequently reserves
++    // actual model resources and revalidates. No model state changes here. The
++    // whole prefix and output reserve must fit; old history need not be resident.
++    [[nodiscard]] PreparedPrompt prepare_source_rebuild(HistoricalSourceRef source,
++        std::uint32_t prefix_tokens, std::uint32_t output_reserve_tokens) const;
+ 
+     // Artifact-tokenizer raw-text encoding. No chat template or implicit special token is added;
+     // special-token text in `text` encodes as that token unless `parse_special` is false.
+diff --git a/include/ninfer/engine_options.h b/include/ninfer/engine_options.h
+--- a/include/ninfer/engine_options.h
++++ b/include/ninfer/engine_options.h
+@@ -444,6 +444,7 @@
+     // Opt-in RAM source recording; independent of H and GC auxiliary M.
+     // Pressure rejects capture/append, never implicitly forgets source rows.
+     std::uint64_t source_bytes = 0;
++    std::uint64_t recovery_bytes = 0; // opt-in source preparation R, separate from S/H/M
+     [[nodiscard]] bool historical_gc_enabled() const noexcept {
+         return historical_gc_lru || historical_gc_redundancy;
+     }
+diff --git a/include/ninfer/historical_source.h b/include/ninfer/historical_source.h
+new file mode 100644
+--- /dev/null
++++ b/include/ninfer/historical_source.h
+@@ -0,0 +1,19 @@
++#pragma once
++#include <cstdint>
++
++namespace ninfer {
++// Process-local source receipt; this is not a KV/checkpoint reuse capability.
++struct HistoricalSourceRef {
++    std::uint64_t id = 0, incarnation = 0, revision = 0;
++    bool operator==(const HistoricalSourceRef&) const noexcept = default;
++};
++struct HistoricalSourceSummary {
++    HistoricalSourceRef ref;
++    std::uint64_t accepted_tokens = 0, computed_tokens = 0, events = 0;
++    std::uint32_t retained_native_domains = 0; // observed bindings, not restore permission
++    std::uint64_t retired_native_pages = 0;
++    HistoricalSourceRef parent;
++    std::uint64_t parent_prefix_tokens = 0;
++};
++
++} // namespace ninfer
+diff --git a/include/ninfer/observability/resources.h b/include/ninfer/observability/resources.h
+--- a/include/ninfer/observability/resources.h
++++ b/include/ninfer/observability/resources.h
+@@ -4,6 +4,7 @@
+ // n-gram table and expert residency.
+ 
+ #include "ninfer/kv_cache_storage.h"
++#include "ninfer/historical_source.h"
+ #include "ninfer/model_enums.h"
+ 
+ #include <array>
+@@ -97,6 +98,7 @@
+     std::uint64_t host_payload_budget_bytes = 0, host_payload_bytes = 0;
+     std::uint64_t gc_aux_budget_bytes = 0, gc_aux_bytes = 0, gc_aux_peak_bytes = 0, gc_aux_denied = 0;
+     std::uint64_t source_budget_bytes = 0, source_bytes = 0, source_peak_bytes = 0, source_denied = 0;
++    std::uint64_t recovery_budget_bytes = 0, recovery_bytes = 0;
+     std::uint64_t source_records = 0, source_last_id = 0, source_last_revision = 0;
+     std::uint64_t source_last_accepted_tokens = 0, source_last_computed_tokens = 0, source_last_events = 0;
+     std::uint64_t source_last_tokens_fnv1a64 = 0;
+diff --git a/include/ninfer/request.h b/include/ninfer/request.h
+--- a/include/ninfer/request.h
++++ b/include/ninfer/request.h
+@@ -5,6 +5,7 @@
+ // and the generation result.
+ 
+ #include "ninfer/base.h"
++#include "ninfer/historical_source.h"
+ #include "ninfer/observability/execution.h"
+ 
+ #include <array>
+@@ -647,6 +648,9 @@
+ 
+ struct GenerationResult {
+     PromptSummary prompt;
++    // Exact accepted-input/output record for THIS request, when S captured it.
++    // May describe partial/cancelled computation; never a KV restoration permit.
++    std::optional<HistoricalSourceRef> accepted_source;
+     std::vector<TokenId> generated_token_ids;
+     // One record per content token, in generation order, when the request enabled logprobs.
+     std::vector<TokenLogprob> content_logprobs;
+diff --git a/include/ninfer/types.h b/include/ninfer/types.h
+--- a/include/ninfer/types.h
++++ b/include/ninfer/types.h
+@@ -5,6 +5,7 @@
+ // not recompile the code of the others (scripts/check-include-boundaries.py).
+ 
+ #include "ninfer/base.h"
++#include "ninfer/historical_source.h"
+ #include "ninfer/engine_options.h"
+ #include "ninfer/kv_cache_storage.h"
+ #include "ninfer/model_enums.h"
+diff --git a/include/ninfer/types_fwd.h b/include/ninfer/types_fwd.h
+--- a/include/ninfer/types_fwd.h
++++ b/include/ninfer/types_fwd.h
+@@ -9,6 +9,10 @@
+ #include <cstdint>
+ 
+ namespace ninfer {
++
++// ninfer/historical_source.h
++struct HistoricalSourceRef;
++struct HistoricalSourceSummary;
+ 
+ // ninfer/model_enums.h
+ enum class EnginePurpose : std::uint8_t;
+diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
+--- a/src/models/qwen3_5/frontend/frontend.cpp
++++ b/src/models/qwen3_5/frontend/frontend.cpp
+@@ -1224,7 +1224,7 @@
+     std::size_t shared = std::numeric_limits<std::size_t>::max();
+     for (const PreparedPrompt& prompt : prompts) {
+         const PreparedPromptData& data = PreparedPromptAccess::view(prompt);
+-        if (data.has_media()) { throw std::invalid_argument("branched prompts must be text"); }
++        if (data.has_media() || data.source_rebuild) { throw std::invalid_argument("branched prompts require ordinary text, not source recovery"); }
+         if (data.token_ids.size() < 2) {
+             throw std::invalid_argument("a branched prompt needs a token after the shared prefix");
+         }
+@@ -1696,6 +1696,12 @@
+     return impl_->tokenizer->encode(text, {.parse_added_tokens = parse_special});
+ }
+ 
++PreparedPrompt Frontend::prepare_source_rebuild(SourceRebuildInput input) const {
++    auto prompt = prepare_tokens(std::move(input.tokens), true, false, true);
++    prompt.data_->source_rebuild.emplace(std::move(input.preparation));
++    return prompt;
++}
++
+ std::string Frontend::token_bytes(TokenId token) const {
+     if (impl_ == nullptr) { throw std::logic_error("frontend is empty"); }
+     if (token < 0 || static_cast<std::size_t>(token) >= impl_->tokenizer->vocab_size()) {
+diff --git a/src/models/qwen3_5/frontend/frontend.h b/src/models/qwen3_5/frontend/frontend.h
+--- a/src/models/qwen3_5/frontend/frontend.h
++++ b/src/models/qwen3_5/frontend/frontend.h
+@@ -8,6 +8,7 @@
+ #include "models/qwen3_5/frontend/output_session.h"
+ #include "models/registry.h"
+ #include "runtime/contract/request.h"
++#include "kvmem/source_recovery.hpp"
+ 
+ #include <array>
+ #include <cstddef>
+@@ -109,6 +110,11 @@
+     std::vector<std::vector<TokenId>> suffixes;
+ };
+ 
++struct SourceRebuildInput {
++    std::vector<TokenId> tokens;
++    kvmem::PreparedSourceRecovery preparation;
++};
++
+ class Frontend {
+ public:
+     Frontend(const Frontend&);
+@@ -125,6 +131,7 @@
+                                                 bool allow_prefix_identity = true,
+                                                 bool anchor_prompt_end     = false,
+                                                 bool speculative_drafting  = true) const;
++    [[nodiscard]] PreparedPrompt prepare_source_rebuild(SourceRebuildInput input) const;
+     [[nodiscard]] std::vector<TokenId> tokenize_text(std::string_view text,
+                                                      bool parse_special = true) const;
+     [[nodiscard]] std::string token_bytes(TokenId token) const;
+diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
+--- a/src/models/qwen3_5/frontend/prepared_prompt.h
++++ b/src/models/qwen3_5/frontend/prepared_prompt.h
+@@ -169,6 +169,7 @@
+     std::vector<TokenId> token_ids;
+     kvmem::SourceConfiguration source_configuration{};
+     std::vector<kvmem::SourceEvent> source_events;
++    std::optional<kvmem::PreparedSourceRecovery> source_rebuild;
+     // Exact token range from frontend provenance. Absent means no trusted query;
+     // retrieval keeps its recency fallback. Raw token input explicitly uses all rows.
+     std::optional<TokenSpan> memory_query;
+diff --git a/src/models/qwen3_5/frontend/tool_open_token.h b/src/models/qwen3_5/frontend/tool_open_token.h
+--- a/src/models/qwen3_5/frontend/tool_open_token.h
++++ b/src/models/qwen3_5/frontend/tool_open_token.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#include "ninfer/types.h"
++#include "ninfer/base.h"
+ 
+ #include <cstddef>
+ #include <optional>
+diff --git a/src/models/qwen3_5/program/planning/request_plan.cpp b/src/models/qwen3_5/program/planning/request_plan.cpp
+--- a/src/models/qwen3_5/program/planning/request_plan.cpp
++++ b/src/models/qwen3_5/program/planning/request_plan.cpp
+@@ -386,6 +386,14 @@
+         capacity - base->summary.prompt_tokens + static_cast<std::uint32_t>(1);
+     base->summary.effective_output_tokens =
+         std::min(options.requested_output_tokens, capacity_output);
++    if (prompt.source_rebuild) {
++        validate_source_rebuild(*prompt.source_rebuild);
++        const auto extra = backend_kv_pages ? std::max(draft_window, ngram_draft_window) + draft_window : 0U;
++        if (std::uint64_t(base->summary.effective_output_tokens) + extra >
++            prompt.source_rebuild->plan().request().budget.reserve_tokens)
++            throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded, "source rebuild output exceeds prepared reserve");
++        if (options.branches) throw std::invalid_argument("source rebuild cannot execute branched reads");
++    }
+     base->summary.effective_limit_reason = options.requested_output_tokens <= capacity_output
+                                                ? FinishReason::OutputLimit
+                                                : FinishReason::ContextCapacity;
+@@ -441,12 +449,12 @@
+     // A branch block writes its K/V past the prompt frontier: the entitlement covers the longest.
+     const std::uint32_t branch_output =
+         base->branches ? branch_extent(base->branches.get()) + 1U : 0U;
+-    base->allow_prefix_reuse             = options.allow_prefix_reuse;
++    base->allow_prefix_reuse             = options.allow_prefix_reuse && !prompt.source_rebuild;
+     // A branched read drafts nothing (the Engine turns its drafting off) and publishes no
+     // continuation: its one token follows a branch, not its prompt.
+     base->drafting = options.speculative_drafting || speculative_backend == SpeculativeBackend::None;
+     base->summary.publish_continuation =
+-        options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;
++        options.allow_prefix_reuse && prompt.identity.reusable && !prompt.source_rebuild && context_cache.enabled;
+     if (!context_cache.kv_lease_growth) {
+         // One formula with concurrent_output_budget (planning/output_budget.h).
+         const KVPageEntitlement entitlement =
+@@ -561,7 +569,7 @@
+         base->prefix_digests.assign(prompt);
+         base->prefix_identity_tag = capture_identity_tag();
+     }
+-    if (options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled) {
++    if (options.allow_prefix_reuse && prompt.identity.reusable && !prompt.source_rebuild && context_cache.enabled) {
+         const auto add_capture = [&](std::uint32_t frontier, std::uint32_t input_order,
+                                      std::optional<RewriteCheckpointKind> rewrite, bool shared,
+                                      bool long_anchor, SharedCandidateEvidence evidence) {
+@@ -853,7 +861,7 @@
+         }
+     }
+ 
+-    if (plan->reuse == ReusePath::Root && base.allow_memory_reuse) {
++    if (plan->reuse == ReusePath::Root && base.allow_memory_reuse && !prompt.source_rebuild) {
+         if (const auto match = memory_restorable_history(prompt)) {
+             const auto& history = *memory_histories[match->history];
+             plan->memory_restore_frontier = match->frontier;
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -755,6 +755,7 @@
+         request.publish_continuation = request_plan.summary.publish_continuation &&
+                                        request_plan.drafting && !request_plan.branches;
+         request.allow_memory_reuse = request_plan.allow_memory_reuse;
++        request.source_rebuild_requested = staged.prompt.source_rebuild.has_value();
+         request.memory_payload_reservation = request_plan.memory_payload_reservation;
+         request.memory_session_key = staged.prompt.context_cache.session_key;
+         sequence.mtp_draft_count     = 0;
+diff --git a/src/models/qwen3_5/program/program.cpp b/src/models/qwen3_5/program/program.cpp
+--- a/src/models/qwen3_5/program/program.cpp
++++ b/src/models/qwen3_5/program/program.cpp
+@@ -744,6 +744,11 @@
+ PhysicalUsageSnapshot Program::physical_usage() const noexcept { return impl_->physical_usage(); }
+ 
+ MemorySummary Program::memory_summary() const noexcept { return impl_->memory_summary(); }
++std::vector<HistoricalSourceSummary> Program::historical_sources() const { return impl_->historical_sources(); }
++std::optional<HistoricalSourceRef> Program::source_receipt(SequenceHandle sequence) const noexcept { return impl_->source_receipt(sequence); }
++SourceRebuildInput Program::prepare_source_rebuild(HistoricalSourceRef source, std::uint32_t prefix, std::uint32_t reserve) {
++    return impl_->prepare_source_rebuild(source, prefix, reserve);
++}
+ 
+ ExpertResidencyStats Program::expert_residency_stats() const {
+     ExpertResidencyStats out;
+diff --git a/src/models/qwen3_5/program/program.h b/src/models/qwen3_5/program/program.h
+--- a/src/models/qwen3_5/program/program.h
++++ b/src/models/qwen3_5/program/program.h
+@@ -1279,6 +1279,9 @@
+     [[nodiscard]] runtime::ProgramResourceRevision resource_revision() const noexcept;
+     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
+     [[nodiscard]] MemorySummary memory_summary() const noexcept;
++    [[nodiscard]] std::vector<HistoricalSourceSummary> historical_sources() const;
++    [[nodiscard]] std::optional<HistoricalSourceRef> source_receipt(SequenceHandle) const noexcept;
++    [[nodiscard]] SourceRebuildInput prepare_source_rebuild(HistoricalSourceRef, std::uint32_t, std::uint32_t);
+     [[nodiscard]] ExpertResidencyStats expert_residency_stats() const;
+     // Largest output budget for a prompt of `prompt_tokens` whose admission entitlement (main KV and
+     // any MTP/DFlash backend KV, draft window included) fits one lane's share of each pool, so that
+diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
+--- a/src/models/qwen3_5/program/program_impl.cpp
++++ b/src/models/qwen3_5/program/program_impl.cpp
+@@ -254,6 +254,7 @@
+       source_journal(plan.kvmem.source_bytes
+           ? std::make_unique<kvmem::SourceJournalStore>(kvmem::SourceLimits{
+               plan.kvmem.source_bytes, plan.capacity, plan.capacity, 256}) : nullptr),
++      source_recovery_storage(plan.kvmem.recovery_bytes),
+       memory_payload_storage(plan.kvmem.host_bytes, plan.kvmem.disk_bytes
+           ? std::make_shared<kvmem::SpillFile>(plan.kvmem.disk_path, plan.kvmem.disk_bytes) : nullptr),
+       memory_retained_budget(plan.kvmem.host_bytes),
+@@ -1136,6 +1137,8 @@
+             memory.gc_aux_peak_bytes = auxiliary.peak;
+             memory.gc_aux_denied = auxiliary.denied;
+         }
++        memory.recovery_budget_bytes = source_recovery_storage.capacity_bytes();
++        memory.recovery_bytes = source_recovery_storage.charged_bytes();
+         if (source_journal) {
+             const auto source = source_journal->stats();
+             memory.source_budget_bytes = source.capacity;
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -791,6 +791,8 @@
+ // gives every occupied request slot its own instance of this state.
+ struct RequestControl {
+     kvmem::SourceRef source;
++    std::optional<kvmem::PreparedSourceRecovery> source_rebuild;
++    bool source_rebuild_requested = false, source_rebuilt = false;
+     std::unique_ptr<NgramProposer> ngram;
+     std::shared_ptr<const NgramSnapshot> ngram_snapshot;
+     std::uint64_t ngram_copy_source = 0;
+@@ -904,6 +906,7 @@
+         memory_payload_reservation = 0;
+         memory_session_key.reset();
+         source = {};
++        source_rebuild.reset(); source_rebuild_requested = source_rebuilt = false;
+         lease_settled        = false;
+         lease_space_limited  = false;
+         lease_minimum_target = {};
+@@ -1162,9 +1165,16 @@
+     const KvmemOptions kvmem_options;
+     std::shared_ptr<kvmem::HistoricalKvAuxBudget> historical_auxiliary;
+     std::unique_ptr<kvmem::SourceJournalStore> source_journal;
++    kvmem::HostKvStorage source_recovery_storage;
+     kvmem::SourceState source_last;
+     std::uint64_t source_last_tokens_fnv1a64 = 14695981039346656037ULL;
+     void capture_source(SequenceState&, RequestControl&);
++    std::vector<HistoricalSourceSummary> historical_sources() const;
++    std::optional<HistoricalSourceRef> source_receipt(SequenceHandle) const noexcept;
++    SourceRebuildInput prepare_source_rebuild(HistoricalSourceRef, std::uint32_t, std::uint32_t);
++    void validate_source_rebuild(const kvmem::PreparedSourceRecovery&) const;
++    kvmem::MemoryDescriptor memory_descriptor() const;
++    kvmem::SessionIdentity allocate_memory_identity();
+     void record_source_progress(SequenceState&, RequestControl&, bool accepted_output,
+         kvmem::SourceEventKind kind = kvmem::SourceEventKind::Assistant, bool terminal = false);
+     kvmem::HostKvStorage memory_payload_storage;
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -18,6 +18,15 @@
+     return std::min(page_tokens, frontier - logical_page * page_tokens);
+ }
+ } // namespace
++
++kvmem::SessionIdentity ProgramImpl::allocate_memory_identity() {
++    auto id = next_window_session.load(std::memory_order_relaxed);
++    for (;;) {
++        if (!id || id == UINT64_MAX)
++            throw kvmem::MemoryError(kvmem::MemoryErrorCode::InvalidSession, "KVMem window identity exhausted");
++        if (next_window_session.compare_exchange_weak(id, id + 1, std::memory_order_relaxed)) return {id, 1};
++    }
++}
+ 
+ // This bridge borrows Program's existing native pool, address space, stream and
+ // reservation. It owns no device allocator. Its lifetime is one safe boundary;
+@@ -37,7 +46,7 @@
+         sequence.window.bind_historical_budget(program.historical_auxiliary);
+         auto& stamp = sequence.window.stamp;
+         if (!stamp.session.id) {
+-            stamp = {true, {next_window_session.fetch_add(1), 1}, 1, 0, 0, 1};
++            stamp = {true, program.allocate_memory_identity(), 1, 0, 0, 1};
+         }
+         if (!stamp.valid) { throw std::logic_error("KVMem sequence requires fresh prefill"); }
+         if (stamp.frontier != sequence.text_kv_valid) {
+@@ -52,18 +61,53 @@
+         if (sequence.window.retired_pages.size() < count) sequence.window.retired_pages.resize(count);
+     }
+ 
+-    kvmem::MemoryDescriptor descriptor() const override {
++    kvmem::MemoryDescriptor descriptor() const override { return program.memory_descriptor(); }
++
++    kvmem::MemorySnapshot snapshot() const override {
++        kvmem::MemorySnapshot s;
++        s.stamp = stamp();
++        const auto count = kv_pages_for_tokens(sequence.text_kv_valid);
++        for (std::uint32_t id = 0; id < count; ++id) {
++            const auto columns = valid_columns(id, sequence.text_kv_valid);
++            s.blocks.push_back({{s.stamp.session, id, id * page_tokens, columns, columns, 0},
++                sequence.window.host_versions.at(id),
++                !memory_page_selectable(sequence.window, id)});
++        }
++        for (auto id : sequence.window.pages) {
++            if (id < count) { s.resident.push_back(id); }
++        }
++        return s;
++    }
++    kvmem::MemoryStamp stamp() const noexcept override { return sequence.window.stamp; }
++    std::unique_ptr<kvmem::MemoryTransfer> prepare(const kvmem::WorkingSetPlan&) override;
++    void invalidate() noexcept override { sequence.window.stamp.valid = false; }
++
++    ProgramImpl& program;
++    SequenceState& sequence;
++    std::uint32_t end;
++    bool resident_native = false; // materialization owns RAM leases through restore
++    HostKVPageLayout layout;
++    std::optional<HostKVPageLayout> mtp_layout;
++    std::size_t page_bytes = 0;
++};
++
++kvmem::MemoryDescriptor ProgramImpl::memory_descriptor() const {
++        const auto layout = plan_host_kv_page_layout(text_kv_pages->physical_pool().geometry());
++        const auto mtp_layout = backend_kv_pages
++            ? std::optional<HostKVPageLayout>(plan_host_kv_page_layout(backend_kv_pages->physical_pool().geometry()))
++            : std::nullopt;
++        const auto page_bytes = layout.page_stride + (mtp_layout ? mtp_layout->page_stride : 0);
+         kvmem::MemoryDescriptor d;
+         std::string model_id;
+         constexpr char hex[] = "0123456789abcdef";
+-        for (const auto value : program.parameters.model.info().artifact_id) {
++        for (const auto value : parameters.model.info().artifact_id) {
+             const auto byte = std::to_integer<unsigned char>(value);
+             model_id += hex[byte >> 4]; model_id += hex[byte & 15];
+         }
+-        d.identity = {"ninfer", program.backend_kv_pages ? "kvmem-main-mtp-pages-v2" : "kvmem-native-pages-v1",
++        d.identity = {"ninfer", backend_kv_pages ? "kvmem-main-mtp-pages-v2" : "kvmem-native-pages-v1",
+             model_id, "qwen3.5-kvmem-state-image-v3"};
+         const char* layout_name = nullptr;
+-        switch (program.kv_storage) {
++        switch (kv_storage) {
+         case KvCacheStorage::BFloat16: layout_name = "ninfer.bf16.page.v1"; break;
+         case KvCacheStorage::Int8Group64: layout_name = "ninfer.int8-g64.page.v1"; break;
+         case KvCacheStorage::Fp8E4M3Row256: layout_name = "ninfer.fp8-e4m3-row256.page.v1"; break;
+@@ -84,8 +128,8 @@
+         default: throw std::logic_error("Unsupported KVMem native KV storage");
+         }
+         d.layout = {layout_name, 1, page_tokens, page_bytes, 256, {}};
+-        const auto& config = program.parameters.model.config().text;
+-        const std::uint32_t planes = program.kv_storage == KvCacheStorage::BFloat16 ? 2 : 4;
++        const auto& config = parameters.model.config().text;
++        const std::uint32_t planes = kv_storage == KvCacheStorage::BFloat16 ? 2 : 4;
+         const kvmem::PayloadPlaneKind kinds[] = {kvmem::PayloadPlaneKind::Key,
+             kvmem::PayloadPlaneKind::Value, kvmem::PayloadPlaneKind::KeyScale,
+             kvmem::PayloadPlaneKind::ValueScale};
+@@ -106,37 +150,9 @@
+                     kinds[kind], layout.page_stride + plane.offset, plane.page_payload_bytes, 1, 0});
+             }
+         }
+-        d.capabilities = {page_tokens, program.capacity, true, true, true, false, false, false};
++        d.capabilities = {page_tokens, capacity, true, true, true, false, false, false};
+         return d;
+     }
+-
+-    kvmem::MemorySnapshot snapshot() const override {
+-        kvmem::MemorySnapshot s;
+-        s.stamp = stamp();
+-        const auto count = kv_pages_for_tokens(sequence.text_kv_valid);
+-        for (std::uint32_t id = 0; id < count; ++id) {
+-            const auto columns = valid_columns(id, sequence.text_kv_valid);
+-            s.blocks.push_back({{s.stamp.session, id, id * page_tokens, columns, columns, 0},
+-                sequence.window.host_versions.at(id),
+-                !memory_page_selectable(sequence.window, id)});
+-        }
+-        for (auto id : sequence.window.pages) {
+-            if (id < count) { s.resident.push_back(id); }
+-        }
+-        return s;
+-    }
+-    kvmem::MemoryStamp stamp() const noexcept override { return sequence.window.stamp; }
+-    std::unique_ptr<kvmem::MemoryTransfer> prepare(const kvmem::WorkingSetPlan&) override;
+-    void invalidate() noexcept override { sequence.window.stamp.valid = false; }
+-
+-    ProgramImpl& program;
+-    SequenceState& sequence;
+-    std::uint32_t end;
+-    bool resident_native = false; // materialization owns RAM leases through restore
+-    HostKVPageLayout layout;
+-    std::optional<HostKVPageLayout> mtp_layout;
+-    std::size_t page_bytes = 0;
+-};
+ 
+ class WindowMemoryTransfer final : public kvmem::MemoryTransfer {
+ public:
+@@ -2033,7 +2049,8 @@
+     // move a transaction whose backend still addresses the active sequence.
+     sequence.window.pending_window.reset();
+     sequence.window.pending_append.reset();
+-    if (!kvmem_window_tokens || !request.allow_memory_reuse || !sequence.window.stamp.valid ||
++    if ((request.source_rebuild_requested && !request.source_rebuilt) ||
++        !kvmem_window_tokens || !request.allow_memory_reuse || !sequence.window.stamp.valid ||
+         (sequence.window.checkpoints.empty() && sequence.window.coverage.size()==0)) return;
+     auto& window = sequence.window;
+     if (window.session_key && !window.update_session_index) return;
+diff --git a/src/models/qwen3_5/program/storage/source_journal.cpp b/src/models/qwen3_5/program/storage/source_journal.cpp
+--- a/src/models/qwen3_5/program/storage/source_journal.cpp
++++ b/src/models/qwen3_5/program/storage/source_journal.cpp
+@@ -62,10 +62,91 @@
+ }
+ }
+ 
++std::vector<HistoricalSourceSummary> ProgramImpl::historical_sources() const {
++    std::vector<HistoricalSourceSummary> result;
++    if (!source_journal) return result;
++    result.reserve(source_journal->stats().sources);
++    for (std::size_t slot = 0; slot < source_journal->slots(); ++slot) {
++        if (const auto state = source_journal->inspect(slot)) {
++            HistoricalSourceSummary summary{{state->ref.source.id, state->ref.source.incarnation, state->ref.revision},
++                state->accepted_frontier, state->computed_frontier, state->events};
++            summary.parent = {state->parent.source.id, state->parent.source.incarnation, state->parent.revision};
++            summary.parent_prefix_tokens = state->parent_prefix;
++            for (const auto& history : memory_histories)
++                if (history && history->source.source == state->ref.source) {
++                    ++summary.retained_native_domains;
++                    summary.retired_native_pages += std::count(history->retired_pages.begin(), history->retired_pages.end(), std::uint8_t(1));
++                }
++            result.push_back(summary);
++        }
++    }
++    return result;
++}
++
++std::optional<HistoricalSourceRef> ProgramImpl::source_receipt(SequenceHandle sequence) const noexcept {
++    if (!valid_sequence(sequence)) return std::nullopt;
++    const auto& source = requests[ContractAccess::lane(sequence).value].source;
++    if (!source.source.id) return std::nullopt;
++    return HistoricalSourceRef{source.source.id, source.source.incarnation, source.revision};
++}
++
++void ProgramImpl::validate_source_rebuild(const kvmem::PreparedSourceRecovery& preparation) const {
++    if (!source_journal || !kvmem_options.recovery_bytes)
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported, "source rebuild is disabled");
++    // This store belongs exclusively to this immutable Program/model. Cross-
++    // Program receipts fail the store incarnation check before any config use.
++    const auto state = source_journal->state(preparation.plan().request().source);
++    preparation.validate(*source_journal, {{}, state.configuration});
++}
++
++SourceRebuildInput ProgramImpl::prepare_source_rebuild(HistoricalSourceRef source,
++    std::uint32_t prefix, std::uint32_t reserve) {
++    if (!source_journal || !kvmem_options.recovery_bytes)
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Unsupported, "source rebuild needs enabled S/R");
++    if (!prefix || !reserve)
++        throw kvmem::MemoryError(kvmem::MemoryErrorCode::InvalidPlan, "source rebuild needs nonempty prefix/reserve");
++    const kvmem::SourceRef ref{{source.id, source.incarnation}, source.revision};
++    const auto state = source_journal->state(ref);
++    const kvmem::SourceRecoveryContext current{{}, state.configuration};
++    const auto extra = backend_kv_pages ? std::max(draft_window, ngram_draft_window) + draft_window : 0U;
++    const auto output = std::max<std::uint64_t>(reserve, kvmem_options.reserve_tokens) + extra;
++    const kvmem::SourceRecoveryRequest request{ref, current, allocate_memory_identity(), prefix,
++        kvmem::SourceRecoveryMode::RebuildAsNew,
++        {kvmem_options.selected_tokens, output, kvmem_window_tokens, memory_retained_budget}};
++    const auto plan = kvmem::plan_source_recovery(*source_journal, memory_descriptor(), current, request);
++    auto preparation = kvmem::prepare_source_recovery(plan, *source_journal, current, source_recovery_storage);
++    std::vector<TokenId> tokens(prefix);
++    preparation.read_tokens(*source_journal, current, 0, tokens.data(), tokens.size());
++    return {std::move(tokens), std::move(preparation)};
++}
++
+ void ProgramImpl::capture_source(SequenceState& sequence, RequestControl& request) {
++    if (request.source_rebuild) validate_source_rebuild(*request.source_rebuild);
+     if (!source_journal || request.source.source.id) return;
+     if (!request.prefill) throw std::logic_error("source capture lost prepared input");
+-    const auto& prompt = request.prefill->prompt;
++    auto& prompt = request.prefill->prompt;
++    if (prompt.source_rebuild) {
++        validate_source_rebuild(*prompt.source_rebuild);
++        const auto& plan = prompt.source_rebuild->plan();
++        if (sequence.text_kv_valid || !sequence.window.archive.empty() ||
++            prompt.token_ids.size() != plan.request().prefix_tokens)
++            throw std::logic_error("source rebuild did not start in an isolated empty root");
++        const auto ref = source_journal->branch(plan.request().source, plan.request().prefix_tokens);
++        const auto state = source_journal->state(ref);
++        const auto digest = hash_rows(*source_journal, ref, 0, state.accepted_frontier,
++            14695981039346656037ULL, prompt.token_ids);
++        sequence.window.stamp = {true, plan.request().destination, 1, 0, 0, 1};
++        request.source_rebuild.emplace(std::move(*prompt.source_rebuild));
++        prompt.source_rebuild.reset();
++        request.source = sequence.window.source = ref;
++        source_last = state; source_last_tokens_fnv1a64 = digest;
++        if (kvmem_options.verify_transfers)
++            std::fprintf(stderr, "KVMEM_SOURCE_REBUILD_BEGIN parent=%llu source=%llu domain=%llu prefix=%llu\n",
++                (unsigned long long)request.source_rebuild->plan().request().source.source.id,
++                (unsigned long long)ref.source.id, (unsigned long long)sequence.window.stamp.session.id,
++                (unsigned long long)state.accepted_frontier);
++        return;
++    }
+     const auto count = prompt.token_ids.size();
+     if (prompt.has_media() || !prompt.graft_name.empty() || prompt.rope_delta ||
+         prompt.token_types.size() != count || prompt.positions.size() != 3 * count ||
+@@ -95,12 +176,25 @@
+ void ProgramImpl::record_source_progress(SequenceState& sequence, RequestControl& request,
+     bool accepted_output, kvmem::SourceEventKind kind, bool terminal) {
+     if (!source_journal || !request.source.source.id) return;
++    if (request.source_rebuild) validate_source_rebuild(*request.source_rebuild);
+     const auto old = source_journal->state(request.source);
+     const auto end = accepted_output ? std::uint64_t(sequence.ledger_frontier) : old.accepted_frontier;
+     const auto computed = accepted_output ? sequence.execution_frontier : sequence.text_kv_valid;
+     if (end < old.accepted_frontier || end > sequence.ledger.size() || computed > end)
+         throw std::logic_error("source commit disagrees with accepted Program frontier");
+-    if (end == old.accepted_frontier && computed == old.computed_frontier) return;
++    const auto complete_rebuild = [&](const kvmem::SourceState& state) {
++        if (accepted_output && request.source_rebuild && !request.source_rebuilt &&
++            state.computed_frontier >= request.source_rebuild->plan().request().prefix_tokens) {
++            validate_source_rebuild(*request.source_rebuild);
++            request.source_rebuilt = true;
++            if (kvmem_options.verify_transfers)
++                std::fprintf(stderr, "KVMEM_SOURCE_REBUILD_COMPLETE source=%llu domain=%llu accepted=%llu computed=%llu\n",
++                    (unsigned long long)state.ref.source.id, (unsigned long long)sequence.window.stamp.session.id,
++                    (unsigned long long)state.accepted_frontier, (unsigned long long)state.computed_frontier);
++            request.source_rebuild.reset(); // real R refund after the successful whole commit
++        }
++    };
++    if (end == old.accepted_frontier && computed == old.computed_frontier) { complete_rebuild(old); return; }
+     std::array<kvmem::SourceEvent, 2> events{};
+     std::size_t count = 0;
+     if (end > old.accepted_frontier) {
+@@ -125,5 +219,6 @@
+             old.accepted_frontier, end - old.accepted_frontier) : std::span<const TokenId>{});
+     request.source = sequence.window.source = ref;
+     source_last = state; source_last_tokens_fnv1a64 = digest;
++    complete_rebuild(state);
+ }
+ } // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/product/cuda_memory_options.h b/src/product/cuda_memory_options.h
+--- a/src/product/cuda_memory_options.h
++++ b/src/product/cuda_memory_options.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#include <ninfer/types.h>
++#include "ninfer/engine_options.h"
+ 
+ #include <algorithm>
+ #include <cstddef>
+diff --git a/src/runtime/engine/engine.cpp b/src/runtime/engine/engine.cpp
+--- a/src/runtime/engine/engine.cpp
++++ b/src/runtime/engine/engine.cpp
+@@ -736,6 +736,20 @@
+     const PromptPreparationStats preparation = prepared.preparation_stats();
+     return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(
+         info, preparation, SamplingMode::Thinking, std::move(prepared)));
++}
++
++std::vector<HistoricalSourceSummary> Engine::historical_sources() const {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    return impl_->generation_core().historical_sources();
++}
++PreparedPrompt Engine::prepare_source_rebuild(HistoricalSourceRef source, std::uint32_t prefix,
++                                             std::uint32_t reserve) const {
++    if (!impl_) throw std::logic_error("Engine is moved from");
++    auto prepared = impl_->generation_core().prepare_source_rebuild(source, prefix, reserve);
++    auto summary = prepared.summary();
++    auto stats = prepared.preparation_stats();
++    return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(
++        summary, stats, SamplingMode::Thinking, std::move(prepared)));
+ }
+ 
+ std::vector<TokenId> Engine::tokenize_text(std::string_view text, bool parse_special) const {
+diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
+--- a/src/runtime/engine/engine_core.h
++++ b/src/runtime/engine/engine_core.h
+@@ -614,6 +614,23 @@
+         return tokens;
+     }
+ 
++    [[nodiscard]] std::vector<HistoricalSourceSummary> historical_sources() {
++        std::scoped_lock lock(execution_mutex_);
++        auto result = instance_.program->historical_sources();
++        publish_runtime_stats();
++        return result;
++    }
++    [[nodiscard]] PreparedPrompt prepare_source_rebuild(HistoricalSourceRef source,
++        std::uint32_t prefix, std::uint32_t reserve) {
++        std::scoped_lock lock(execution_mutex_);
++        ensure_resident_locked();
++        // CPU-only preparation between units; no queue/catalog mutation or GPU work.
++        auto input = instance_.program->prepare_source_rebuild(source, prefix, reserve);
++        auto prompt = instance_.frontend.prepare_source_rebuild(std::move(input));
++        publish_runtime_stats();
++        return prompt;
++    }
++
+     // Served from the snapshot the worker publishes at unit boundaries: the execution mutex is
+     // held for most of a running request, so a reader that waited on it would stall behind a
+     // long prefill.
+@@ -1173,9 +1190,17 @@
+         Clock::time_point started;
+     };
+ 
++    void record_accepted_source(const std::shared_ptr<Request>& request) noexcept {
++        if constexpr (requires { instance_.program->source_receipt(*request->sequence); }) {
++            if (request->sequence)
++                if (auto receipt = instance_.program->source_receipt(*request->sequence)) request->accepted_source = *receipt;
++        }
++    }
++
+     [[nodiscard]] std::optional<GenerationTimingObservation>
+     record_committed_output(const std::shared_ptr<Request>& request,
+                             std::uint32_t accepted_tokens) {
++        record_accepted_source(request);
+         if (accepted_tokens == 0) { return std::nullopt; }
+         const bool observe_wall =
+             request->observation.phase_timings || request->observation.live_timings;
+@@ -1256,6 +1281,7 @@
+     }
+ 
+     void publish_prompt_progress(const std::shared_ptr<Request>& request) {
++        record_accepted_source(request);
+         if (!request->observation.prompt_progress) { return; }
+         if (!request->admitted_begin || !request->admitted_at) {
+             throw std::logic_error("prompt progress has no admitted request boundary");
+@@ -1435,6 +1461,7 @@
+         }
+         GenerationResult result;
+         result.prompt                  = request->prompt_summary;
++        result.accepted_source         = request->accepted_source;
+         result.generated_token_ids     = std::move(request->generated);
+         result.content_logprobs        = std::move(request->content_logprobs);
+         result.branches                = std::move(request->branch_results);
+diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
+--- a/src/runtime/engine/model_instance.cpp
++++ b/src/runtime/engine/model_instance.cpp
+@@ -340,6 +340,8 @@
+     if (options.kvmem.historical_gc_enabled() && options.max_concurrency != 1) {
+         throw std::invalid_argument("NInfer historical GC currently requires max_concurrency=1");
+     }
++    if (options.kvmem.recovery_bytes && !options.kvmem.source_bytes)
++        throw std::invalid_argument("source recovery requires a nonzero source recording quota");
+     if (options.kvmem.source_bytes && (options.kvmem.disk_bytes || options.devices.size() > 1 ||
+         options.tensor_parallel || options.max_concurrency != 1 ||
+         (options.speculative.backend != SpeculativeBackend::None && options.speculative.backend != SpeculativeBackend::Mtp)))
+diff --git a/src/runtime/engine/request_record.h b/src/runtime/engine/request_record.h
+--- a/src/runtime/engine/request_record.h
++++ b/src/runtime/engine/request_record.h
+@@ -184,6 +184,7 @@
+     std::string reasoning;
+     std::optional<LaneId> lane;
+     std::optional<SequenceHandle> sequence;
++    std::optional<HistoricalSourceRef> accepted_source;
+     std::atomic<bool> cancelled{false};
+     EngineRequestState model_state        = EngineRequestState::Waiting;
+     bool capture_pending                  = false;
+diff --git a/src/runtime/speculative_limits.h b/src/runtime/speculative_limits.h
+--- a/src/runtime/speculative_limits.h
++++ b/src/runtime/speculative_limits.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#include "ninfer/types.h"
++#include "ninfer/base.h"
+ 
+ namespace ninfer::runtime {
+ 
+diff --git a/src/serve/cuda_residency_json.h b/src/serve/cuda_residency_json.h
+--- a/src/serve/cuda_residency_json.h
++++ b/src/serve/cuda_residency_json.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#include "ninfer/types.h"
++#include "ninfer/observability/resources.h"
+ 
+ #include <nlohmann/json.hpp>
+ 
+diff --git a/src/serve/kvmem_status_json.h b/src/serve/kvmem_status_json.h
+--- a/src/serve/kvmem_status_json.h
++++ b/src/serve/kvmem_status_json.h
+@@ -1,5 +1,5 @@
+ #pragma once
+-#include "ninfer/types.h"
++#include "ninfer/observability/resources.h"
+ #include <nlohmann/json.hpp>
+ 
+ namespace ninfer::serve {
+@@ -9,6 +9,7 @@
+         {"host_payload_bytes", m.host_payload_bytes}, {"statistics_bytes", m.statistics_bytes},
+         {"gc_aux_budget_bytes", m.gc_aux_budget_bytes}, {"gc_aux_bytes", m.gc_aux_bytes},
+         {"gc_aux_peak_bytes", m.gc_aux_peak_bytes}, {"gc_aux_denied", m.gc_aux_denied},
++        {"recovery_budget_bytes", m.recovery_budget_bytes}, {"recovery_bytes", m.recovery_bytes},
+         {"source_budget_bytes", m.source_budget_bytes}, {"source_bytes", m.source_bytes},
+         {"source_peak_bytes", m.source_peak_bytes}, {"source_denied", m.source_denied},
+         {"source_records", m.source_records}, {"source_last_id", m.source_last_id},
+diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
+--- a/src/serve/serve_options.cpp
++++ b/src/serve/serve_options.cpp
+@@ -111,6 +111,7 @@
+            "  --kvmem-gc-redundancy        retire similar sealed Host pages, then capacity fallback (experimental)\n"
+            "  --kvmem-gc-aux-mib N         positive shared GC metadata/features budget, MiB (default 1024)\n"
+            "  --kvmem-source-mib N         opt-in accepted text source quota, MiB (single-GPU RAM)\n"
++           "  --kvmem-recovery-mib N       opt-in source rebuild preparation quota, MiB\n"
+            "  --kvmem-sink-tokens N         always-kept prefix; default 0 = one 64-token\n"
+            "                                page; positive values round down, minimum one page\n"
+            "  --kvmem-recent-tokens N       always-kept newest suffix; default 64 (one page);\n"
+@@ -745,11 +746,12 @@
+             options.kvmem.historical_gc_aux_bytes = mib << 20;
+             continue;
+         }
+-        if (arg == "--kvmem-source-mib") {
+-            const auto mib = parse_u64(require_value(arg.c_str()), "kvmem-source-mib");
++        if (arg == "--kvmem-source-mib" || arg == "--kvmem-recovery-mib") {
++            const auto mib = parse_u64(require_value(arg.c_str()), arg.c_str()+2);
+             if (!mib || mib > UINT64_MAX / (1ULL << 20))
+-                throw std::invalid_argument("--kvmem-source-mib must be positive and fit bytes");
+-            options.kvmem.source_bytes = mib << 20;
++                throw std::invalid_argument(arg + " must be positive and fit bytes");
++            if (arg == "--kvmem-source-mib") options.kvmem.source_bytes = mib << 20;
++            else options.kvmem.recovery_bytes = mib << 20;
+             continue;
+         }
+         if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
+@@ -2063,6 +2065,8 @@
+             throw std::invalid_argument("NInfer historical GC currently requires single-GPU RAM history");
+         if (!options.kvmem.historical_gc_aux_bytes) options.kvmem.historical_gc_aux_bytes = 1024ULL << 20;
+     }
++    if (options.kvmem.recovery_bytes && !options.kvmem.source_bytes)
++        throw std::invalid_argument("source recovery requires a nonzero source recording quota");
+     if (options.kvmem.source_bytes && (options.kvmem.disk_bytes || options.devices.size() > 1 ||
+         options.tensor_parallel || options.max_concurrency != 1 ||
+         (options.speculative.backend != SpeculativeBackend::None && options.speculative.backend != SpeculativeBackend::Mtp)))
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -57,3 +57,9 @@
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_logprobs_real.cpp"
+   LIBRARIES ninfer_engine)
+ set_tests_properties(ninfer_engine_logprobs_real_test PROPERTIES SKIP_RETURN_CODE 77)
++
++# Independent path for the lifecycle GPU driver; no full GPU-test bundle rebuild.
++ninfer_add_test(ninfer_engine_source_recovery_real_test STANDALONE
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_source_recovery_real.cpp"
++  LIBRARIES ninfer_engine kvmem ninfer::json)
++set_tests_properties(ninfer_engine_source_recovery_real_test PROPERTIES SKIP_RETURN_CODE 77)
+diff --git a/tests/experimental/kvmem_test_options.h b/tests/experimental/kvmem_test_options.h
+--- a/tests/experimental/kvmem_test_options.h
++++ b/tests/experimental/kvmem_test_options.h
+@@ -1,7 +1,7 @@
+ #pragma once
+ 
+ #include "core/paged_kv_storage.h"
+-#include "ninfer/types.h"
++#include "ninfer/engine_options.h"
+ 
+ #include <cstdint>
+ #include <charconv>
+diff --git a/tests/test_engine_source_recovery_real.cpp b/tests/test_engine_source_recovery_real.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/test_engine_source_recovery_real.cpp
+@@ -0,0 +1,176 @@
++#include "ninfer/engine.h"
++#include "kvmem/memory_contract.hpp"
++#include <nlohmann/json.hpp>
++
++#include <algorithm>
++#include <atomic>
++#include <cstdlib>
++#include <iostream>
++#include <stdexcept>
++
++namespace {
++void require(bool condition, const char* message) {
++    if (!condition) throw std::runtime_error(message);
++}
++template<class F> void rejected(kvmem::MemoryErrorCode code, F action) {
++    try { action(); }
++    catch (const kvmem::MemoryError& error) { require(error.code() == code, "wrong recovery rejection reason"); return; }
++    throw std::runtime_error("recovery request was unexpectedly accepted");
++}
++ninfer::RequestOptions request(std::uint32_t tokens, bool reuse = true) {
++    ninfer::RequestOptions options;
++    options.execution.requested_output_tokens = tokens;
++    options.execution.allow_prefix_reuse = reuse;
++    options.execution.sampling.temperature = 0.0F;
++    options.execution.sampling.seed = 42;
++    options.execution.thinking.loop = ninfer::ReasoningLoopAction::Off;
++    options.stop.include_model_defaults = false;
++    options.output.raw = options.output.preserve_special_tokens = true;
++    return options;
++}
++struct CancelDuringPrefill final : ninfer::OutputSink {
++    std::atomic<bool> cancel{false};
++    std::uint32_t processed = 0;
++    void start(ninfer::GenerationStart start) override { require(start.reused_prompt_tokens == 0, "recovery silently reused old KV"); }
++    void progress(ninfer::PromptProgress progress) override {
++        if (progress.processed_prompt_tokens && progress.processed_prompt_tokens < progress.total_prompt_tokens) {
++            processed = progress.processed_prompt_tokens;
++            cancel.store(true, std::memory_order_release);
++        }
++    }
++    void timing(ninfer::GenerationTimingObservation) override {}
++    void publish(ninfer::OutputDelta) override {}
++};
++int run() {
++    const char* artifact = std::getenv("NINFER_SOURCE_RECOVERY_ARTIFACT");
++    if (!artifact || !*artifact) return 77;
++    const bool mtp = std::getenv("NINFER_SOURCE_RECOVERY_MTP") != nullptr;
++    const bool redundancy = std::getenv("NINFER_SOURCE_RECOVERY_REDUNDANCY") != nullptr;
++    ninfer::EngineOptions options;
++    options.artifact_path = artifact;
++    options.max_context = 65536;
++    options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(2560);
++    options.prefill_chunk = 512;
++    options.max_concurrency = 1;
++    options.max_pending_requests = 4;
++    options.device_profile = "off";
++    options.context_cache.enabled = false;
++    options.kv_cache = ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
++    options.kvmem.selected_tokens = 2048;
++    options.kvmem.reserve_tokens = 512;
++    options.kvmem.host_bytes = 96ULL << 20;
++    options.kvmem.source_bytes = 16ULL << 20;
++    options.kvmem.recovery_bytes = 8192;
++    options.kvmem.query_meanq_cosine = options.kvmem.score_agg_max = true;
++    options.kvmem.graph_alpha = 0;
++    options.kvmem.historical_gc_lru = !redundancy;
++    options.kvmem.historical_gc_redundancy = redundancy;
++    options.kvmem.verify_transfers = true;
++    if (mtp) { options.speculative.backend = ninfer::SpeculativeBackend::Mtp; options.speculative.draft_tokens = 4; }
++    ninfer::Engine engine(options);
++    const auto encoded = engine.tokenize_text(" Memory");
++    require(!encoded.empty(), "test token encoding failed");
++    std::vector<ninfer::TokenId> long_input(32768, encoded.front());
++    const auto original = engine.generate(engine.prepare_tokens(long_input), request(8));
++    require(original.generated_token_ids.size() == 8, "long source did not finish");
++    require(!mtp || original.speculative.rounds > 0, "configured MTP executed no speculative round");
++    const auto records = engine.historical_sources();
++    require(records.size() == 1 && records.front().accepted_tokens == long_input.size() + 8, "source input/output missing");
++    require(records.front().retained_native_domains == 1, "initial native history was not retained");
++    require(records.front().retired_native_pages > 0, "no real native retirement occurred");
++    require(original.accepted_source && *original.accepted_source == records.front().ref, "generation did not return its exact source receipt");
++    const auto source = *original.accepted_source;
++    const auto retired_pages = records.front().retired_native_pages;
++    auto stale = source; ++stale.revision;
++    rejected(kvmem::MemoryErrorCode::Stale, [&] { (void)engine.prepare_source_rebuild(stale, 1024, 32); });
++    rejected(kvmem::MemoryErrorCode::BudgetExceeded, [&] { (void)engine.prepare_source_rebuild(source, 4096, 32); });
++    {
++        auto first = engine.prepare_source_rebuild(source, 1024, 32);
++        auto second = engine.prepare_source_rebuild(source, 1024, 32);
++        require(engine.memory_summary().kvmem.recovery_bytes == 8192, "real shared R charge missing");
++        rejected(kvmem::MemoryErrorCode::BudgetExceeded, [&] { (void)engine.prepare_source_rebuild(source, 1024, 32); });
++    }
++    (void)engine.historical_sources();
++    require(engine.memory_summary().kvmem.recovery_bytes == 0, "destroyed preparations did not refund R");
++    const auto retained_before = engine.memory_summary().kvmem.retained_sessions;
++    const auto source_count_before = engine.historical_sources().size();
++    rejected(kvmem::MemoryErrorCode::BudgetExceeded, [&] {
++        (void)engine.generate(engine.prepare_source_rebuild(source, 1024, 32), request(1024));
++    });
++    require(engine.historical_sources().size() == source_count_before, "rejected admission partially published a source branch");
++    require(engine.memory_summary().kvmem.recovery_bytes == 0, "rejected admission retained preparation");
++    CancelDuringPrefill sink;
++    auto cancelled = engine.submit(engine.prepare_source_rebuild(source, 1920, 32), request(32),
++        ninfer::OutputConsumerMode::Streaming, {.prompt_progress = true});
++    const auto cancellation = cancelled.wait(&sink, ninfer::CancellationView([&] { return sink.cancel.load(std::memory_order_acquire); }));
++    require(sink.processed > 0 && cancellation.computed_prompt_tokens < 1920 &&
++            cancellation.finish_reason == ninfer::FinishReason::Cancelled, "actual partial rebuild cancellation not observed");
++    const auto cancelled_sources = engine.historical_sources();
++    require(cancellation.accepted_source.has_value(), "partial accepted input lost its source receipt");
++    require(std::any_of(cancelled_sources.begin(), cancelled_sources.end(), [&](const auto& record) {
++        return record.ref == *cancellation.accepted_source && record.parent == source &&
++               record.parent_prefix_tokens == 1920 && record.accepted_tokens == 1920 &&
++               record.computed_tokens == cancellation.computed_prompt_tokens && !record.retained_native_domains;
++    }), "cancelled source receipt/ancestry/computed frontier differs from its request");
++    require(engine.memory_summary().kvmem.recovery_bytes == 0, "cancelled rebuild retained R");
++    require(engine.memory_summary().kvmem.retained_sessions == retained_before, "incomplete recovery entered retained history");
++
++    std::vector<ninfer::TokenId> prefix(long_input.begin(), long_input.begin() + 1024);
++    auto prepared = engine.prepare_source_rebuild(source, 1024, 32);
++    require(std::equal(prepared.token_ids().begin(), prepared.token_ids().end(), prefix.begin(), prefix.end()), "recovery prepared wrong accepted IDs");
++    const auto rebuilt = engine.generate(std::move(prepared), request(8));
++    require(rebuilt.reused_prompt_tokens == 0 && rebuilt.computed_prompt_tokens == 1024, "rebuild did not execute a fresh complete prefix");
++    (void)engine.historical_sources();
++    require(engine.memory_summary().kvmem.recovery_bytes == 0, "successful rebuild retained R");
++    // Independent request from known original IDs; prefix reuse disabled explicitly.
++    const auto fresh = engine.generate(engine.prepare_tokens(prefix, false), request(8, false));
++    require(rebuilt.generated_token_ids == fresh.generated_token_ids, "greedy canonical rebuild differs from fresh original IDs");
++    require(!mtp || rebuilt.speculative.rounds > 0, "MTP reconstruction was checked only through ordinary fallback");
++    auto stop_request = request(8);
++    stop_request.stop.token_ids = {fresh.generated_token_ids.front()};
++    stop_request.output.raw = false; // Raw mode deliberately publishes the accepted stop token.
++    const auto stopped = engine.generate(engine.prepare_source_rebuild(source, 1024, 32), std::move(stop_request));
++    require(stopped.finish_reason == ninfer::FinishReason::StopToken && stopped.content.empty() && stopped.generated_token_ids.size() == 1, "first-token stop did not exercise terminal rebuild commit");
++    (void)engine.historical_sources();
++    require(engine.memory_summary().kvmem.recovery_bytes == 0, "first-token stop retained R");
++    const auto after = engine.historical_sources();
++    require(rebuilt.accepted_source && rebuilt.accepted_source->id != source.id, "rebuild did not publish a new source receipt");
++    require(std::any_of(after.begin(), after.end(), [&](const auto& record) {
++        return record.ref == *rebuilt.accepted_source && record.parent == source && record.parent_prefix_tokens == 1024;
++    }), "later requests changed the rebuild receipt or lost its ancestry");
++    require(std::any_of(after.begin(), after.end(), [&](const auto& record) {
++        return record.ref.id == source.id && record.ref.incarnation == source.incarnation && record.ref.revision == source.revision && record.retired_native_pages == retired_pages;
++    }), "recovery changed or consumed the original accepted source");
++    // Move the original native history out of the bounded cache, keeping S alive.
++    for (int i = 0; i < 6; ++i) {
++        auto changed = prefix;
++        const auto different = engine.tokenize_text(std::string(1, char('a' + i)));
++        require(!different.empty(), "churn token encoding failed");
++        changed.front() = different.front(); changed.push_back(encoded.front());
++        (void)engine.generate(engine.prepare_tokens(std::move(changed)), request(1));
++    }
++    const auto churned = engine.historical_sources();
++    const auto old = std::find_if(churned.begin(), churned.end(), [&](const auto& record) { return record.ref.id == source.id; });
++    require(old != churned.end() && old->retained_native_domains == 0, "original native window was not actually evicted");
++    const auto without_old_window = engine.generate(engine.prepare_source_rebuild(source, 1024, 32), request(8));
++    require(without_old_window.reused_prompt_tokens == 0 && without_old_window.computed_prompt_tokens == 1024 &&
++            without_old_window.generated_token_ids == fresh.generated_token_ids, "source-only rebuild after cache churn failed");
++    require(!mtp || without_old_window.speculative.rounds > 0, "source-only MTP rebuild ran no speculative round");
++    std::cout << nlohmann::json{{"status", "passed"}, {"mtp", mtp}, {"redundancy", redundancy},
++        {"source_id", source.id}, {"rebuilt_source_id", rebuilt.accepted_source->id},
++        {"cancelled_source_id", cancellation.accepted_source->id}, {"retired_pages", retired_pages}, {"input_tokens", long_input.size()}, {"rebuild_prefix", 1024},
++        {"original_speculative_rounds", original.speculative.rounds}, {"rebuilt_speculative_rounds", rebuilt.speculative.rounds},
++        {"source_only_speculative_rounds", without_old_window.speculative.rounds},
++        {"first_token_stop", stopped.finish_reason == ninfer::FinishReason::StopToken}, {"admission_reserve_rejected", true},
++        {"cancel_processed", sink.processed}, {"cancel_computed", cancellation.computed_prompt_tokens},
++        {"canonical_output_ids", rebuilt.generated_token_ids}, {"fresh_output_ids", fresh.generated_token_ids},
++        {"source_only_output_ids", without_old_window.generated_token_ids},
++        {"final_source_records", engine.historical_sources().size()},
++        {"history_evictions", engine.memory_summary().kvmem.history_evictions}}.dump() << std::endl;
++    return 0;
++}
++}
++int main() {
++    try { return run(); }
++    catch (const std::exception& error) { std::cerr << "SOURCE_RECOVERY_FATAL: " << error.what() << std::endl; return 1; }
++}
+diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
+--- a/tests/test_serve_options.cpp
++++ b/tests/test_serve_options.cpp
+@@ -179,6 +179,21 @@
+         try { (void)parse({"ninfer-serve", "model.ninfer", "--kvmem-source-mib", "1"}); }
+         catch (const std::invalid_argument&) { invalid = true; }
+         failures += check(invalid, "source quota was accepted without KVMem");
++        auto recovery = args; recovery.insert(recovery.end(), {"--kvmem-recovery-mib", "2"});
++        failures += check(make_engine_options(parse(recovery)).kvmem.recovery_bytes == (2ULL << 20),
++                          "source recovery quota was lost between CLI and Engine");
++        for (const auto& suffix : std::vector<std::vector<std::string>>{
++            {"--kvmem-recovery-mib", "0"}, {"--kvmem-recovery-mib", "18446744073709551615"},
++            {"--kvmem-recovery-mib"}}) {
++            auto bad = args; bad.insert(bad.end(), suffix.begin(), suffix.end());
++            bool rejected = false;
++            try { (void)parse(bad); } catch (const std::invalid_argument&) { rejected = true; }
++            failures += check(rejected, "invalid recovery quota accepted");
++        }
++        auto no_source = memory_args; no_source.insert(no_source.end(), {"--kvmem-recovery-mib", "1"});
++        bool rejected = false;
++        try { (void)parse(no_source); } catch (const std::invalid_argument&) { rejected = true; }
++        failures += check(rejected, "recovery was accepted without a source quota");
+     }
+     {
+         auto args = memory_args;

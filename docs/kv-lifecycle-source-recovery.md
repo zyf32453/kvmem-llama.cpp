@@ -1,6 +1,6 @@
 # 源记录恢复规划与准备契约
 
-日期：2026-10-31。状态：C3 的规划和源数据准备组件已实现并验证；NInfer 实际模型重建、物理资源预约与事务发布未接线，阶段 C 仍未完成。当前总状态见 [六阶段进度](kv-lifecycle-progress.md)。
+日期：2026-10-31。C3 的规划和源数据准备组件已实现并验证，后续已接入 [NInfer 规范前缀新域重建](kv-lifecycle-native-recovery.md)。本页保留组件本身的边界和原始验证归属；checkpoint/归档及完整版本闭环尚未完成，阶段 C 仍未完成。当前总状态见 [六阶段进度](kv-lifecycle-progress.md)。
 
 ## 本次完成的边界
 
@@ -28,7 +28,7 @@ R 与源 S、历史 Host H、GC 辅助 M 独立。同一源的两份准备副本
 
 ## 版本与遗忘边界
 
-规划、准备及每次读取都会检查当前 `SourceRef` 的 store incarnation/revision，以及完整预期 `MemoryStamp`。原生 owner 在退休或内容变化时必须推进对应版本，不能拿旧 stamp 充当当前事实。即使只更新了 source computed frontier，旧计划也保守地失效。
+规划、准备及每次读取都会检查当前 `SourceRef` 的 store incarnation/revision。替换既有派生域时，还须检查完整预期 `MemoryStamp`，原生 owner 在退休或内容变化时必须推进对应版本，不能拿旧 stamp 充当当前事实。后续原生接线允许显式空 stamp 表示“仅从源创建新域、没有待替换域”，使旧 KV 窗口消失后仍可恢复；这不免除源 revision/configuration/局部遗忘检查，也不授权旧 KV 复用。即使只更新了 source computed frontier，旧计划也保守地失效。
 
 每次校验还必须传入当前实际执行配置摘要，而非只读取计划中保存的摘要。当前配置改变会拒绝；源配置与当前配置不同也拒绝。本组件不提供跨 tokenizer/template/model 的源迁移。来源配置摘要只允许解释源行，仍不是派生 KV 的复用证明。
 
@@ -46,4 +46,4 @@ Linux 的三项测试和 sanitizer 实际通过后，首次归档驱动误找 `b
 
 本次没有重新构建或运行 GPU 服务，不把 C2 的 `919b18eb…` 当成本组件的原生重建证据；没有配对性能、长时间或新 Agent 结论。旧 TSan 环境限制、偶发 CUDA 问题继续保留。
 
-下一步接 NInfer 既有 Program 资源规划：预约实际模型资源，执行隔离的新域重建，失败不发布半成品，成功后在安全边界校验和发布；随后补 checkpoint/归档的退休与遗忘 fence、持久恢复。只有实际模型删除后恢复及旧快照拒绝等完整条件通过，才能关闭阶段 C。
+后续原生接线已经完成首批范围的实际资源预约、隔离新域重建、半成品取消与完成发布，四组模型功能结果单列于 [原生重建说明](kv-lifecycle-native-recovery.md)，不追记到上述组件候选。接下来补 checkpoint/归档的退休与遗忘 fence、长源重放及持久恢复。只有实际删除后恢复、旧快照拒绝和其余版本闭环条件全部通过，才能关闭阶段 C。

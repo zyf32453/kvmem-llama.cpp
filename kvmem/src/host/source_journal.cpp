@@ -173,6 +173,12 @@ SourceRef SourceJournalStore::append(SourceRef expected, const int32_t * tokens,
     return entry.state.ref;
 }
 SourceState SourceJournalStore::state(SourceRef ref) const { return find(ref).state; }
+std::optional<SourceState> SourceJournalStore::inspect(size_t slot) const {
+    if (slot >= limits_.max_sources)
+        throw MemoryError(MemoryErrorCode::InvalidPlan, "source directory slot out of range");
+    if (!entries_[slot].state.ref.source.id) return std::nullopt;
+    return entries_[slot].state;
+}
 void SourceJournalStore::read_tokens(SourceRef ref, uint64_t begin, int32_t * out, size_t count) const {
     const auto & entry = find(ref);
     if ((count && !out) || begin > entry.state.accepted_frontier || count > entry.state.accepted_frontier - begin)

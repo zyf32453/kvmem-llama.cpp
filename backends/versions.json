@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "3a7573b8f77e5e0d266e67e2a78b252e78e96ec2",
+    "patched_tree": "d508d9b98aff4606f415777344d2f6ad12182df8",
     "patches": [
       {
         "id": "kvmem",
@@ -330,6 +330,16 @@
         ],
         "after_tree": "3a7573b8f77e5e0d266e67e2a78b252e78e96ec2",
         "source": "Record accepted text input/output independently of native KV; bind frontend/runtime source configuration and expose separate bounded RAM source quota"
+      },
+      {
+        "id": "source-recovery",
+        "path": "backends/patches/ninfer-source-recovery.patch",
+        "sha256": "207c5c4a1f62d07fcaa1daa1e9b44a44dbb6049bc983a0aa2cd541b5b9d7c0d4",
+        "requires": [
+          "source-journal"
+        ],
+        "after_tree": "d508d9b98aff4606f415777344d2f6ad12182df8",
+        "source": "Canonical accepted-source rebuild through Engine admission with separate staging quota, fresh native identity, source revision fences and incomplete-retention guard"
       }
     ]
   },

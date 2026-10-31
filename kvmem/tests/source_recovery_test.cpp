@@ -90,6 +90,15 @@ void explicit_semantics_and_capacity() {
     // An invalidated old computation can be replaced, with an explicit new ID.
     f.current.stamp.valid = false;
     CHECK(f.plan().request().expected.stamp.valid == false);
+    // Source-only reconstruction remains possible after the old KV owner is gone.
+    f.current.stamp = {};
+    const auto source_only = f.plan();
+    HostKvStorage source_only_ram(4096);
+    auto from_source = prepare_source_recovery(source_only, f.sources, f.current, source_only_ram);
+    from_source.validate(f.sources, f.current);
+    CHECK(f.sources.slots() == 8 && f.sources.inspect(0)->ref == f.source);
+    CHECK(!f.sources.inspect(7));
+    rejects(MemoryErrorCode::InvalidPlan, [&] { f.sources.inspect(8); });
     f.unchanged();
 }
 

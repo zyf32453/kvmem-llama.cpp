@@ -1,6 +1,6 @@
 # 分离式 KV 生命周期管理系统设计与实施计划
 
-日期：2026-10-31。状态：第一阶段基线与契约、第二阶段首批支持档位已落实，第三阶段 C1/C2 源记录组件与原生接线、C3 规划/源准备组件已通过；实际模型重建与发布、checkpoint/归档 fence 及版本闭环未完成。TSan、完整生产及其他配置仍有未完成门槛，完整状态见 [六阶段进度](kv-lifecycle-progress.md)。
+日期：2026-10-31。状态：第一阶段基线与契约、第二阶段首批支持档位已落实；第三阶段 C1/C2 源记录和 C3 规范前缀新域重建已通过组件及四组原生模型功能检查。超长稀疏重放、checkpoint/归档 fence、持久化和完整版本闭环未完成。TSan、完整生产及其他配置仍有未完成门槛，完整状态见 [六阶段进度](kv-lifecycle-progress.md)。
 
 第一阶段已确定 NInfer 为主后端，固定版本、模型身份、首批支持档位并完成主机契约检查，见 [第一阶段基线](kv-lifecycle-baseline.md)。新基线已有公共 MemoryStamp、BlockDescriptor、CheckpointIdentity 和 HostKvStorage，后续在这些类型上扩展，不重复建设。下文保留原总体设计及其边界。
 
@@ -359,6 +359,6 @@ token/row 序列是复用依据，规范化文本是辅助输入。先校验模�
 
 - 当前路径：`kvmem/include/kvmem/historical_kv_{policy,repository,gc,redundancy}.hpp`，`kvmem/src/host/historical_kv_gc.cpp`，`src/adapter/llama-memory-kvmem.cpp`，`tools/llama-kvmem-prefix.h`。
 - NInfer 路径（上述独立工作树）：`kvmem/include/kvmem/historical_kv_page_gc.hpp`、`historical_kv_page_features.hpp`，`docs/ninfer-historical-gc-integration.md`。
-- 本分支记录：[后台 GC 基本闭环](background-history-gc.md)、[参数与验收记录](background-gc-parameter-retest.md)、[测试交接](historical-gc-testing-handoff.md)、[两题 Agent 试跑](experiments/2026-10-25-terminal-bench-pilot/README.md)。旧文档按日期和配置理解，后续源码修复不能倒写成旧运行成功。
+- 最初设计时核对的历史分支记录包括 `background-history-gc.md`、`background-gc-parameter-retest.md`、`historical-gc-testing-handoff.md` 和 `experiments/2026-10-25-terminal-bench-pilot/README.md`；当前工作树未包含这些文件，不作为本分支的可复现入口。当前交付与证据从 [第一阶段基线](kv-lifecycle-baseline.md)、[六阶段进度](kv-lifecycle-progress.md) 和 [原生恢复](kv-lifecycle-native-recovery.md) 进入。旧记录仍须按原日期和配置理解，后续源码修复不能倒写成旧运行成功。
 
 以上基线结论来自源码和已有运行记录的核对，本轮没有复测旧实验，也不把历史报告当作本设计已验收的证明。

@@ -34,8 +34,9 @@ SourceRecoveryPlan plan_source_recovery(const SourceJournalStore & store,
     const MemoryDescriptor & descriptor, const SourceRecoveryContext & current,
     const SourceRecoveryRequest & request) {
     descriptor.validate();
-    if (!request.expected.stamp.session.id || !request.expected.stamp.session.incarnation ||
-        !request.expected.stamp.history_revision || !request.expected.stamp.execution_history ||
+    const auto & expected = request.expected.stamp;
+    if ((!(expected == MemoryStamp{}) && (!expected.session.id || !expected.session.incarnation ||
+         !expected.history_revision || !expected.execution_history)) ||
         !request.destination.id || !request.destination.incarnation ||
         request.destination == request.expected.stamp.session)
         fail(MemoryErrorCode::InvalidPlan, "source recovery needs an owner stamp and a fresh destination identity");
