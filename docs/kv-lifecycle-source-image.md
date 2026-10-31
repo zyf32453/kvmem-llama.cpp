@@ -1,6 +1,6 @@
 # 源记录镜像：离线组件与后续接入边界
 
-日期：2026-10-31。本批从 C4 提交 `57a2f514baf73d7b6b5a08fca5bdd2b27aa67739` 建立独立离线分支。SSH 恢复前先实现不依赖 GPU 的源记录镜像组件；尚未接入 Engine、归档清单或持久恢复。另一个工作树中的 C5 checkpoint 预算候选仍待取得远程编译和测试终态，本分支没有包含或验收它。完整阶段 C 和生产系统都未完成。
+日期：2026-10-31。本组件最初从 C4 提交 `57a2f514baf73d7b6b5a08fca5bdd2b27aa67739` 建立离线分支，现已合入完成首批功能验收的 C5 基线。源记录镜像已通过 Windows、Linux 内存检查和 NInfer 实际构建接入检查；尚未接入 Engine 保存/导入接口、归档清单或持久恢复。完整阶段 C 和生产系统都未完成。
 
 ## 本批解决什么问题
 
@@ -77,6 +77,10 @@ R 不包含固定 SourceImage 对象、HostKvStorage 的 account/control 对象�
 新增 Linux 原始日志、JUnit、运行脚本与 CMake 配置保存在 `artifacts/source-image-offline/linux-evidence.tar.gz`，SHA-256 为 `ba3191f19801173697b516373fb9c05cd31efaf708fe97aa2b97ecbfb6ade1eb`。输入清单保留初次 Windows 冻结时的状态；后续资格以执行摘要为准。尚未运行本组件的 CUDA、真实模型、掉电恢复、性能或 Agent 检查，尚无 Engine/持久清单接线；本次 sanitizer 通过不代替 C5 的预算或模型验收。
 
 本批最终重新构建并运行 23 项主机契约，全部通过，CTest 总耗时 31.52 秒。prepare/decode 各覆盖 4 个真实分配失败点，三条传输路径共覆盖 99 次回调故障。原始证据保存在 `artifacts/source-image-offline/evidence.zip`，SHA-256 为 `550bbfcb8e6ca9a6e5f5b8143b2b3c9e34f485b420e90f3656c8a5f6df01222a`；[离线组件清单](contracts/kv-lifecycle-source-image-offline-v1.json) 冻结 102 项主机/core 源输入，未冻结或验收新的原生 GPU tree。源码 hash 按实际输入字节计算；Git 换行转换可能改变 checkout 字节，逐字节复现应使用证据包内的冻结副本。
+
+合入 C5 后，在新的隔离目录复用已完成的构建缓存，实际完成 NInfer/C++20 Release 增量编译及 source_image_test。原 C5 目录保持不变；serve、policy/query bundle、三个模型检查和两个预算检查共八个原生可执行文件的 SHA-256 前后完全相同。因此 C5 的 12 项原生及七组 GPU 结果按相同二进制复用，没有重复计成源镜像的新 GPU 检查。这也明确说明当前 Engine 路径还没有调用新增的保存/导入 API。
+
+当前组合源码合同是 [source-image-candidate-v1](contracts/kv-lifecycle-source-image-candidate-v1.json)，冻结 111 项归一化源码输入及 R07 组件契约；初次 102 项精确字节清单继续作为历史测试输入保留。接入检查的日志、输入与八份前后摘要在 `artifacts/lifecycle-source-image-integration/evidence.tar.gz`，SHA-256 为 `0dbd1be8f27e9f790db96c0cffc8118c1743aef341cf64a9d5c8cab0a4c95cd1`。下一项仍是先实现有界持久清单与 owner/版本/遗忘 fence，再接 Engine，不从镜像存在或 checksum 通过推导恢复许可。
 
 可在独立主机构建目录复现：
 

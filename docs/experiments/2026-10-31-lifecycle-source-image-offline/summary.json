@@ -2,7 +2,7 @@
   "date": "2026-10-31",
   "recorded_at": "2026-10-31T11:51:19.126081+08:00",
   "stage": "C_source_image_offline_prerequisite",
-  "status": "host_component_contracts_passed_not_integrated",
+  "status": "host_component_sanitizers_and_native_embedding_qualified_no_archive_integration",
   "base_commit": "57a2f514baf73d7b6b5a08fca5bdd2b27aa67739",
   "branch": "codex/kv-lifecycle-offline-source-image",
   "complete_stage_C": false,
@@ -199,7 +199,7 @@
     "long-run/performance/Agent",
     "complete_stage_C_or_production_GC"
   ],
-  "resume": "SSH restored; original C5 container exit=1 with build-result filesystem I/O error, no recorded OOM. Same candidate is rebuilding in a persistent isolated directory; source-image sanitizer success does not qualify C5 or GPU.",
+  "resume": "C5 qualified/pushed at356856d. Source image merged as an unexposed host component; native embedding test passed and all8 C5 executables are byte-identical. Next implement durable authority/fences before any Engine import/publication.",
   "linux_sanitizers": {
     "passed": true,
     "compiler": "GNU 13.3.0",
@@ -226,6 +226,54 @@
       "local_path": "artifacts/source-image-offline/linux-evidence.tar.gz",
       "sha256": "ba3191f19801173697b516373fb9c05cd31efaf708fe97aa2b97ecbfb6ade1eb",
       "bytes": 5944
+    }
+  },
+  "current_contract": {
+    "path": "docs/contracts/kv-lifecycle-source-image-candidate-v1.json",
+    "sha256": "0526a96fec8117d8eed7cdab71c31bb96f5bda8d61e6b1f6fefab2d39fd00039",
+    "source_pins": 111,
+    "hash_encoding": "Git text normalized CRLF to LF",
+    "source_only_gate": {
+      "status": "source_verified_only",
+      "source_pins": 111,
+      "native_patches": 30,
+      "native_tree_replayed": false,
+      "scope": "Schema/all-profile/source/patch digest gate only; runtime evidence recorded independently."
+    }
+  },
+  "native_embedding": {
+    "passed": true,
+    "source_image_passed": true,
+    "native_binaries_identical": true,
+    "binaries_before": {
+      "build-native/apps/ninfer-serve": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+      "build-native/tests/ninfer_memory_policy_tests": "16dc5c288296f511b528179da5f615a93adcf7f7ee8dd4d36a83fc85c45bb742",
+      "build-native/tests/ninfer_query_policy_tests": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+      "build-native/tests/ninfer_engine_source_recovery_real_test": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+      "build-native/tests/ninfer_engine_source_forget_real_test": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+      "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+      "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+      "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "56c5d961a5a0930a49191ca4cae4c13acca34916ca2fce209167863dd74cac13"
+    },
+    "binaries_after": {
+      "build-native/apps/ninfer-serve": "0d918b0ada6eb2d05847f85eb6b6ab992ff64ce2619f2251078792b8e397a761",
+      "build-native/tests/ninfer_memory_policy_tests": "16dc5c288296f511b528179da5f615a93adcf7f7ee8dd4d36a83fc85c45bb742",
+      "build-native/tests/ninfer_query_policy_tests": "696c8fa7a7ec66b0179da2818bd878d244be16eca5c50a38411ae06fa702af67",
+      "build-native/tests/ninfer_engine_source_recovery_real_test": "a0a4a7735ac67f81fabf0e62968359d7f84002563f451f3e67431b84c3b0aafd",
+      "build-native/tests/ninfer_engine_source_forget_real_test": "109d6438f22153fc272ac2ac2f622ba4d67df4750a06afc09cabad55fecc5bf9",
+      "build-native/tests/ninfer_engine_checkpoint_budget_real_test": "66a1643a8257f47b190a795c90ae1b6541ea53d7781dd83cac510138512d841e",
+      "build-native/tests/ninfer_checkpoint_budget_contract_test": "c906186df414aae1d82a981b4d41b42f8c2d4cfa9786e1a29952410cc1f6c104",
+      "build-native/tests/ninfer_checkpoint_budget_sanitizer_test": "56c5d961a5a0930a49191ca4cae4c13acca34916ca2fce209167863dd74cac13"
+    },
+    "source_image_binary_sha256": "1ac82b349db60c41a63109fc676fbdde43743f1820687af28c2ad02b81a364b9",
+    "parent_root": "/home/yifan/kvmem-validation/checkpoint-budget-20261031-828a2d0c",
+    "parent_commit": "356856d718465f144c536e51177f2b0dcb201a97",
+    "scope": "Native C++20 embedding build and source-image host contract. Reuse C5 runtime checks only if all8 executables byte-identical.",
+    "python": "3.11.18 (main, Oct 26 2026, 22:56:34) [GCC 14.2.0]",
+    "evidence": {
+      "path": "artifacts/lifecycle-source-image-integration/evidence.tar.gz",
+      "sha256": "0dbd1be8f27e9f790db96c0cffc8118c1743aef341cf64a9d5c8cab0a4c95cd1",
+      "bytes": 10238
     }
   }
 }
