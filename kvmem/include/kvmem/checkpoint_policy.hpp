@@ -68,6 +68,46 @@ public:
     Entry * at(size_t i) { return i < entries_.size() && entries_[i].info.identity ? &entries_[i] : nullptr; }
     const Entry * at(size_t i) const { return i < entries_.size() && entries_[i].info.identity ? &entries_[i] : nullptr; }
     void clear() { entries_.clear(); }
+    // Private restore preserves stable slots/holes and new native pointer
+    // identities. It does not prune or silently replace missing dependencies.
+    // Recency clocks are rebased by order (the policy uses only comparisons),
+    // so an old process clock cannot wrap the new owner's next touch.
+    void restore_entries(std::vector<Entry> entries) {
+        if (!entries_.empty()) throw std::logic_error("coverage restore requires an empty private archive");
+        if ((!policy_.enabled && !entries.empty()) ||
+            (policy_.count != SIZE_MAX && entries.size() > policy_.count + 1))
+            throw std::invalid_argument("coverage restore slot count exceeds policy");
+        size_t live = 0; uint64_t payload_bytes = 0;
+        for (size_t i=0; i<entries.size(); ++i) {
+            const auto& entry=entries[i]; const auto actual=entry.record.checkpoint_info();
+            if (!entry.info.identity) {
+                if (actual.storage || entry.info.frontier || entry.info.bytes || entry.info.used || entry.info.protections)
+                    throw std::invalid_argument("coverage restore hole retains data");
+                continue;
+            }
+            if (!actual.storage || !actual.frontier || entry.info.identity!=actual.storage ||
+                entry.info.frontier!=actual.frontier || entry.info.bytes!=actual.bytes ||
+                unsigned(entry.info.purpose)>unsigned(CoveragePurpose::Endpoint) || (entry.info.protections & ~3U))
+                throw std::invalid_argument("coverage restore dependency mismatch");
+            for (size_t j=0; j<i; ++j) if (entries[j].info.identity &&
+                (entries[j].info.frontier==entry.info.frontier || entries[j].info.identity==entry.info.identity))
+                throw std::invalid_argument("coverage restore duplicate frontier or payload");
+            if (actual.bytes>policy_.bytes-payload_bytes)
+                throw std::invalid_argument("coverage restore exceeds byte policy");
+            payload_bytes+=actual.bytes;
+            ++live;
+        }
+        if (live>policy_.count) throw std::invalid_argument("coverage restore live count exceeds policy");
+        std::vector<uint64_t> clocks(entries.size());
+        uint64_t clock=0;
+        for (size_t i=0; i<entries.size(); ++i) if (entries[i].info.identity) {
+            uint64_t rank=1;
+            for (const auto& other:entries) rank += other.info.identity && other.info.used<entries[i].info.used;
+            clocks[i]=rank; clock=std::max(clock,rank);
+        }
+        for (size_t i=0; i<entries.size(); ++i) entries[i].info.used=clocks[i];
+        entries_=std::move(entries); clock_=clock;
+    }
     void swap(CheckpointArchive & other) { entries_.swap(other.entries_); std::swap(clock_, other.clock_); }
     void truncate(uint64_t frontier) {
         for (auto & entry : entries_) if (entry.info.frontier > frontier) entry = {};

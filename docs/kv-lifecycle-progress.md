@@ -60,6 +60,8 @@
 
 **C11d 独立逻辑对象及 C/M 准备已实现本地组件验证。** 实际统计、selector/LRFU、图/反馈、范围/特征、原始位置及 checkpoint 逻辑数据均可独立拥有；C 在大目标分配前预约，实际 M 数组按原 allocator 计费。79 个普通堆分配失败点、7 个 M 上游失败点、C/M 少一字节拒绝、退款、wire 清空后使用和旧物理标记清除通过；扩展组件与已有 selector/RawKvStore 共三项 Windows 检查通过。仍没有可发布的原生 Window/新域、GPU 上传或 Engine 原生恢复，完整 Native 编译和 sanitizer 待连接恢复，不能用小 fixture 的预算数字代替模型或 RSS 上界。见 [C11d 证据](experiments/2026-11-01-lifecycle-checkpoint-state/summary.json)。
 
-下一步先在 SSH 恢复后取回旧任务结果、编译并验证最新保存及私有读取候选，再装配原生 Window/目录并转移 owner 计费，完成正常模型资源预约与 Engine 新域恢复，关闭模型及版本循环。之后接自动源保留策略；C10 转冷、C9/C10 长前缀重放只按各自固定负载理解。旧快照不能复活退休身份及其余条件完成前不关闭 C，短功能检查不代替 F 的配对性能、长时间与 Agent 质量验收。
+**C11e 私有原生 Window/目录及 owner 转移已通过 CPU 数据装配检查。** 使用实际 Native 数据类型保留空槽、共享 CP/image 别名、位置及退休依赖；新 Window 和 CP 仍保持无效身份。C 在读取大目标前完整预约，额度拆分不先退款，移动/持有 alias 时真实 owner 继续计费，graph 接正常父预算；另修正 idle 镜像复用时的整批需求误计。三项 Windows 检查通过，新增 20 个实际装配分配失败点及 C/M/graph 拒绝、移动析构顺序；首次 Linux 专属析构接口的本机链接缺口已限定平台后修复。物理 buffer 使用 CPU 替身，Linux 完整 Native、sanitizer、pinned/CUDA 和 Engine 新域发布仍未验收。保守 C 余量、全部目录恢复的容量要求与未测性能/RSS 均保留，见 [C11e 证据](experiments/2026-11-01-lifecycle-checkpoint-window/summary.json)。
+
+下一步先在 SSH 恢复后取回旧任务结果、完整重编译并验证最新保存/私有恢复候选，再完成 S/native 新身份原子发布与回滚、正常模型资源预约及 Engine 新域恢复，关闭模型及版本循环。之后接自动源保留策略；C10 转冷、C9/C10 长前缀重放只按各自固定负载理解。旧快照不能复活退休身份及其余条件完成前不关闭 C，短功能检查不代替 F 的配对性能、长时间与 Agent 质量验收。
 
 用户“暂不修改主机调试设置”和“DeepSWE 暂缓”的约束继续有效。SSH 当前再次中断，C5–C10 按各自范围记录；Engine 的规范前缀跨重启恢复已提供模型证据，完整系统尚未完成。

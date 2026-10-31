@@ -3,6 +3,7 @@
 更新：2026-11-01。C11a 的**归档权限组件**已验收；C11b 已实现原生编码及 Engine 保存候选，
 本地 CPU 检查通过，最新原生完整编译和真实模型检查因 SSH 再次中断尚未完成。
 后续 C11c 已补私有 CPU 读取准备组件，C11d 已补实际逻辑对象及其 C/M 准备，均只有本地组件证据；
+C11e 已补私有原生 Window/目录及 owner 转移，CPU 数据装配检查通过；
 Engine 原生恢复入口及跨重启模型恢复仍未实现，
 阶段 C 与完整六阶段目标继续开放。
 执行范围、结果和不利发现见 [本批摘要](experiments/2026-10-31-lifecycle-checkpoint-authority/summary.json)。
@@ -185,11 +186,51 @@ metadata 后继续访问；沿用的 6,568 个截断、12 个输入分配失败�
 和执行资源预算，重新准入并以新身份发布。
 见 [C11d 代码、结果及范围](experiments/2026-11-01-lifecycle-checkpoint-state/summary.json)。
 
+## C11e：原生 Window/目录与 owner 转移
+
+私有逻辑数据现可装配为项目实际使用的 `KvmemWindowState` 与 `KvmemPrefixCheckpoint`。
+原有历史状态定义移到独立数据头文件，供 Program 和独立 CPU 检查共同使用。目录保留原
+slot、空槽、purpose/protection 以及主目录/coverage 对同一 CP 的别名；不同 CP 也可共享一份
+状态镜像。coverage 恢复严格验证依赖、数量与字节额度，按相对顺序重置 recency 时钟，避免
+旧时钟接近上限导致下一次 touch 回绕；策略仅比较这些时钟的先后关系。
+
+装配完成的对象仍是私有数据：SourceRef、session/publication key 与 MemoryStamp 保持无效，
+旧 GPU working set 和执行中的 query 状态清空。Host 退休标记、原始逻辑页/位置及合法 CP
+依赖保留；没有重新创建旧 GC worker 或旧许可。新域发布必须在后续事务中重新准入和复核。
+
+原生 wrapper、身份副本、图预算及目录临时空间现在与 typed metadata 一起，在大镜像/H
+读取前预约 C。`MetadataCharge::split` 只转移已有额度，不先退款再申请；CP 的独立 charge
+和 image owner 随 detached alias 保留，Window 则持有其 imported charge。Window 的移动
+赋值先完成旧对象析构，再移动新对象，避免第一成员 charge 提前退款。图及 feedback 同时
+接入正常的每历史 32 MiB/父 graph budget，实际 M 标记继续用现有 allocator。
+
+原先整批镜像检查会把已计入 C 的匹配 idle 镜像再次当作新增需求，导致明明可复用也拒绝。
+现按实际可复用数量检查新增需求，之后仍用原 acquire；准确满额的两份 idle 镜像复用已覆盖，
+没有取消真实计费或把 live 镜像当空闲使用。一般的非匹配 idle 镜像仍占 C，不承诺自动腾空。
+
+Windows GNU16.2.0/C++20 三项检查通过：输入/逻辑组件、原生 Window 装配、coverage policy。
+原生装配直接编译实际数据类型、prefix identity 和装配函数；测试专用物理 buffer 是普通 CPU
+内存替身，不是 CUDA pinned 内存。检查 legacy/coverage、共享镜像、原始位置/字节、无效
+身份、graph 拒绝、精确 C/M 与少一字节拒绝、20 个实际装配分配失败点、poison 后禁止重试，
+以及持有 CP alias、移动 Window 时的真实释放顺序。此前 6,568 个截断、12/79/7 个输入/
+typed/M 上游失败点仍通过。小 fixture 的 C peak 为 101,573 bytes、M peak 为 351 bytes，
+只代表该平台/数据/预算口径，不是模型、Linux 构型、RSS 或性能证据。
+
+首次本机链接因私有对象引用 Linux 专属归档析构接口失败；许可成员现按既有 Linux 支持范围
+限定，Windows 不构造归档许可，修正后复验通过。为编译实际原生数据头，测试目录使用官方
+NVTX v3.4.0 固定头文件，未修改主机设置。源类型布局已改变，后续必须完整重编译当前 Native，
+不能混用旧二进制。完整 Linux 文件/Engine adapter、sanitizer、pinned pool/GPU 与模型仍待
+连接恢复验收；没有公开恢复入口或 S/native 发布。
+
+成本包括多份 CP 图的独立还原、额外目录/图预算租约与保守 C 预约；临时余量随 Window owner
+保留到销毁，恢复全部目录可能因额度不足拒绝。同步 I/O、构造耗时和完整进程内存未测。
+见 [C11e 结果及限定](experiments/2026-11-01-lifecycle-checkpoint-window/summary.json)。
+
 ## 下一步的完整原生链路
 
 1. SSH 恢复后先取回已启动任务的最终状态和日志，再编译最新保存候选。真实模型检查完整
    文件、退休标记、全部合法目录引用、C/H/D 边界与迟到工单拒绝，不复用旧模型二进制。
-2. 在 C11c/C11d 私有准备上，装配原生 Window/目录并转移 owner 计费，完成正常执行资源预约、
+2. 在 C11c–C11e 私有准备上，完成 S/native 新身份的原子发布/回滚、正常执行资源预约、
    GPU 上传及最终许可复核；成功才发布新 S/native 身份，失败不暴露半恢复状态。
 3. 接通 Engine 新域恢复入口；验证普通/MTP4 与 LRU/redundancy 的真实保存—回收—跨进程
    恢复及独立输出基线，旧版本、遗忘和退休不得绕过新身份许可。

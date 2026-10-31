@@ -9,7 +9,35 @@ struct Record {
     std::shared_ptr<int> data;
     CheckpointInfo checkpoint_info() const { return {row, CheckpointPurpose::None, data.get(), data ? 8U : 0U}; }
 };
+static void private_restore() {
+    CheckpointPolicy policy; policy.enabled=true; policy.count=2; policy.bytes=16;
+    using Archive=CheckpointArchive<Record>;
+    auto first=std::make_shared<int>(10),second=std::make_shared<int>(20);
+    std::vector<Archive::Entry> entries(3);
+    entries[0]={{10,first},{10,8,UINT64_MAX,first.get(),CoveragePurpose::Root,1}};
+    entries[2]={{20,second},{20,8,UINT64_MAX-1,second.get(),CoveragePurpose::Endpoint,0}};
+    Archive restored(policy);restored.restore_entries(entries);
+    require(restored.slots()==3 && !restored.at(1) && restored.at(0)->record.data==first,
+        "private restore preserves native aliases and holes");
+    require(restored.at(0)->info.used==2 && restored.at(2)->info.used==1,"restore rebases recency order without wrapping");
+    restored.touch(first.get());require(restored.at(0)->info.used==3,"new touches follow imported recency");
+    for(unsigned which=0;which<5;++which){Archive empty(policy);auto bad=entries;
+        if(which==0)bad[2].info.identity=first.get();
+        if(which==1)bad[1].record={15,std::make_shared<int>(15)};
+        if(which==2)bad[2].info.frontier=10;
+        if(which==3)bad.resize(4);
+        if(which==4)bad[0].info.protections=4;
+        bool refused=false;try{empty.restore_entries(std::move(bad));}catch(const std::invalid_argument&){refused=true;}
+        require(refused && empty.slots()==0,"bad private restore is atomic");
+    }
+    auto small=policy;small.bytes=15;Archive limited(small);bool refused=false;
+    try{limited.restore_entries(entries);}catch(const std::invalid_argument&){refused=true;}
+    require(refused && !limited.slots(),"restored coverage obeys byte policy");
+    refused=false;try{restored.restore_entries(entries);}catch(const std::logic_error&){refused=true;}
+    require(refused && restored.size()==2,"restore cannot replace a populated archive");
+}
 int main() {
+    private_restore();
     require(!checkpoint_anonymous_continuation(26,7103,7110), "shared root cannot consume an anonymous owner");
     require(!checkpoint_anonymous_continuation(3500,7103,7110), "anonymous middle edit is a branch");
     require(checkpoint_anonymous_continuation(7078,7103,7110), "ordinary tail edit can continue");
