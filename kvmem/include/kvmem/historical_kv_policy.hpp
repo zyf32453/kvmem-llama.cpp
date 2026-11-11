@@ -75,7 +75,7 @@ struct HistoricalKvWorkBudget {
     size_t intents = 64;
 };
 
-enum class HistoricalKvDeleteReason { Lru, Custom, Redundancy };
+enum class HistoricalKvDeleteReason { Lru, Custom, Redundancy, Semantic, CapacityLru };
 
 struct HistoricalKvDeleteIntent {
     HistoricalKvHandle victim;
@@ -83,6 +83,7 @@ struct HistoricalKvDeleteIntent {
     HistoricalKvDeleteReason reason = HistoricalKvDeleteReason::Custom;
     // Only policies which explicitly need an optimistic content condition set it.
     std::optional<uint64_t> expected_content_version;
+    std::optional<uint64_t> evidence_revision;
 };
 
 enum class HistoricalKvCommitCode {
@@ -129,6 +130,7 @@ public:
     // Revalidate delayed decisions against the same generation's current
     // metadata. Custom strategies remain free to retire Writing/active blocks.
     virtual bool permits(const HistoricalKvBlockMeta &) const noexcept { return true; }
+    virtual bool permits_intent(const HistoricalKvBlockMeta& block, const HistoricalKvDeleteIntent&) const noexcept { return permits(block); }
     virtual HistoricalKvStepResult step(const HistoricalKvSnapshot & snapshot,
                                         const HistoricalKvPressure & pressure,
                                         HistoricalKvWorkBudget budget,

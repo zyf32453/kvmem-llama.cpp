@@ -1,4 +1,5 @@
 add_library(kvmem
+    src/host/historical_kv_semantic.cpp
     src/host/historical_kv_gc.cpp
     src/host/historical_kv_page_gc.cpp
     src/host/historical_kv_page_features.cpp
@@ -93,6 +94,7 @@ endfunction()
 
 kvmem_add_test(backend_rebind_test)
 kvmem_add_test(historical_gc_ninfer_core_test)
+kvmem_add_test(historical_gc_step_redundancy_test)
 kvmem_add_test(kvmem_store_test)
 kvmem_add_test(pinned_kv_tier_test)
 kvmem_add_test(memory_contract_test)

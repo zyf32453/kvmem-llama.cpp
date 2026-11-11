@@ -1,0 +1,557 @@
+diff --git a/src/models/qwen3_5/program/storage/kv_store.h b/src/models/qwen3_5/program/storage/kv_store.h
+index 1e3bfa713c91cb84e123fe3e2000c3ba5ca05f39..67491a6b3531f2f9a1551f95ee8d1f54edd6c792 100644
+--- a/src/models/qwen3_5/program/storage/kv_store.h
++++ b/src/models/qwen3_5/program/storage/kv_store.h
+@@ -869,6 +869,11 @@ private:
+     std::uint32_t free_count_ = 0;
+ };
+ 
++struct KVWindowPageReuse {
++    std::uint32_t source;
++    std::uint32_t destination;
++};
++
+ class KVAddressSpaceStore {
+ public:
+     KVAddressSpaceStore(LogicalKVPageStore& pages, KVExecutionTablePool& tables,
+@@ -1686,6 +1691,85 @@ public:
+         address.committed_frontier = frontier;
+     }
+ 
++    // The caller has drained the old execution view. Only complete accepted pages can be
++    // moved to a different logical slot. Fresh pages and the partial tail are restored separately.
++    [[nodiscard]] bool can_rebind_window(KVAddressSpaceHandle handle, std::uint32_t old_frontier,
++                                         std::uint32_t visible, std::uint32_t coverage,
++                                         std::span<const KVWindowPageReuse> reuse) const {
++        if (reuse.empty() || visible > coverage || !active(handle)) { return false; }
++        const Address& address = require_active(handle);
++        if (address.checkpoint_frontier || address.committed_frontier != old_frontier ||
++            pages_for_tokens(coverage) > entitlement(address)) {
++            return false;
++        }
++        const auto full_sources = old_frontier / kPagedKVPageSize;
++        const auto full_destinations = visible / kPagedKVPageSize;
++        auto keep = reuse.begin();
++        std::uint32_t first_destination = 0;
++        for (std::uint32_t slot = 0; slot < address.page_count; ++slot) {
++            const auto page = membership(address, slot);
++            if (keep != reuse.end() && keep->source == slot) {
++                if (slot >= full_sources || keep->destination < first_destination ||
++                    keep->destination >= full_destinations || !pages_->device_resident(page) ||
++                    pages_->committed_columns(page) != kPagedKVPageSize) {
++                    return false;
++                }
++                first_destination = keep->destination + 1;
++                ++keep;
++            } else if (!pages_->can_dematerialize(page)) {
++                return false;
++            }
++        }
++        return keep == reuse.end();
++    }
++
++    void rebind_window(KVAddressSpaceHandle handle, std::uint32_t old_frontier,
++                       std::uint32_t visible, std::uint32_t coverage,
++                       std::span<const KVWindowPageReuse> reuse, RankStreams stream = {}) {
++        if (!can_rebind_window(handle, old_frontier, visible, coverage, reuse)) {
++            throw std::logic_error("KV window changed before incremental restore");
++        }
++        Address& address = require_active(handle);
++        const auto target = pages_for_tokens(coverage);
++        std::vector<LogicalKVPageHandle> next(target);
++        std::vector<LogicalKVPageHandle> added(target - reuse.size());
++        for (const auto& page : reuse) {
++            next[page.destination] = membership(address, page.source);
++        }
++
++        // Recycle outgoing leases into this address's reservation. Compact the retained
++        // ownership first so the address can still be released if materialization fails.
++        auto keep = reuse.begin();
++        std::uint32_t remaining = 0;
++        for (std::uint32_t slot = 0; slot < address.page_count; ++slot) {
++            const auto page = membership(address, slot);
++            if (keep != reuse.end() && keep->source == slot) {
++                membership(address, remaining++) = page;
++                ++keep;
++            } else {
++                pages_->release_active_reference(page);
++                pages_->dematerialize(page, address.reservation);
++            }
++        }
++        for (auto slot = remaining; slot < address.page_count; ++slot) {
++            membership(address, slot) = {};
++        }
++        address.page_count = remaining;
++        address.committed_frontier = 0;
++
++        pages_->materialize(address.reservation, added);
++        auto fresh = added.begin();
++        for (std::uint32_t slot = 0; slot < target; ++slot) {
++            if (!next[slot].valid()) {
++                next[slot] = *fresh++;
++                pages_->retain_active_reference(next[slot]);
++            }
++            membership(address, slot) = next[slot];
++        }
++        address.page_count = target;
++        publish_membership(address, stream);
++    }
++
+     void destructive_truncate(KVAddressSpaceHandle handle, std::uint32_t frontier) {
+         Address& address = require_active(handle);
+         if (frontier > address.committed_frontier) {
+diff --git a/src/models/qwen3_5/program/storage/kvmem_transfer_trace.h b/src/models/qwen3_5/program/storage/kvmem_transfer_trace.h
+index 17052b71a874111621aca5bc6eb1d868b466afac..097448f7cdd38e10ca039c133e1e474a2eab7793 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_transfer_trace.h
++++ b/src/models/qwen3_5/program/storage/kvmem_transfer_trace.h
+@@ -107,7 +107,6 @@ public:
+             static_cast<unsigned long long>(payload_bytes_), staging_bytes_, prepare_us_, host_us_,
+             submit_us_, wait_us_, gpu_span_ms_, static_cast<long long>(total));
+     }
+-private:
+     static bool enabled() {
+         static const bool value = [] {
+             const char* flag = std::getenv("KVMEM_TRANSFER_TRACE");
+@@ -115,6 +114,7 @@ private:
+         }();
+         return value;
+     }
++private:
+     void checkpoint(long long& accumulated) {
+         if (!enabled_) return;
+         const auto now = Clock::now();
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 49c63f621b1962ca9965b1f17650273ca4c92145..23ae428dc3fa76834769c36172d4b745646d5f69 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1,4 +1,5 @@
+ #include "models/qwen3_5/program/program_impl.h"
++#include "models/qwen3_5/frontend/digest.h"
+ #include "models/qwen3_5/program/context.h"
+ #include "models/qwen3_5/program/context_work.h"
+ #include "models/qwen3_5/program/storage/kvmem_transfer_trace.h"
+@@ -10,6 +11,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <iterator>
++#include <string>
+ #include <thread>
+ 
+ namespace ninfer::models::qwen3_5::detail {
+@@ -17,6 +19,37 @@ namespace {
+ constexpr std::uint32_t page_tokens = 64;
+ constexpr std::size_t transfer_staging_limit = 64ULL << 20;
+ std::atomic<std::uint64_t> next_window_session{1};
++bool incremental_window_enabled() noexcept {
++    static const bool enabled = [] {
++        const char* flag = std::getenv("KVMEM_INCREMENTAL_WINDOW");
++        return !flag || std::strcmp(flag, "0") != 0;
++    }();
++    return enabled;
++}
++
++bool window_reference_check_enabled() noexcept {
++    static const bool enabled = [] {
++        const char* flag = std::getenv("KVMEM_WINDOW_VERIFY_REFERENCE");
++        return flag && std::strcmp(flag, "1") == 0;
++    }();
++    return enabled;
++}
++
++void append_accepted_kv_bytes(std::vector<std::uint8_t>& bytes, const std::byte* record,
++                              const HostKVPageLayout& layout, std::uint32_t columns) {
++    for (const auto& plane : layout.planes) {
++        const auto* data = reinterpret_cast<const std::uint8_t*>(record + plane.offset);
++        if (columns == layout.geometry.page_tokens) {
++            bytes.insert(bytes.end(), data, data + plane.page_payload_bytes);
++        } else {
++            const auto valid_per_head = plane.head_payload_bytes / layout.geometry.page_tokens * columns;
++            for (std::size_t offset = 0; offset < plane.page_payload_bytes; offset += plane.head_payload_bytes) {
++                bytes.insert(bytes.end(), data + offset, data + offset + valid_per_head);
++            }
++        }
++    }
++}
++
+ bool prefix_audit_enabled() noexcept {
+ #ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
+     const char* value=std::getenv("KVMEM_PREFIX_AUDIT");
+@@ -234,6 +267,7 @@ public:
+     SequenceState& sequence;
+     std::uint32_t end;
+     bool resident_native = false; // materialization owns RAM leases through restore
++    bool live_reselection = false;
+     HostKVPageLayout layout;
+     std::optional<HostKVPageLayout> mtp_layout;
+     std::size_t page_bytes = 0;
+@@ -250,9 +284,8 @@ public:
+         auto& p = backend.program;
+         const auto count = kv_pages_for_tokens(seq.text_kv_valid);
+         pending.resize(count);
+-        // Rebuilding a native compact address space also moves retained pages.
+-        // Reserve their host records up front and include them in physical H and logical history admission.
+-        // Complete host copies are reused; only the changed tail is copied again.
++        // Keep the same canonical Host history for both restore modes. A current record
++        // can be reused and only stale or missing records need capture from the old view.
+         std::uint64_t bytes = seq.window.payload_bytes;
+         for (std::uint32_t slot = 0; slot < seq.window.pages.size(); ++slot) {
+             const auto id = seq.window.pages[slot];
+@@ -289,7 +322,12 @@ public:
+             (selected.empty() || selected.back() != seq.text_kv_valid / page_tokens)) {
+             throw std::logic_error("KVMem partial append page must remain the last selected page");
+         }
+-        const auto rows = std::max(spill_ids.size(), restore_enabled ? selected.size() : 0U);
++        if (restore_enabled) {
++            prepare_restore_slots();
++        }
++        const auto restore_rows = restore_enabled
++            ? (p.kvmem_options.verify_transfers ? selected.size() : restore_slots.size()) : 0U;
++        const auto rows = std::max(spill_ids.size(), restore_rows);
+         if (rows > p.kvmem_window_tokens / page_tokens) {
+             throw std::logic_error("KVMem staging exceeds its physical window");
+         }
+@@ -446,7 +484,7 @@ public:
+     void start_restore() override {
+         auto& p = backend.program;
+         auto& seq = backend.sequence;
+-        KvmemTransferTrace trace(p.device, p.compute_streams, "h2d", selected.size(),
++        KvmemTransferTrace trace(p.device, p.compute_streams, "h2d", restore_slots.size(),
+             p.memory_kv_staging ? p.memory_kv_staging->size() : 0, asynchronous);
+         if (!restore_enabled) throw std::logic_error("KVMem archive-only transfer cannot restore");
+         if (asynchronous && !host_published)
+@@ -464,58 +502,87 @@ public:
+                 resident.push_back(std::move(lease));
+             }
+         }
++        const auto payload = [&](std::size_t slot) {
++            return asynchronous ? storage_work->restored.data() + slot * backend.page_bytes
++                                : resident[slot].data();
++        };
+         trace.prepare_done();
+         destructive = true;
+-        p.text_kv_addresses->destructive_truncate(seq.kv->text, 0);
+-        const auto compact_end = static_cast<std::uint32_t>(plan.next.visible_tokens) + backend.end - seq.text_kv_valid;
+-        p.text_kv_addresses->ensure_mapped_to_tokens(seq.kv->text, compact_end, p.compute_streams);
+-        if (backend.mtp_layout) {
+-            p.backend_kv_addresses->destructive_truncate(*seq.kv->backend, 0);
+-            p.backend_kv_addresses->ensure_mapped_to_tokens(*seq.kv->backend, compact_end, p.compute_streams);
+-        }
+-        std::vector<std::byte> expected;
+-        for (std::size_t begin = 0; begin < selected.size();) {
+-            const auto count = std::min(batch_pages(), selected.size() - begin);
+-            auto rows = staging_records(count);
+-            trace.prepare_done();
+-            for (std::size_t i = 0; i < count; ++i) {
+-                if (asynchronous)
+-                    std::memcpy(rows[i], storage_work->restored.data() + (begin + i) * backend.page_bytes,
+-                        backend.page_bytes);
+-                else std::memcpy(rows[i], resident[begin + i].data(), backend.page_bytes);
+-            }
+-            trace.host_done();
+-            if (before) expected.assign(rows.front(), rows.front() + count * backend.page_bytes);
+-            const std::vector<const std::byte*> input(rows.begin(), rows.end());
+-            // As in spill, all rows belong to this batch's single pinned allocation.
+-            const std::span<const std::uint32_t> record_groups;
+-            std::vector<DeviceKVPageHandle> destinations, mtp_destinations;
+-            for (std::size_t i = 0; i < count; ++i)
+-                destinations.push_back(p.text_kv_addresses->physical_page(seq.kv->text,
+-                    static_cast<std::uint32_t>(begin + i)));
+-            auto& pool = p.text_kv_pages->physical_pool();
+-            std::vector<const std::byte*> mtp_input;
++        const auto map = [&](bool incremental) {
++            const auto map_pool = [&](KVAddressSpaceStore& addresses, KVAddressSpaceHandle handle) {
++                if (incremental) {
++                    addresses.rebind_window(handle, old_compact_frontier,
++                        static_cast<std::uint32_t>(plan.next.visible_tokens), compact_end, reuse, p.compute_streams);
++                } else {
++                    addresses.destructive_truncate(handle, 0);
++                    addresses.ensure_mapped_to_tokens(handle, compact_end, p.compute_streams);
++                }
++            };
++            map_pool(*p.text_kv_addresses, seq.kv->text);
+             if (backend.mtp_layout) {
+-                mtp_input = input;
+-                for (auto& row : mtp_input) row += backend.layout.page_stride;
++                map_pool(*p.backend_kv_addresses, *seq.kv->backend);
++            }
++        };
++        auto& pool = p.text_kv_pages->physical_pool();
++        const auto reload = [&](std::span<const std::uint32_t> slots, KvmemTransferTrace& transfer) {
++            for (std::size_t begin = 0; begin < slots.size();) {
++                const auto count = std::min(batch_pages(), slots.size() - begin);
++                auto rows = staging_records(count);
++                transfer.prepare_done();
++                for (std::size_t i = 0; i < count; ++i) {
++                    std::memcpy(rows[i], payload(slots[begin + i]), backend.page_bytes);
++                }
++                transfer.host_done();
++                const std::vector<const std::byte*> input(rows.begin(), rows.end());
++                // As in spill, all rows belong to this batch's single pinned allocation.
++                const std::span<const std::uint32_t> record_groups;
++                std::vector<DeviceKVPageHandle> destinations, mtp_destinations;
+                 for (std::size_t i = 0; i < count; ++i)
+-                    mtp_destinations.push_back(p.backend_kv_addresses->physical_page(*seq.kv->backend,
+-                        static_cast<std::uint32_t>(begin + i)));
+-                trace.add_copy(p.backend_kv_pages->physical_pool(), mtp_destinations, mtp_input,
+-                    *backend.mtp_layout, record_groups);
++                    destinations.push_back(p.text_kv_addresses->physical_page(seq.kv->text, slots[begin + i]));
++                std::vector<const std::byte*> mtp_input;
++                if (backend.mtp_layout) {
++                    mtp_input = input;
++                    for (auto& row : mtp_input) row += backend.layout.page_stride;
++                    for (std::size_t i = 0; i < count; ++i)
++                        mtp_destinations.push_back(p.backend_kv_addresses->physical_page(*seq.kv->backend,
++                            slots[begin + i]));
++                    transfer.add_copy(p.backend_kv_pages->physical_pool(), mtp_destinations, mtp_input,
++                        *backend.mtp_layout, record_groups);
++                }
++                transfer.add_copy(pool, destinations, input, backend.layout, record_groups);
++                transfer.begin_copy();
++                pool.copy_from_host_records(input, record_groups, destinations, backend.layout, p.compute_streams);
++                if (backend.mtp_layout) {
++                    p.backend_kv_pages->physical_pool().copy_from_host_records(mtp_input, record_groups,
++                        mtp_destinations, *backend.mtp_layout, p.compute_streams);
++                }
++                transfer.end_copy();
++                p.device.synchronize();
++                transfer.batch_complete();
++                begin += count;
+             }
+-            trace.add_copy(pool, destinations, input, backend.layout, record_groups);
+-            trace.begin_copy();
+-            pool.copy_from_host_records(input, record_groups, destinations, backend.layout, p.compute_streams);
+-            if (backend.mtp_layout) {
+-                p.backend_kv_pages->physical_pool().copy_from_host_records(mtp_input, record_groups,
+-                    mtp_destinations, *backend.mtp_layout, p.compute_streams);
++        };
++        const bool compare_reference = before && !reuse.empty() && window_reference_check_enabled();
++        const auto verify = [&]() -> std::array<std::string, 2> {
++            // Include retained pages in the byte check against the same Host records
++            // as full restore. Initialize padding that the native copies do not write.
++            std::vector<std::uint8_t> accepted, page_digests;
++            if (compare_reference) {
++                accepted.reserve(backend.page_bytes);
++                page_digests.reserve(selected.size() * frontend::Sha256Digest{}.size());
+             }
+-            trace.end_copy();
+-            p.device.synchronize();
+-            trace.batch_complete();
+-            if (before) {
+-                // Verify through the same pin window; expected bytes stay in pageable RAM.
++            for (std::size_t begin = 0; begin < selected.size();) {
++                const auto count = std::min(batch_pages(), selected.size() - begin);
++                auto rows = staging_records(count);
++                std::vector<DeviceKVPageHandle> destinations, mtp_destinations;
++                for (std::size_t i = 0; i < count; ++i) {
++                    const auto slot = static_cast<std::uint32_t>(begin + i);
++                    std::memcpy(rows[i], payload(slot), backend.page_bytes);
++                    destinations.push_back(p.text_kv_addresses->physical_page(seq.kv->text, slot));
++                    if (backend.mtp_layout) {
++                        mtp_destinations.push_back(p.backend_kv_addresses->physical_page(*seq.kv->backend, slot));
++                    }
++                }
+                 pool.copy_to_host_records(destinations, rows, {}, backend.layout, p.compute_streams);
+                 if (backend.mtp_layout) {
+                     auto mtp_rows = rows;
+@@ -524,21 +591,64 @@ public:
+                         {}, *backend.mtp_layout, p.compute_streams);
+                 }
+                 p.device.synchronize();
+-                if (std::memcmp(rows.front(), expected.data(), expected.size()))
+-                    throw std::logic_error("KVMem native payload changed during restore");
++                for (std::size_t i = 0; i < count; ++i) {
++                    if (std::memcmp(rows[i], payload(begin + i), backend.page_bytes)) {
++                        throw std::logic_error("KVMem native payload changed during restore");
++                    }
++                    if (compare_reference) {
++                        accepted.clear();
++                        const auto columns = plan.next.blocks[begin + i].block.valid_tokens;
++                        append_accepted_kv_bytes(accepted, rows[i], backend.layout, columns);
++                        if (backend.mtp_layout) {
++                            append_accepted_kv_bytes(accepted, rows[i] + backend.layout.page_stride,
++                                                     *backend.mtp_layout, columns);
++                        }
++                        const auto digest = frontend::sha256(accepted);
++                        page_digests.insert(page_digests.end(), digest.begin(), digest.end());
++                    }
++                }
++                begin += count;
+             }
+-            begin += count;
+-        }
+-        if (before) {
+             std::array<std::byte*, 1> state{static_cast<std::byte*>(after->data())};
+             p.state_images->copy_to_host_segments(p.state_store->physical_slot(seq.state.write),
+                 state, p.state_images->host_layout().image_bytes, p.compute_streams);
+             p.device.synchronize();
+             if (std::memcmp(before->data(), after->data(), p.state_images->host_layout().image_bytes))
+                 throw std::logic_error("KVMem page transfer changed recurrent state");
+-        }
+-        seq.window.restored_bytes += selected.size() * backend.page_bytes;
++            if (compare_reference) {
++                const std::span<const std::uint8_t> state_bytes(
++                    static_cast<const std::uint8_t*>(after->data()), p.state_images->host_layout().image_bytes);
++                const auto kv_digest = frontend::sha256_hex(frontend::sha256(page_digests));
++                const auto state_digest = frontend::sha256_hex(frontend::sha256(state_bytes));
++                return {kv_digest, state_digest};
++            }
++            return {};
++        };
++
++        map(!reuse.empty());
++        reload(restore_slots, trace);
++        const auto fingerprint = before ? verify() : std::array<std::string, 2>{};
++        seq.window.restored_bytes += restore_slots.size() * backend.page_bytes;
+         trace.finish();
++        if (compare_reference) {
++            // Verification only. Both mappings use the same selected blocks, Host
++            // leases and state image, with the same Device entitlement.
++            std::vector<std::uint32_t> all_slots;
++            all_slots.reserve(selected.size());
++            for (std::uint32_t slot = 0; slot < selected.size(); ++slot) { all_slots.push_back(slot); }
++            KvmemTransferTrace reference(p.device, p.compute_streams, "h2d_reference", all_slots.size(),
++                p.memory_kv_staging->size(), false);
++            map(false);
++            reload(all_slots, reference);
++            if (verify() != fingerprint) {
++                throw std::logic_error("KVMem incremental and full restore payloads differ");
++            }
++            reference.finish();
++            seq.window.restored_bytes += all_slots.size() * backend.page_bytes;
++            std::fprintf(stderr,
++                "KVMEM_WINDOW_REFERENCE_MATCH logical=%u pages=%zu kv_sha256=%s state_sha256=%s\n",
++                seq.text_kv_valid, selected.size(), fingerprint[0].c_str(), fingerprint[1].c_str());
++        }
+     }
+ 
+     void publish(const kvmem::ExecutionView& view) override {
+@@ -552,6 +662,18 @@ public:
+             // it from the next verified anchor instead of publishing stale drafts.
+             seq.mtp_draft_count = 0;
+         }
++        if (KvmemTransferTrace::enabled()) {
++            std::string ids;
++            for (const auto id : selected) {
++                if (!ids.empty()) { ids += ','; }
++                ids += std::to_string(id);
++            }
++            std::fprintf(stderr,
++                "KVMEM_WINDOW_RESTORE mode=%s logical=%u visible=%llu reused=%zu loaded=%zu checked=%d blocks=%s\n",
++                reuse.empty() ? "full" : "incremental", seq.text_kv_valid,
++                static_cast<unsigned long long>(view.visible_tokens), reuse.size(), restore_slots.size(),
++                int(bool(before)), ids.c_str());
++        }
+         seq.window.removed_tokens = seq.text_kv_valid - static_cast<std::uint32_t>(view.visible_tokens);
+         seq.window.pages = std::move(selected);
+         seq.window.stamp = view.stamp;
+@@ -585,6 +707,40 @@ public:
+     }
+ 
+ private:
++    void prepare_restore_slots() {
++        auto& p = backend.program;
++        auto& seq = backend.sequence;
++        const auto visible = static_cast<std::uint32_t>(plan.next.visible_tokens);
++        compact_end = visible + backend.end - seq.text_kv_valid;
++        if (backend.live_reselection && !asynchronous && p.device.size() == 1 &&
++            !seq.window.query_replay_active && incremental_window_enabled() &&
++            seq.text_kv_valid >= seq.window.removed_tokens &&
++            std::is_sorted(seq.window.pages.begin(), seq.window.pages.end())) {
++            old_compact_frontier = seq.text_kv_valid - seq.window.removed_tokens;
++            auto source = seq.window.pages.begin();
++            for (std::uint32_t slot = 0; slot < selected.size(); ++slot) {
++                const auto id = selected[slot];
++                while (source != seq.window.pages.end() && *source < id) { ++source; }
++                if (source == seq.window.pages.end()) { break; }
++                if (*source == id && plan.next.blocks[slot].block.valid_tokens == page_tokens) {
++                    reuse.push_back({static_cast<std::uint32_t>(source - seq.window.pages.begin()), slot});
++                }
++            }
++            // The two stores must agree before either address is changed.
++            if (!p.text_kv_addresses->can_rebind_window(seq.kv->text, old_compact_frontier,
++                    visible, compact_end, reuse) ||
++                (backend.mtp_layout && !p.backend_kv_addresses->can_rebind_window(*seq.kv->backend,
++                    old_compact_frontier, visible, compact_end, reuse))) {
++                reuse.clear();
++            }
++        }
++        auto keep = reuse.begin();
++        for (std::uint32_t slot = 0; slot < selected.size(); ++slot) {
++            if (keep != reuse.end() && keep->destination == slot) { ++keep; }
++            else { restore_slots.push_back(slot); }
++        }
++    }
++
+     struct StorageWork {
+         StorageWork(const kvmem::HostKvStorage& storage, std::size_t stride) : storage(storage), stride(stride) {}
+         kvmem::HostKvStorage storage;
+@@ -616,6 +772,9 @@ private:
+     kvmem::WorkingSetPlan plan;
+     std::vector<KvmemHostRecord> pending;
+     std::vector<std::uint32_t> spill_ids, spill_slots, selected;
++    std::vector<KVWindowPageReuse> reuse;
++    std::vector<std::uint32_t> restore_slots;
++    std::uint32_t old_compact_frontier = 0, compact_end = 0;
+     std::vector<DeviceKVPageHandle> sources, mtp_sources;
+     std::vector<std::uint64_t> mtp_source_epochs;
+     std::vector<std::uint64_t> source_epochs;
+@@ -1065,6 +1224,7 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         sequence.dflash_context_floor =
+             end > recent_tokens ? static_cast<std::uint32_t>(end - recent_tokens) : 0U;
+         auto backend = std::make_shared<WindowMemoryBackend>(*this, sequence, end);
++        backend->live_reselection = true;
+         const auto count = kv_pages_for_tokens(begin);
+         const auto keep = std::min(count, kvmem_options.selected_tokens / page_tokens);
+         auto& state = sequence.window;
+diff --git a/tests/models/qwen3_5/test_context_store.cpp b/tests/models/qwen3_5/test_context_store.cpp
+index d68de87f019c4ff830a07b98d8024633812808a5..3b41ddae7439d8a3b87694316c97bb0cd35245d5 100644
+--- a/tests/models/qwen3_5/test_context_store.cpp
++++ b/tests/models/qwen3_5/test_context_store.cpp
+@@ -645,6 +645,47 @@ void test_kv_store(ninfer::DeviceContext& device) {
+                extents.release_unreferenced() == host_layout.page_stride && pages.occupied() == 0 &&
+                physical_pages.allocated_pages() == 0 && physical_pages.reserved_pages() == 0,
+            "staged retained fork closes Device and Host ownership without leaks");
++
++    const auto window = addresses.create_active(4, 0, {});
++    expect(window.has_value(), "incremental window allocation");
++    addresses.ensure_mapped_to_tokens(*window, 193, device.stream);
++    addresses.commit_frontier(*window, 193);
++    device.synchronize();
++    const auto old_table = read_block_table(physical_tables, 0, 4);
++    const auto first = addresses.logical_page(*window, 0);
++    const auto dropped = addresses.logical_page(*window, 1);
++    const auto shifted = addresses.logical_page(*window, 2);
++    const auto tail = addresses.logical_page(*window, 3);
++    const auto shifted_epoch = addresses.content_epoch(*window, 2);
++    const std::array reuse{store::KVWindowPageReuse{0, 0}, store::KVWindowPageReuse{2, 1}};
++    const std::array partial{store::KVWindowPageReuse{3, 0}};
++    expect(!addresses.can_rebind_window(*window, 193, 129, 256, partial) &&
++               !addresses.can_rebind_window(*window, 192, 129, 256, reuse) &&
++               read_block_table(physical_tables, 0, 4) == old_table,
++           "incremental rebind rejects partial or stale sources without changing the view");
++    expect(addresses.can_rebind_window(*window, 193, 129, 256, reuse),
++           "incremental rebind can reuse complete pages with no spare window capacity");
++    addresses.rebind_window(*window, 193, 129, 256, reuse, device.stream);
++    device.synchronize();
++    const auto new_table = read_block_table(physical_tables, 0, 4);
++    expect(new_table[0] == old_table[0] && new_table[1] == old_table[2] &&
++               addresses.logical_page(*window, 0) == first &&
++               addresses.logical_page(*window, 1) == shifted &&
++               addresses.content_epoch(*window, 1) == shifted_epoch &&
++               !pages.valid(dropped) && !pages.valid(tail),
++           "rebind keeps retained physical bytes and retires outgoing memberships");
++    expect(addresses.committed_frontier(*window) == 0 && physical_pages.allocated_pages() == 4 &&
++               addresses.entitlement(*window) == 4,
++           "incremental restore keeps the original entitlement and waits to publish coverage");
++    addresses.commit_frontier(*window, 129);
++    addresses.commit_frontier(*window, 130);
++    expect(addresses.committed_frontier(*window) == 130 &&
++               addresses.content_epoch(*window, 1) == shifted_epoch,
++           "incremental restore can append into the restored partial tail");
++    addresses.deactivate(*window);
++    expect(addresses.release(*window) && pages.occupied() == 0 &&
++               physical_pages.allocated_pages() == 0 && physical_pages.reserved_pages() == 0,
++           "incremental restore releases all pages and reservation credits");
+ }
+ 
+ // Engine recovery rebuilds the context stores when a failed owner release leaves objects behind.

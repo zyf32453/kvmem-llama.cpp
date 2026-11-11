@@ -31,6 +31,7 @@ HistoricalKvGc::HistoricalKvGc(std::shared_ptr<HistoricalKvRepository> repositor
     acknowledged_codes_.reserve(config_.batch_blocks);
     audit_ = historical_kv_audit_enabled();
     if (audit_) audit_committed_.resize(repository_->capacity());
+    retire_causes_.resize(repository_->capacity());
     round_.blocks.reserve(repository_->capacity());
     observation_.blocks.reserve(repository_->capacity());
     seen_generation_.resize(repository_->capacity());
@@ -78,10 +79,12 @@ void HistoricalKvGc::run() noexcept {
 }
 
 HistoricalKvCommitCode HistoricalKvGc::commit(const HistoricalKvDeleteIntent & intent) {
+    struct Check { const HistoricalKvPolicy* policy; const HistoricalKvDeleteIntent* intent; } check{policy_.get(), &intent};
     switch (repository_->retire(intent.victim, intent.expected_content_version,
-            [](const HistoricalKvBlockMeta & meta, const void * policy) noexcept {
-                return static_cast<const HistoricalKvPolicy *>(policy)->permits(meta);
-            }, policy_.get())) {
+            [](const HistoricalKvBlockMeta & meta, const void * context) noexcept {
+                const auto& check = *static_cast<const Check*>(context);
+                return check.policy->permits_intent(meta, *check.intent);
+            }, &check)) {
     case HistoricalKvRepository::RetireResult::Committed:
         return HistoricalKvCommitCode::Committed;
     case HistoricalKvRepository::RetireResult::AlreadyRetired:
@@ -112,7 +115,12 @@ void HistoricalKvGc::acknowledge(const HistoricalKvDeleteIntent & intent,
         audit_acknowledgement(intent, historical_kv_audit_outcome(code));
     }
     switch (code) {
-    case HistoricalKvCommitCode::Committed: ++committed_; break;
+    case HistoricalKvCommitCode::Committed:
+        ++committed_;
+        retire_causes_[intent.victim.slot]={intent.victim.generation,intent.reason};
+        if (intent.reason==HistoricalKvDeleteReason::Semantic) ++semantic_committed_;
+        if (intent.reason==HistoricalKvDeleteReason::CapacityLru) ++capacity_lru_committed_;
+        break;
     case HistoricalKvCommitCode::AlreadyRetired: break;
     case HistoricalKvCommitCode::Stale: ++stale_; break;
     case HistoricalKvCommitCode::Reevaluate: ++reevaluate_; break;
@@ -221,7 +229,15 @@ void HistoricalKvGc::manual_tick() {
             const auto result = repository_->try_reclaim(block.handle);
             audit_reclaim(block, result);
             switch (result) {
-            case HistoricalKvRepository::ReclaimResult::Complete: ++reclaimed_; break;
+            case HistoricalKvRepository::ReclaimResult::Complete: {
+                ++reclaimed_;
+                const auto cause=retire_causes_[block.handle.slot];
+                if (cause.generation==block.handle.generation) {
+                    if (cause.reason==HistoricalKvDeleteReason::Semantic) ++semantic_reclaimed_;
+                    if (cause.reason==HistoricalKvDeleteReason::CapacityLru) ++capacity_lru_reclaimed_;
+                }
+                break;
+            }
             case HistoricalKvRepository::ReclaimResult::HostReleased: ++host_released_early_; break;
             case HistoricalKvRepository::ReclaimResult::ResourceReleased: ++partial_resource_releases_; break;
             case HistoricalKvRepository::ReclaimResult::Deferred: ++deferred_; break;
@@ -408,7 +424,8 @@ HistoricalKvGc::Stats HistoricalKvGc::stats() const {
             reclaimed_.load(), deferred_.load(), stale_.load(),
             reevaluate_.load(), retry_count_.load(), policy_failures_.load(),
             worker_failures_.load(), host_released_early_.load(), partial_resource_releases_.load(),
-            boundary_batches_.load(), boundary_committed_.load()};
+            boundary_batches_.load(), boundary_committed_.load(), semantic_committed_.load(),
+            capacity_lru_committed_.load(), semantic_reclaimed_.load(), capacity_lru_reclaimed_.load()};
 }
 
 } // namespace kvmem

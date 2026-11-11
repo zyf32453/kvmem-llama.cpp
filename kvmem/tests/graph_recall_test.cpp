@@ -251,6 +251,26 @@ void fixed_picker() {
         "actual picker differs from the graph transport fixed set");
     rejects([&]{store.pick_scored_blocks({0,3,4,5},{0,1,9,8},{0,3},4);});
 }
+void query_cold_tail() {
+    using kvmem::QueryTrimPage;
+    using kvmem::low_scoring_cold_pages;
+    const std::vector<QueryTrimPage> pages{
+        {9, -.9, false}, {8, -.8, true}, {3, -.7, true}, {7, -.6, true},
+        {4, -.5, true}, {5, -.5, true}, {6, 0, true}, {11, 0, true},
+        {1, .1, true}, {10, .2, true}, {2, .3, true}, {0, .4, true}};
+    require(low_scoring_cold_pages(pages, 8) == std::vector<uint32_t>({3, 8}),
+        "Query tail trim removed resident or above-quartile pages");
+    require(low_scoring_cold_pages(pages, 1) == std::vector<uint32_t>({8}),
+        "Query tail trim exceeded its cap or skipped the wrong rank");
+    auto flat = pages;
+    for (auto& page : flat) page.score = -.1;
+    require(low_scoring_cold_pages(flat, 8).empty(), "flat scores are insufficient to trim");
+    flat[0].score = -.2;
+    flat[1].score = -.2;
+    flat[2].score = -.2;
+    flat[3].score = -.2;
+    require(low_scoring_cold_pages(flat, 8).empty(), "tied cutoff cannot split equal scores");
+}
 void statistics_budget() {
     auto global=std::make_shared<kvmem::GraphStatisticsBudget>(40000);
     auto first=std::make_shared<kvmem::GraphStatisticsBudget>(35000,global);
@@ -282,7 +302,7 @@ void message_locality() {
 } // namespace
 int main() {
     try {
-        frames_and_scores(); gqa_and_large_domain(); scorer_variants(); graph_lifecycle(); orthogonal_query_scoring(); feedback_and_pressure(); accepted_sampling(); fixed_picker(); statistics_budget(); message_locality();
+        frames_and_scores(); gqa_and_large_domain(); scorer_variants(); graph_lifecycle(); orthogonal_query_scoring(); feedback_and_pressure(); accepted_sampling(); fixed_picker(); query_cold_tail(); statistics_budget(); message_locality();
         std::cout << "graph recall numerical and accepted-state checks passed\n";
         return 0;
     } catch (const std::exception& e) {

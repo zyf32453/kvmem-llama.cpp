@@ -1,0 +1,36 @@
+diff --git a/docs/serving.md b/docs/serving.md
+index d1fe81a..f1644b4 100644
+--- a/docs/serving.md
++++ b/docs/serving.md
+@@ -2812,6 +2812,8 @@ encoded as little-endian uint32, rather than a hash of the visible text.
+ For evidence preparation, `POST /apply-template` accepts `return_tokens: true`
+ and additionally returns `tokens`, an array of `{id, piece}` rows from the actual
+ prepared prompt. A piece is text or a byte array for an incomplete UTF-8 fragment.
++Use `token_ids_only: true` with `return_tokens: true` to get the same
++prepared IDs as an integer array when token pieces are unnecessary.
+ Use these IDs rather than re-tokenizing the flattened rendered text: literal
+ special-token spellings in message content do not have template-token identity.
+ Omitting this flag preserves the existing prompt-only response.
+diff --git a/src/serve/llamacpp_http.cpp b/src/serve/llamacpp_http.cpp
+index 837e037..696ebc3 100644
+--- a/src/serve/llamacpp_http.cpp
++++ b/src/serve/llamacpp_http.cpp
+@@ -175,6 +175,7 @@ void HttpServer::handle_detokenize(const httplib::Request& req, httplib::Respons
+ void HttpServer::handle_apply_template(const httplib::Request& req, httplib::Response& res) const {
+     const RequestJson body          = parse_object_body(req);
+     const bool return_tokens        = optional_bool(body, "return_tokens", false);
++    const bool token_ids_only       = optional_bool(body, "token_ids_only", false);
+     const OpenAIChatRequest request = parse_chat_completion_request(body, request_limits(options_));
+     const ModelRegistry::Lease lease = lease_host_model(request.model, req);
+     std::vector<ninfer::TokenId> prepared_tokens;
+@@ -182,7 +183,9 @@ void HttpServer::handle_apply_template(const httplib::Request& req, httplib::Res
+         request.generation, [&req] { return client_disconnected(req); },
+         return_tokens ? &prepared_tokens : nullptr);
+     OutJson output{{"prompt", prompt}};
+-    if (return_tokens) {
++    if (return_tokens && token_ids_only) {
++        output["tokens"] = OutJson(prepared_tokens);
++    } else if (return_tokens) {
+         // Preserve the template's trusted-token boundaries. Re-encoding the flattened
+         // text can mistake a literal special-token spelling in message data for framing.
+         OutJson rows = OutJson::array();

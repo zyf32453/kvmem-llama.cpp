@@ -1,0 +1,76 @@
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+index 9586f0045f2c4d0f88825cdab1c0adfd4200f6d5..49297613cbaed86b712a4e29383d450bf4b7a301 100644
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -1358,9 +1358,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                 staged.prompt_tokens,kvmem_options.query_replay_max_tokens,64,
+                 std::min<uint64_t>((query.begin+63)/64,kvmem_options.selected_tokens/64),
+                 kvmem_window_tokens/64,backend_kv_pages ? std::max(draft_window,ngram_draft_window)+draft_window : 0);
+-            const auto workspace=backend_kv_pages ? std::max(draft_window,ngram_draft_window)+draft_window : 0;
+-            const bool resident=sequence.window.removed_tokens==0 &&
+-                std::uint64_t(staged.prompt_tokens)+workspace<=kvmem_window_tokens;
++            const bool resident=!memory_query_needs_recall(sequence, staged.prompt_tokens);
+             const char* path=!query.count || sequence.window.query_replayed ? "append_pressure" :
+                 resident ? "all_resident" : !plan.admitted ? "query_replay_skipped" : "query_probe";
+             std::fprintf(stderr,"KVMEM_PREFILL_PLAN path=%s reason=%s query_begin=%llu query_end=%llu planned_replay_rows=%llu replay_cap=%u capture_query=%u\n",
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index e4bf3adb4c7c074f62429a6764b0dc4b6177965d..d7649e1544645ca40d31757e11558d8f7c895c52 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -2158,6 +2158,7 @@ private:
+         return bounded_memory_query(prompt,kvmem_options.query_max_tokens);
+     }
+     bool memory_query_probe(const SequenceState& sequence, std::uint32_t prompt_tokens) const;
++    bool memory_query_needs_recall(const SequenceState& sequence, std::uint32_t prompt_tokens) const;
+     [[nodiscard]] std::uint32_t memory_checkpoint_frontier(const SequenceState& sequence,
+         std::uint32_t prompt_tokens, bool allow_reuse) const;
+     void capture_memory_prefix(SequenceState& sequence, std::uint32_t chunk_tokens);
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index aa638c8b45772fcfa1e548765ee9e38a35a7838b..d92add98b87ec7ce63f4f596bf1ab28365ba8386 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1385,19 +1385,38 @@ void ProgramImpl::archive_memory_window(SequenceState& sequence) {
+     }
+ }
+ 
++bool ProgramImpl::memory_query_needs_recall(const SequenceState& sequence, std::uint32_t prompt_tokens) const {
++    const auto& window = sequence.window;
++    const auto workspace=backend_kv_pages ? std::max(draft_window,ngram_draft_window)+draft_window : 0;
++    if (std::uint64_t(prompt_tokens)+workspace>std::uint64_t(kvmem_window_tokens)+window.removed_tokens)
++        return true;
++    if (!window.removed_tokens) return false;
++
++    // Missing pressure-evicted rows can still be recalled. Skip the probe
++    // only when every absent row belongs to a fully retired proactive page
++    // with an accepted witness. That proves the view has no recallable hole.
++    const auto end = std::min<std::size_t>(window.retired_witnesses.size(),
++        sequence.text_kv_valid / page_tokens);
++    std::uint64_t retired_tokens = 0;
++    for (std::size_t id = 0; id < end; ++id) {
++        const auto witness_end = window.retired_witnesses[id].result_end;
++        if (witness_end && witness_end <= sequence.text_kv_valid &&
++            !std::binary_search(window.pages.begin(), window.pages.end(), id))
++            retired_tokens += page_tokens;
++    }
++    return retired_tokens != window.removed_tokens;
++}
++
+ bool ProgramImpl::memory_query_probe(const SequenceState& sequence, std::uint32_t prompt_tokens) const {
+     const auto& window = sequence.window;
++    if (!kvmem_window_tokens || !window.query_begin || window.query_replayed ||
++        !memory_query_needs_recall(sequence, prompt_tokens)) return false;
+     const auto workspace=backend_kv_pages ? std::max(draft_window,ngram_draft_window)+draft_window : 0;
+     const auto admission=kvmem::query_replay_plan({window.query_begin,window.query_end},
+         window.query_begin,prompt_tokens,kvmem_options.query_replay_max_tokens,page_tokens,
+         std::min(kv_pages_for_tokens(window.query_begin),kvmem_options.selected_tokens/page_tokens),
+         kvmem_window_tokens/page_tokens,workspace);
+-    // A small logical prompt is not proof of a complete native view: an earlier
+-    // draft workspace can already have caused Pressure below B+R.
+-    const bool needs_recall=window.removed_tokens != 0 ||
+-        std::uint64_t(prompt_tokens)+workspace>kvmem_window_tokens;
+-    return kvmem_window_tokens && needs_recall &&
+-        window.query_begin > 0 && !window.query_replayed && admission.admitted;
++    return admission.admitted;
+ }
+ 
+ 

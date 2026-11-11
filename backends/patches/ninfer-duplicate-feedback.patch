@@ -1,0 +1,141 @@
+diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
+index 7be831a448e094b42d4783584c4fe5eab6fa2b89..a0ca30b76d3102e4b41a6263baebac5ed16e8d8a 100644
+--- a/src/models/qwen3_5/frontend/frontend.cpp
++++ b/src/models/qwen3_5/frontend/frontend.cpp
+@@ -1548,6 +1548,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+         if (fi::sha256_hex(fi::sha256(bytes)) != proof.prefix_sha256)
+             throw RequestError(RequestErrorKind::InvalidGcEvidence, "GC evidence prefix token digest mismatch");
+         result.historical_gc_witness_masks.resize(proof.steps.size());
++        result.historical_gc_duplicates.resize(proof.steps.size());
+         constexpr auto page_tokens = static_cast<std::size_t>(kPagedKVPageSize);
+         const auto first_page = [](std::uint32_t token) {
+             return (std::size_t(token) + page_tokens - 1) / page_tokens;
+@@ -1556,6 +1557,26 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+             const auto& step = proof.steps[index];
+             if (step.source_end > proof.prefix_tokens || step.result_end > proof.prefix_tokens)
+                 throw RequestError(RequestErrorKind::InvalidGcEvidence, "GC evidence exceeds its verified prefix");
++            if (step.kind == "duplicate_tool_feedback") {
++                constexpr auto margin = kvmem::historical_kv_duplicate_context_tokens;
++                const auto source_begin = std::size_t(step.source_begin) + margin;
++                const auto result_begin = step.result_begin / page_tokens * page_tokens;
++                const auto result_end = first_page(step.result_end) * page_tokens;
++                if (step.source_end <= source_begin + margin || step.result_begin < step.source_end ||
++                    step.result_end <= step.result_begin || result_end > proof.prefix_tokens ||
++                    step.source_end - step.source_begin != step.result_end - step.result_begin ||
++                    source_begin % page_tokens || (step.source_end - margin) % page_tokens ||
++                    (result_end - result_begin) / page_tokens > kvmem::historical_kv_max_witness_pages ||
++                    !std::equal(result.token_ids.begin() + step.source_begin,
++                        result.token_ids.begin() + step.source_end, result.token_ids.begin() + step.result_begin))
++                    throw RequestError(RequestErrorKind::InvalidGcEvidence,
++                        "Duplicate feedback requires equal token spans, full pages and context");
++                result.historical_gc_duplicates[index] = {
++                    static_cast<std::uint32_t>(source_begin), step.source_end - margin,
++                    static_cast<std::uint32_t>(result_begin), static_cast<std::uint32_t>(result_end),
++                    step.result_begin + margin};
++                continue;
++            }
+             if (step.kind != "thinking") continue;
+             const auto source_begin = first_page(step.source_begin);
+             const auto source_end = step.source_end / page_tokens;
+diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
+index 80d7b93e4f6c04c92c2e4bc539d81f920b9acc9b..1625e785a69388893cc34d354382ce3e684e4d1c 100644
+--- a/src/models/qwen3_5/frontend/prepared_prompt.h
++++ b/src/models/qwen3_5/frontend/prepared_prompt.h
+@@ -154,6 +154,11 @@ struct PreparedTapHints {
+ struct PreparedPromptData {
+     std::optional<HistoricalGcEvidenceBatch> historical_gc_evidence;
+     std::vector<std::vector<std::uint8_t>> historical_gc_witness_masks;
++    struct HistoricalGcDuplicate {
++        std::uint32_t source_begin = 0, source_end = 0, result_begin = 0, result_end = 0;
++        std::uint32_t witness_begin = 0;
++    };
++    std::vector<HistoricalGcDuplicate> historical_gc_duplicates;
+     // Proposal-only sources, never part of target tokens, positions or cache identity.
+     std::vector<std::vector<TokenId>> ngram_sources;
+     std::vector<TokenId> ngram_boundaries;
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index d92add98b87ec7ce63f4f596bf1ab28365ba8386..408c71fad8b447284b9d5b92b45d08e4b99b426f 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -78,12 +78,16 @@ CheckpointPage checkpoint_page(const KvmemWindowState& window, const KvmemPrefix
+     const auto witness = window.retired_witnesses[page];
+     // The append tail (also the MTP bridge row), pre-witness checkpoints, and
+     // checkpoints that lost their retained replacement still require replay.
++    const auto witness_end = std::uint64_t(witness.page) + witness.page_count;
+     if (!witness.result_end || witness.result_end > frontier || witness.page <= page ||
+-        witness.page >= pages || witness.page >= window.archive.size() ||
+-        witness.page >= window.host_versions.size() || !memory_page_selectable(window, witness.page) ||
+-        !window.archive[witness.page] || window.host_versions[witness.page] != page_tokens ||
+-        !std::binary_search(checkpoint.resident_pages.begin(), checkpoint.resident_pages.end(), witness.page))
++        !witness.page_count || witness_end > pages || witness_end > window.archive.size() ||
++        witness_end > window.host_versions.size())
+         return CheckpointPage::Missing;
++    for (auto id = witness.page; id < witness_end; ++id) {
++        if (!memory_page_selectable(window, id) || !window.archive[id] || window.host_versions[id] != page_tokens ||
++            !std::binary_search(checkpoint.resident_pages.begin(), checkpoint.resident_pages.end(), id))
++            return CheckpointPage::Missing;
++    }
+     return CheckpointPage::Omit;
+ }
+ 
+@@ -116,8 +120,14 @@ void audit_recall(KvmemWindowState& window, const std::vector<std::uint32_t>& ca
+         for (const auto page : excluded) {
+             if (page >= window.retired_witnesses.size()) continue;
+             const auto witness = window.retired_witnesses[page];
+-            if (witness.result_end && std::binary_search(shadow.begin(), shadow.end(), witness.page) &&
+-                std::binary_search(live.begin(), live.end(), witness.page)) ++duplicates;
++            if (!witness.result_end) continue;
++            bool covered = true;
++            for (uint32_t i = 0; i < witness.page_count && covered; ++i) {
++                const auto id = witness.page + i;
++                covered = std::binary_search(shadow.begin(), shadow.end(), id) &&
++                    std::binary_search(live.begin(), live.end(), id);
++            }
++            duplicates += covered;
+         }
+         std::fprintf(stderr, "KVMEM_RECALL_COMPARE frontier=%u query_tokens=%u budget=%u applied=%u live=%zu shadow=%zu"
+                              " eligible=%zu duplicates_avoided=%zu excluded=%zu added=%zu audit_us=%lld",
+@@ -1073,8 +1083,8 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         if (page.witness.result_end && id < window.retired_witnesses.size()) {
+             window.retired_witnesses[id] = page.witness;
+             if (kvmem::historical_kv_audit_enabled())
+-                std::fprintf(stderr, "KVMEM_STEP_WITNESS page=%u witness=%u result_end=%u\n",
+-                    id, page.witness.page, page.witness.result_end);
++                std::fprintf(stderr, "KVMEM_STEP_WITNESS page=%u witness=%u result_end=%u witness_pages=%u\n",
++                    id, page.witness.page, page.witness.result_end, page.witness.page_count);
+         }
+         auto detached_record = std::move(window.archive[id]);
+         window.host_versions[id] = 0;
+@@ -1130,8 +1140,17 @@ void ProgramImpl::stage_historical_evidence(SequenceState& sequence, const Prepa
+             const auto& step = proof.steps[index];
+             updates.push_back({step.id, step.kind, step.source_begin, step.source_end, step.result_begin,
+                 step.result_end, step.observation_id, step.importance, step.cold, step.complete});
+-            if (kvmem_options.historical_gc_step_redundancy)
++            if (step.kind == "duplicate_tool_feedback") {
++                const auto& duplicate = prompt.historical_gc_duplicates.at(index);
++                auto& update = updates.back();
++                update.source_begin = duplicate.source_begin;
++                update.source_end = duplicate.source_end;
++                update.result_begin = duplicate.result_begin;
++                update.result_end = duplicate.result_end;
++                update.duplicate_begin = duplicate.witness_begin;
++            } else if (kvmem_options.historical_gc_step_redundancy) {
+                 updates.back().witness_masks = prompt.historical_gc_witness_masks.at(index);
++            }
+         }
+         try { window.historical_evidence->publish(updates, proof.prefix_tokens); }
+         catch (const std::invalid_argument& e) { throw RequestError(RequestErrorKind::InvalidGcEvidence, e.what()); }
+diff --git a/src/serve/historical_gc_evidence.cpp b/src/serve/historical_gc_evidence.cpp
+index ed902422e7e8bde43a6c955f74d83d4183a54270..6cbed4e331b51a4e6939b22098050f2e9360c5a9 100644
+--- a/src/serve/historical_gc_evidence.cpp
++++ b/src/serve/historical_gc_evidence.cpp
+@@ -54,7 +54,8 @@ std::optional<HistoricalGcEvidenceBatch> parse_historical_gc_evidence(const Json
+             bad_request("kvmem_gc step requires id and kind", "kvmem_gc");
+         step.id = row.at("id").get<std::string>(); step.kind = row.at("kind").get<std::string>();
+         if (step.id.empty() || step.id.size() > 128 || (step.kind != "thinking" && step.kind != "completed_step" &&
+-                step.kind != "tool_detail" && step.kind != "superseded"))
++                step.kind != "tool_detail" && step.kind != "superseded" &&
++                step.kind != "duplicate_tool_feedback"))
+             bad_request("Invalid kvmem_gc step id or kind", "kvmem_gc");
+         step.source_begin = integer(row, "source_begin", result.prefix_tokens);
+         step.source_end = integer(row, "source_end", result.prefix_tokens);

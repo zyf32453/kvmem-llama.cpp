@@ -1,0 +1,972 @@
+diff --git a/docs/serving.md b/docs/serving.md
+index bb4c548..d1fe81a 100644
+--- a/docs/serving.md
++++ b/docs/serving.md
+@@ -2797,3 +2797,52 @@ count. Without observed rounds they are `null`, with `unavailable_reason`, rathe
+ than being inferred from output tokens. Acceptance is accepted draft tokens divided
+ by proposed draft tokens; the bonus token is excluded. Native MTP, ngram and DFlash
+ counters keep their existing meanings.
++
++### Completed-step historical GC extension
++
++The opt-in `--kvmem-gc-statistical` policy accepts a development `kvmem_gc` field on
++text-only `/v1/chat/completions` requests with an explicit `prompt_cache_key`.
++It requires one request lane and a RAM-only KVMem history repository; media and
++grafted prefixes are rejected. The flag is exclusive with LRU/redundancy GC.
++Without application evidence it does not infer completed thinking or delete it.
++
++The field contains `prefix_tokens`, `prefix_sha256`, and `steps` (1..64 entries).
++The digest is lowercase SHA256 of the actual prepared input token IDs, each
++encoded as little-endian uint32, rather than a hash of the visible text.
++For evidence preparation, `POST /apply-template` accepts `return_tokens: true`
++and additionally returns `tokens`, an array of `{id, piece}` rows from the actual
++prepared prompt. A piece is text or a byte array for an incomplete UTF-8 fragment.
++Use these IDs rather than re-tokenizing the flattened rendered text: literal
++special-token spellings in message content do not have template-token identity.
++Omitting this flag preserves the existing prompt-only response.
++Each step supplies `id`, `kind`, `source_begin`, `source_end`, `result_begin`,
++`result_end`, `observation_id`, `importance`, `cold`, and `complete`. Ranges are
++half-open token coordinates in that prepared input. Supported kinds are
++`thinking`, `completed_step`, `tool_detail`, and `superseded`; a kind is not
++proof of redundancy. Source and retained-result ranges must be disjoint and
++contain full 64-token blocks. Mixed boundaries, sink, recent and active readers
++retain their normal protections.
++
++The default thresholds are `--kvmem-gc-min-observations 3`,
++`--kvmem-gc-min-cold-observations 3`, and `--kvmem-gc-max-importance 0.1`.
++The application must provide real observations with increasing IDs; repeating
++an identical observation is idempotent, not another cold sample. Completed
++steps meeting the thresholds can retire below the pressure watermark. Candidate
++selection checks published eligibility before later reselection; physical Host
++release may follow after current owners finish. There is no strict real-time
++guarantee that every pair of decode calls contains a completed GC worker round.
++
++Malformed or mismatched evidence returns HTTP 400. Publication is transactional.
++The directory tracks at most 64 live steps. Source retirement releases completed
++step metadata and its additional result protection. A full directory evicts old
++advisory evidence, retaining its KV and invalidating old deletion proposals; it
++does not delete unproven content to admit a new step. A genuine prefix rewind
++invalidates affected evidence and bindings.
++
++`GET /props?model=MODEL` exposes `kvmem_gc.policy`, `min_observations`,
++`min_cold_observations`, `max_importance`, `block_tokens`, and `ram_only` from
++that model's actual options. A verified-artifact producer must check these
++values before using the distinct one-file-equality profile (1 observation,
++0 cold observations, maximum importance 1). That profile does not manufacture
++attention statistics or authorize arbitrary thinking removal. Native CLI/chat
++schema, full CUDA execution and model-quality acceptance are separate checks.
+diff --git a/include/ninfer/engine_options.h b/include/ninfer/engine_options.h
+index cac84ab..0503652 100644
+--- a/include/ninfer/engine_options.h
++++ b/include/ninfer/engine_options.h
+@@ -434,12 +434,15 @@ struct KvmemOptions {
+     std::uint32_t sink_tokens = 0;
+     std::uint32_t recent_tokens = 64;
+     std::uint64_t host_bytes = 0;      // H; hard bound on archived native payload
+-    // Opt-in native Host-page retirement. First NInfer adapter supports LRU;
+-    // the existing working-set retrieval strategy remains independent.
++    // Opt-in native Host-page retirement. Pressure and evidence-driven policies
++    // remain independent of native working-set retrieval.
+     bool historical_gc_lru = false;
+     bool historical_gc_redundancy = false;
++    bool historical_gc_statistical = false;
++    std::uint32_t historical_gc_min_observations = 3, historical_gc_min_cold_observations = 3;
++    double historical_gc_max_importance = 0.1;
+     [[nodiscard]] bool historical_gc_enabled() const noexcept {
+-        return historical_gc_lru || historical_gc_redundancy;
++        return historical_gc_lru || historical_gc_redundancy || historical_gc_statistical;
+     }
+     [[nodiscard]] std::uint32_t sink_blocks() const noexcept {
+         return sink_tokens < 64 ? 1U : sink_tokens / 64U;
+diff --git a/include/ninfer/request.h b/include/ninfer/request.h
+index d7478db..b7c6045 100644
+--- a/include/ninfer/request.h
++++ b/include/ninfer/request.h
+@@ -369,7 +369,22 @@ enum class PromptContinuationMode : std::uint8_t {
+     ContinueFinalAssistant,
+ };
+ 
++// Explicit application evidence, scoped to one named conversation and an exact
++// LE32-token SHA256 prefix. This API does not infer semantic summary coverage.
++struct HistoricalGcStepEvidence {
++    std::string id, kind;
++    std::uint32_t source_begin=0, source_end=0, result_begin=0, result_end=0;
++    std::uint64_t observation_id=0;
++    double importance=1.0;
++    bool cold=false, complete=false;
++};
++struct HistoricalGcEvidenceBatch {
++    std::uint32_t prefix_tokens=0;
++    std::string prefix_sha256;
++    std::vector<HistoricalGcStepEvidence> steps;
++};
+ struct PromptOptions {
++    std::optional<HistoricalGcEvidenceBatch> historical_gc_evidence;
+     PromptContinuationMode continuation = PromptContinuationMode::NewAssistantTurn;
+     std::optional<bool> enable_thinking;
+     std::optional<ReasoningEffort> reasoning_effort;
+@@ -491,6 +506,7 @@ private:
+ };
+ 
+ enum class RequestErrorKind : std::uint8_t {
++    InvalidGcEvidence,
+     ContextLengthExceeded,
+     MediaBudgetExceeded,
+     InvalidMedia,
+diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
+index c65ee98..f5f6052 100644
+--- a/src/models/qwen3_5/frontend/frontend.cpp
++++ b/src/models/qwen3_5/frontend/frontend.cpp
+@@ -1,6 +1,7 @@
+ #include "models/qwen3_5/frontend/frontend.h"
+ 
+ #include "models/qwen3_5/frontend/resources.h"
++#include "models/qwen3_5/frontend/digest.h"
+ #include "models/qwen3_5/frontend/prepared_prompt.h"
+ 
+ #include "models/qwen3_5/frontend/chat_template.h"
+@@ -1333,6 +1334,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+     auto prepared              = std::make_unique<PreparedPromptData>();
+     PreparedPromptData& result = *prepared;
+     result.tool_call_output    = tool_call_output;
++    result.historical_gc_evidence = options.historical_gc_evidence;
+     const auto memory_open=impl_->tokenizer->encode("<think>");
+     const auto memory_close=impl_->tokenizer->encode("</think>");
+     if(memory_open.size()==1) result.memory_think_open=memory_open[0];
+@@ -1529,6 +1531,24 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+         build_ngram_index(result);
+     }
+     detail::prompt_block_keys(result, result.block_hashes, result.block_extras);
++    if (result.historical_gc_evidence) {
++        const auto& proof = *result.historical_gc_evidence;
++        if (!result.context_cache.session_key || has_media || graft || !proof.prefix_tokens ||
++            proof.prefix_tokens > result.token_ids.size() || proof.steps.empty() || proof.steps.size() > 64)
++            throw RequestError(RequestErrorKind::InvalidGcEvidence,
++                "GC evidence requires a named text session and a bounded accepted prefix");
++        std::vector<std::uint8_t> bytes;
++        bytes.reserve(std::size_t(proof.prefix_tokens) * 4);
++        for (std::uint32_t i = 0; i < proof.prefix_tokens; ++i) {
++            const auto token = static_cast<std::uint32_t>(result.token_ids[i]);
++            for (unsigned shift = 0; shift < 32; shift += 8) bytes.push_back(token >> shift);
++        }
++        if (fi::sha256_hex(fi::sha256(bytes)) != proof.prefix_sha256)
++            throw RequestError(RequestErrorKind::InvalidGcEvidence, "GC evidence prefix token digest mismatch");
++        for (const auto& step : proof.steps)
++            if (step.source_end > proof.prefix_tokens || step.result_end > proof.prefix_tokens)
++                throw RequestError(RequestErrorKind::InvalidGcEvidence, "GC evidence exceeds its verified prefix");
++    }
+     result.prepare.seconds = std::chrono::duration<double>(Clock::now() - start).count();
+     return PreparedPrompt(std::move(prepared));
+ }
+diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
+index 8696ffc..b22e87f 100644
+--- a/src/models/qwen3_5/frontend/prepared_prompt.h
++++ b/src/models/qwen3_5/frontend/prepared_prompt.h
+@@ -152,6 +152,7 @@ struct PreparedTapHints {
+ };
+ 
+ struct PreparedPromptData {
++    std::optional<HistoricalGcEvidenceBatch> historical_gc_evidence;
+     // Proposal-only sources, never part of target tokens, positions or cache identity.
+     std::vector<std::vector<TokenId>> ngram_sources;
+     std::vector<TokenId> ngram_boundaries;
+diff --git a/src/models/qwen3_5/program/planning/request_plan.cpp b/src/models/qwen3_5/program/planning/request_plan.cpp
+index 89ea587..459ddf5 100644
+--- a/src/models/qwen3_5/program/planning/request_plan.cpp
++++ b/src/models/qwen3_5/program/planning/request_plan.cpp
+@@ -478,6 +478,8 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
+                 std::min(capacity, base->summary.prompt_tokens + backend_window_tokens - 1U));
+         }
+     }
++    if (prompt.historical_gc_evidence && !kvmem_options.historical_gc_statistical)
++        throw RequestError(RequestErrorKind::InvalidGcEvidence, "kvmem_gc requires --kvmem-gc-statistical");
+     if (kvmem_window_tokens) {
+         (void)memory_image_pages(prompt);
+         // Active requests reserve their physical Host entitlement. GC-enabled
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+index aea867e..9586f00 100644
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -799,6 +799,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
+             sequence.window.think_open=staged.prompt.memory_think_open;
+             sequence.window.think_close=staged.prompt.memory_think_close;
+             sequence.window.attention_scope={staged.prompt.starts_in_reasoning,0};
++            stage_historical_evidence(sequence,staged.prompt);
+             reserve_memory_history(sequence, request, staged.prompt);
+         }
+         if (staged.disk_restore_frontier != 0) {
+@@ -1880,6 +1881,7 @@ runtime::PrefillStepResult ProgramImpl::complete_prefill_step(
+         throw std::logic_error("staged DFlash prefill did not reach the prompt frontier");
+     }
+     sequence.tail_hidden_valid      = true;
++    apply_historical_evidence(sequence, staged.prompt);
+     request.snapshot_prefill_timings();
+     staged.prompt.release_all_media_payloads();
+     if (staged.vision) { staged.vision->retire_handoff(); }
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index 0883adc..c6ef519 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -649,6 +649,8 @@ struct KvmemWindowState {
+     // The bridge is stable while this movable window passes between a live
+     // sequence and retained history. It owns the policy worker, not native KV.
+     std::unique_ptr<kvmem::HistoricalKvPageGc> historical_gc;
++    std::shared_ptr<kvmem::HistoricalKvStepEvidence> historical_evidence;
++    bool historical_handoff = false;
+     std::shared_ptr<kvmem::HistoricalKvPageFeatures> historical_features;
+     std::shared_ptr<kvmem::HistoricalKvThinkingRanges> historical_thinking;
+     std::uint64_t historical_think_start = UINT64_MAX;
+@@ -696,6 +698,14 @@ struct KvmemWindowState {
+ inline bool memory_page_selectable(const KvmemWindowState& window, std::uint32_t id) noexcept {
+     return id >= window.retired_pages.size() || window.retired_pages[id] == 0;
+ }
++// Candidate construction sees a qualified mark before the polling worker has
++// prepared a retirement. Archive/spill code deliberately keeps using the
++// physical-liveness check above until the native owner drops that CPU record.
++inline bool memory_page_recallable(const KvmemWindowState& window, std::uint32_t id,
++                                   bool mandatory = false) {
++    return memory_page_selectable(window,id) &&
++        (!window.historical_evidence || window.historical_evidence->permits_selection(id,mandatory));
++}
+ inline std::vector<KvmemCheckpointKind> checkpoint_kinds(const KvmemWindowState& window) {
+     std::vector<KvmemCheckpointKind> result(kKvmemCheckpointKinds.begin(), kKvmemCheckpointKinds.end());
+     for (size_t i=0; i<window.coverage.slots(); ++i) if (window.coverage.at(i) && window.coverage.at(i)->record.data)
+@@ -2138,6 +2148,8 @@ private:
+                         kvmem::SelectionReason reason = kvmem::SelectionReason::PrefillPressure);
+     void archive_memory_window(SequenceState& sequence);
+     void progress_historical_gc(SequenceState& sequence, bool release_for_prefill);
++    void stage_historical_evidence(SequenceState& sequence, const PreparedPromptData& prompt);
++    void apply_historical_evidence(SequenceState& sequence, const PreparedPromptData& prompt);
+     qwen3_5::TokenSpan memory_query_span(const PreparedPromptData& prompt) const {
+         return bounded_memory_query(prompt,kvmem_options.query_max_tokens);
+     }
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index dc3bce0..b5ffb1a 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -17,6 +17,15 @@ std::atomic<std::uint64_t> next_window_session{1};
+ std::uint32_t valid_columns(std::uint32_t logical_page, std::uint32_t frontier) {
+     return std::min(page_tokens, frontier - logical_page * page_tokens);
+ }
++std::shared_ptr<kvmem::HistoricalKvStepEvidence> make_step_evidence(const KvmemOptions& options, uint32_t capacity) {
++    kvmem::HistoricalKvStepEvidence::Config limits;
++    limits.min_observations=options.historical_gc_min_observations;
++    limits.min_cold_observations=options.historical_gc_min_cold_observations;
++    limits.max_importance=options.historical_gc_max_importance;
++    limits.source_floor_tokens=options.sink_blocks()*page_tokens;
++    return std::make_shared<kvmem::HistoricalKvStepEvidence>(kv_pages_for_tokens(capacity),page_tokens,limits);
++}
++
+ } // namespace
+ 
+ // This bridge borrows Program's existing native pool, address space, stream and
+@@ -679,7 +688,13 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         std::fprintf(stderr, "KVMEM_NATIVE_GC_CONFIG capacity=%u slots=%u logical_pages=%u page_bytes=%llu low=%u high=%u poll_ms=%u append_pages=%u protected_pages=%u\n",
+             capacity, slots, logical_pages, (unsigned long long)stride, low, high, config.poll_ms,
+             burst_pages, protected_pages);
+-        if (kvmem_options.historical_gc_redundancy) {
++        if (kvmem_options.historical_gc_statistical) {
++            if (!window.historical_evidence)
++                window.historical_evidence=make_step_evidence(kvmem_options,capacity);
++            config.evidence = window.historical_evidence;
++            window.historical_gc = std::make_unique<kvmem::HistoricalKvPageGc>(config,
++                std::make_unique<kvmem::HistoricalKvStatisticalPolicy>(window.historical_evidence));
++        } else if (kvmem_options.historical_gc_redundancy) {
+             const auto& model = parameters.model.config().text;
+             const auto dimensions = std::size_t(model.full_attention_layers) *
+                 model.attention->key_width();
+@@ -720,6 +735,8 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+     const auto recent = std::min(valid_pages, kvmem_options.recent_blocks());
+     for (std::uint32_t id = valid_pages - recent; id < valid_pages; ++id) protect(id, recent_pin);
+     for (const auto id : window.media_pages) protect(id, media_pin);
++    if (window.historical_evidence)
++        window.historical_evidence->mark_result_pages(window.gc_protected,128);
+     for (const auto id : window.pages) protect(id, active_pin);
+     if (requests[sequence.lane].prefill) {
+         for (const auto id : window.query_selected) protect(id, query_pin);
+@@ -821,12 +838,60 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         ++window.stamp.history_revision;
+         if (kvmem_options.verify_transfers)
+             std::fprintf(stderr, "KVMEM_NATIVE_GC policy=%s frontier=%u retired=%zu host_bytes=%llu invalidated_checkpoints=%zu\n",
++                kvmem_options.historical_gc_statistical ? "statistical" :
+                 kvmem_options.historical_gc_redundancy ? "redundancy" : "lru",
+                 sequence.text_kv_valid, retired.size(),
+                 static_cast<unsigned long long>(released_bytes), invalidated);
+     }
+ }
+ 
++void ProgramImpl::stage_historical_evidence(SequenceState& sequence, const PreparedPromptData& prompt) {
++    auto& window = sequence.window;
++    if (!prompt.historical_gc_evidence && !window.historical_evidence) return;
++    if (!kvmem_options.historical_gc_statistical || !kvmem_window_tokens)
++        throw RequestError(RequestErrorKind::InvalidGcEvidence, "Step evidence requires statistical KVMem GC");
++    if (!window.historical_evidence) window.historical_evidence=make_step_evidence(kvmem_options,capacity);
++    if (prompt.historical_gc_evidence) {
++        const auto& proof = *prompt.historical_gc_evidence;
++        std::vector<kvmem::HistoricalKvStepEvidence::Update> updates;
++        for (const auto& step : proof.steps)
++            updates.push_back({step.id, step.kind, step.source_begin, step.source_end, step.result_begin,
++                step.result_end, step.observation_id, step.importance, step.cold, step.complete});
++        try { window.historical_evidence->publish(updates, proof.prefix_tokens); }
++        catch (const std::invalid_argument& e) { throw RequestError(RequestErrorKind::InvalidGcEvidence, e.what()); }
++    }
++    // Publish revised evidence before this boundary can commit older intents.
++    progress_historical_gc(sequence,false);
++}
++
++void ProgramImpl::apply_historical_evidence(SequenceState& sequence, const PreparedPromptData& prompt) {
++    auto& window=sequence.window;
++    if (!prompt.historical_gc_evidence && !window.historical_evidence) return;
++    stage_historical_evidence(sequence,prompt);
++    const auto count = kv_pages_for_tokens(sequence.text_kv_valid);
++    const bool handoff = (!backend_kv_pages || sequence.mtp_kv_valid == sequence.text_kv_valid) &&
++        std::any_of(window.pages.begin(), window.pages.end(), [&](auto id) {
++            return window.historical_evidence->handoff_candidate(id) &&
++                id >= kvmem_options.sink_blocks() && id + kvmem_options.recent_blocks() < count;
++        });
++    if (handoff) {
++        window.historical_handoff = true;
++        try {
++            prepare_window(sequence, sequence.text_kv_valid, sequence.text_kv_valid, true, false,
++                kvmem::SelectionReason::DecodePressure);
++        } catch (...) { window.historical_handoff = false; throw; }
++    }
++    progress_historical_gc(sequence, false);
++    if (prompt.historical_gc_evidence || handoff) {
++        const auto stats=window.historical_evidence->stats();
++        std::fprintf(stderr, "KVMEM_STEP_EVIDENCE prefix=%u steps=%zu handoff=%d view_pages=%zu tracked=%zu completed=%llu evicted_evidence=%llu ignored_retired_updates=%llu\n",
++            prompt.historical_gc_evidence ? prompt.historical_gc_evidence->prefix_tokens : 0,
++            prompt.historical_gc_evidence ? prompt.historical_gc_evidence->steps.size() : 0,
++            int(handoff), window.pages.size(), stats.tracked, (unsigned long long)stats.completed,
++            (unsigned long long)stats.evicted_evidence, (unsigned long long)stats.ignored_retired_updates);
++    }
++}
++
+ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, std::uint32_t end,
+                                   bool force_selection, bool allow_pending, kvmem::SelectionReason reason) {
+     if (!kvmem_window_tokens) { return true; }
+@@ -886,7 +951,7 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         const bool query_complete = state.query_tokens != 0 &&
+             (state.query_replayed || begin >= state.query_end) &&
+             state.query_tokens == state.query_end - state.query_begin;
+-        if (reason==kvmem::SelectionReason::Query && query_complete) {
++        if (!state.historical_handoff && reason==kvmem::SelectionReason::Query && query_complete) {
+             if (!state.selector || state.statistics_frontier != begin ||
+                 state.selector->total_tokens() != begin) {
+                 throw std::logic_error("KVMem retrieval index does not match the evaluated prefix");
+@@ -894,8 +959,10 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+             if (state.query_selected.empty())
+                 throw std::logic_error("Query selection must be admitted before native restore");
+             const auto& ids=state.query_selected;
+-            selected.assign(ids.begin(),ids.end());
+             mandatory.assign(state.query_required.begin(),state.query_required.end());
++            for (const auto id : ids)
++                if (memory_page_recallable(state,id,std::find(mandatory.begin(),mandatory.end(),id)!=mandatory.end()))
++                    selected.push_back(id);
+             if (kvmem_options.verify_transfers) {
+                 std::size_t cold = 0;
+                 for (auto id : ids) {
+@@ -909,7 +976,12 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         } else {
+             std::vector<std::uint32_t> candidates;
+             std::vector<std::uint64_t> starts;
+-            for(auto id:state.pages) if(id<count && memory_page_selectable(state,id)) {
++            for(auto id:state.pages) if(id<count) {
++                const bool required=std::binary_search(mandatory.begin(),mandatory.end(),std::uint64_t(id));
++                if (!memory_page_recallable(state,id,required)) continue;
++                // This boundary follows complete prefill; a full witness may
++                // still need the ordinary spill below to acquire Host binding.
++                if (state.historical_handoff && !required && state.historical_evidence->handoff_candidate(id)) continue;
+                 candidates.push_back(id); starts.push_back(std::uint64_t(id)*64);
+             }
+             const std::vector<std::uint32_t> required(mandatory.begin(),mandatory.end());
+@@ -936,6 +1008,7 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         session.prepare(backend->stamp(), selected, mandatory, budget);
+         while (session.advance() != kvmem::MemoryPhase::Ready) {}
+         session.publish();
++        state.historical_handoff = false;
+     }
+     // Any host allocation/promotion that might spill belongs to the I/O job.
+     // Checkpoint capture after this chunk only writes already-resident buffers.
+@@ -1461,7 +1534,8 @@ bool ProgramImpl::rewind_memory_query(SequenceState& sequence) {
+     score_memory_query(sequence,window.query_required,&checkpoint);
+     std::vector<uint32_t> candidates;
+     std::vector<double> scores;
+-    for(uint32_t id=0;id<pages;++id) if(memory_page_selectable(window,id)) {
++    for(uint32_t id=0;id<pages;++id) if(memory_page_recallable(window,id,
++        std::find(window.query_required.begin(),window.query_required.end(),id)!=window.query_required.end())) {
+         candidates.push_back(id);scores.push_back(window.selector->selection_score(id));
+     }
+     window.query_selected=window.selector->pick_scored_blocks(candidates,scores,window.query_required,
+@@ -1505,6 +1579,8 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+                                         bool preserve_view, bool allow_pending, bool resident_native) {
+     auto& window = sequence.window;
+     const auto frontier = static_cast<std::uint32_t>(checkpoint.prefix.size());
++    const bool keep_statistical_gc = kvmem_options.historical_gc_statistical &&
++        frontier == window.statistics_frontier;
+     WindowMemoryBackend backend(*this, sequence, sequence.text_kv_valid);
+     const auto descriptor = backend.descriptor();
+     const kvmem::CheckpointIdentity expected{descriptor.identity, descriptor.layout, checkpoint.identity.stamp};
+@@ -1556,7 +1632,13 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+     window.statistics_frontier = frontier;
+     // Rewinding destroys suffix records. Retire the old page directory with
+     // its worker before those logical IDs can be reused by a new suffix.
+-    window.historical_gc.reset();
++    // Restoring the same accepted prefix only moves its owner. Keep the stable GC
++    // object and its bindings so pending physical releases can finish off-thread.
++    // A real rewind still revokes suffix generations before any record is reused.
++    if (!keep_statistical_gc) {
++        window.historical_gc.reset();
++        if (window.historical_evidence) window.historical_evidence->truncate_to(frontier);
++    }
+     if (window.historical_features) window.historical_features->truncate_to(frontier, page_tokens);
+     if (window.historical_thinking) window.historical_thinking->truncate(frontier);
+     if (window.historical_think_start >= frontier) window.historical_think_start = UINT64_MAX;
+@@ -2073,13 +2155,24 @@ void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestCo
+             (unsigned long long)stats.policy_failures, (unsigned long long)stats.worker_failures);
+         // One terminal observation keeps production timing runs auditable
+         // without per-token transfer tracing or per-victim diagnostic IO.
+-        std::fprintf(stderr, "KVMEM_NATIVE_GC_SUMMARY policy=%s frontier=%u proposed=%llu committed=%llu reclaimed=%llu boundary_committed=%llu comparisons=%llu lossy=%llu\n",
+-            kvmem_options.historical_gc_redundancy ? "redundancy" : "lru", sequence.text_kv_valid,
++        const auto evidence_stats = window.historical_evidence ? window.historical_evidence->stats() :
++            kvmem::HistoricalKvStepEvidence::Stats{};
++        std::fprintf(stderr, "KVMEM_NATIVE_GC_SUMMARY policy=%s frontier=%u proposed=%llu committed=%llu reclaimed=%llu boundary_committed=%llu comparisons=%llu lossy=%llu evidence_completed=%llu evidence_tracked=%zu\n",
++            kvmem_options.historical_gc_statistical ? "statistical" :
++                kvmem_options.historical_gc_redundancy ? "redundancy" : "lru", sequence.text_kv_valid,
+             (unsigned long long)stats.proposed, (unsigned long long)stats.committed,
+             (unsigned long long)stats.reclaimed, (unsigned long long)stats.boundary_committed,
+-            (unsigned long long)policy.comparisons, (unsigned long long)policy.lossy_intents);
++            (unsigned long long)policy.comparisons, (unsigned long long)policy.lossy_intents,
++            (unsigned long long)evidence_stats.completed, evidence_stats.tracked);
++    }
++    // An unchanged statistical history can be moved into the retained directory
++    // without stopping its worker. Physical release is independent of decoding.
++    // Keep the old LRU/redundancy lifecycle and all true-rewind invalidation.
++    if (!kvmem_options.historical_gc_statistical || frontier != sequence.text_kv_valid ||
++            frontier != window.statistics_frontier) {
++        window.historical_gc.reset();
++        if (window.historical_evidence) window.historical_evidence->truncate_to(frontier);
+     }
+-    window.historical_gc.reset();
+     if (window.historical_features) window.historical_features->truncate_to(frontier, page_tokens);
+     if (window.historical_thinking) window.historical_thinking->truncate(frontier);
+     if (window.historical_think_start >= frontier) window.historical_think_start = UINT64_MAX;
+diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
+index a7b3cdc..5a0d24b 100644
+--- a/src/runtime/engine/model_instance.cpp
++++ b/src/runtime/engine/model_instance.cpp
+@@ -326,8 +326,15 @@ EngineOptions normalize_engine_options(EngineOptions options) {
+          !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes)) {
+         throw std::invalid_argument("KVMem auxiliary budgets require selected_tokens");
+     }
+-    if (options.kvmem.historical_gc_lru && options.kvmem.historical_gc_redundancy)
++    if (unsigned(options.kvmem.historical_gc_lru) + unsigned(options.kvmem.historical_gc_redundancy) +
++        unsigned(options.kvmem.historical_gc_statistical) > 1)
+         throw std::invalid_argument("choose one NInfer historical GC policy");
++    if (!options.kvmem.historical_gc_min_observations || options.kvmem.historical_gc_min_observations > 65536 ||
++        options.kvmem.historical_gc_min_cold_observations > 65536 ||
++        !(options.kvmem.historical_gc_max_importance >= 0 && options.kvmem.historical_gc_max_importance <= 1))
++        throw std::invalid_argument("Invalid statistical GC observation thresholds");
++    if (options.kvmem.historical_gc_statistical && options.kvmem.disk_bytes)
++        throw std::invalid_argument("Statistical GC currently requires a RAM-only Host archive");
+     if (options.kvmem.historical_gc_redundancy && !options.kvmem.query_meanq_cosine)
+         throw std::invalid_argument("NInfer redundancy GC requires --kvmem-query-scorer meanq-cosine");
+     if (options.kvmem.historical_gc_enabled() && options.max_concurrency != 1) {
+diff --git a/src/serve/CMakeLists.txt b/src/serve/CMakeLists.txt
+index 753175f..c8848ae 100644
+--- a/src/serve/CMakeLists.txt
++++ b/src/serve/CMakeLists.txt
+@@ -7,6 +7,7 @@ add_library(ninfer_serve STATIC
+   console_log.cpp
+   request_validation.cpp
+   structured_output.cpp
++  historical_gc_evidence.cpp
+   openai_chat_request.cpp
+   openai_chat_response.cpp
+   openai_chat_http.cpp
+diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
+index e0b66dc..5c1a81e 100644
+--- a/src/serve/generation_service.cpp
++++ b/src/serve/generation_service.cpp
+@@ -52,6 +52,11 @@ ApiError request_error_to_api_error(const ninfer::RequestError& exception) {
+     error.param   = "messages";
+     error.message = exception.what();
+     switch (exception.kind()) {
++    case ninfer::RequestErrorKind::InvalidGcEvidence:
++        error.status = 400;
++        error.param = "kvmem_gc";
++        error.code = "invalid_gc_evidence";
++        break;
+     case ninfer::RequestErrorKind::ContextLengthExceeded:
+         error.status = 400;
+         error.code   = "context_length_exceeded";
+@@ -682,6 +687,14 @@ StagedRequest GenerationService::stage_impl(const GenerationRequest& incoming,
+             const bool protocol_allows_engine_automatic =
+                 input.context_cache.allow_engine_automatic_shared_prefixes;
+             input.context_cache = std::move(context_cache);
++            // Responses may already supply an owned session. Otherwise honor Chat's explicit
++            // key independently of the opt-in heuristic --derive-session-keys fallback.
++            if (!input.context_cache.session_key && request.prompt_cache_key &&
++                cache_participation == CacheParticipation::ReadWrite) {
++                input.context_cache.session_key = request.prompt_cache_key;
++                input.context_cache.retention = CacheRetentionHint::LiveSession;
++                input.context_cache.update_session_index = true;
++            }
+             input.context_cache.markers.insert(input.context_cache.markers.end(),
+                                                std::make_move_iterator(protocol_markers.begin()),
+                                                std::make_move_iterator(protocol_markers.end()));
+@@ -774,7 +787,8 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
+ }
+ 
+ std::string GenerationService::render_prompt(const GenerationRequest& request,
+-                                             std::function<bool()> is_cancelled) const {
++                                             std::function<bool()> is_cancelled,
++                                             std::vector<ninfer::TokenId>* token_ids) const {
+     const bool request_has_media = request.media_item_count() != 0;
+     if (request_has_media && !options_.enable_vision) {
+         const std::invalid_argument error("Vision is disabled for this server");
+@@ -800,6 +814,9 @@ std::string GenerationService::render_prompt(const GenerationRequest& request,
+         for (const ninfer::TokenId token : prompt.token_ids()) {
+             text += engine_->token_bytes(token);
+         }
++        if (token_ids) {
++            token_ids->assign(prompt.token_ids().begin(), prompt.token_ids().end());
++        }
+         return text;
+     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
+         throw_request_error(exception);
+diff --git a/src/serve/generation_service.h b/src/serve/generation_service.h
+index f3a3880..4e211f2 100644
+--- a/src/serve/generation_service.h
++++ b/src/serve/generation_service.h
+@@ -213,7 +213,8 @@ public:
+ 
+     // The prompt a chat request renders to, as text (/apply-template); generation does not run.
+     [[nodiscard]] std::string render_prompt(const GenerationRequest& request,
+-                                            std::function<bool()> is_cancelled) const;
++                                            std::function<bool()> is_cancelled,
++                                            std::vector<ninfer::TokenId>* token_ids = nullptr) const;
+ 
+     // Model residency (--model-suspend).
+     ninfer::ResidencyStatus suspend(std::optional<bool> auto_resume) {
+diff --git a/src/serve/historical_gc_evidence.cpp b/src/serve/historical_gc_evidence.cpp
+new file mode 100644
+index 0000000..ed90242
+--- /dev/null
++++ b/src/serve/historical_gc_evidence.cpp
+@@ -0,0 +1,77 @@
++#include "serve/historical_gc_evidence.h"
++#include "serve/request_validation.h"
++#include <algorithm>
++#include <cmath>
++#include <initializer_list>
++
++namespace ninfer::serve {
++namespace {
++using Json = RequestJson;
++void require_object(const Json& value, const char* message, const char* param) {
++    if (!value.is_object()) bad_request(message, param);
++}
++bool get_bool(const Json& object, const char* key, bool fallback) {
++    if (!object.contains(key)) return fallback;
++    if (!object.at(key).is_boolean()) bad_request("GC observation flags must be booleans", "kvmem_gc");
++    return object.at(key).get<bool>();
++}
++} // namespace
++// A development extension: evidence is bound to actual prepared token IDs again
++// in the frontend. Text labels alone never authorize retirement.
++std::optional<HistoricalGcEvidenceBatch> parse_historical_gc_evidence(const Json& body) {
++    if (!body.contains("kvmem_gc")) return std::nullopt;
++    const auto& proof = body.at("kvmem_gc");
++    require_object(proof, "kvmem_gc must be an object", "kvmem_gc");
++    auto fields = [](const Json& value, std::initializer_list<std::string_view> allowed) {
++        for (const auto& item : value.items())
++            if (std::find(allowed.begin(), allowed.end(), item.key()) == allowed.end())
++                bad_request("Unknown kvmem_gc field: " + item.key(), "kvmem_gc");
++    };
++    auto integer = [](const Json& value, const char* key, std::uint64_t maximum) {
++        if (!value.contains(key) || !value.at(key).is_number_integer() ||
++            (!value.at(key).is_number_unsigned() && value.at(key).get<std::int64_t>() < 0))
++            bad_request(std::string("kvmem_gc requires unsigned integer ") + key, "kvmem_gc");
++        const auto number = value.at(key).get<std::uint64_t>();
++        if (number > maximum) bad_request("kvmem_gc integer exceeds its domain", "kvmem_gc");
++        return number;
++    };
++    fields(proof, {"prefix_tokens", "prefix_sha256", "steps"});
++    HistoricalGcEvidenceBatch result;
++    result.prefix_tokens = integer(proof, "prefix_tokens", UINT32_MAX);
++    if (!result.prefix_tokens || !proof.contains("prefix_sha256") || !proof.at("prefix_sha256").is_string())
++        bad_request("kvmem_gc requires a nonempty token prefix and SHA256", "kvmem_gc");
++    result.prefix_sha256 = proof.at("prefix_sha256").get<std::string>();
++    if (result.prefix_sha256.size() != 64 || std::any_of(result.prefix_sha256.begin(), result.prefix_sha256.end(),
++            [](char c) { return !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f'); }))
++        bad_request("kvmem_gc prefix_sha256 must be lowercase hex", "kvmem_gc");
++    if (!proof.contains("steps") || !proof.at("steps").is_array() || proof.at("steps").empty() || proof.at("steps").size() > 64)
++        bad_request("kvmem_gc requires 1..64 steps", "kvmem_gc");
++    for (const auto& row : proof.at("steps")) {
++        require_object(row, "kvmem_gc step must be an object", "kvmem_gc");
++        fields(row, {"id", "kind", "source_begin", "source_end", "result_begin", "result_end", "observation_id", "importance", "cold", "complete"});
++        HistoricalGcStepEvidence step;
++        if (!row.contains("id") || !row.at("id").is_string() || !row.contains("kind") || !row.at("kind").is_string())
++            bad_request("kvmem_gc step requires id and kind", "kvmem_gc");
++        step.id = row.at("id").get<std::string>(); step.kind = row.at("kind").get<std::string>();
++        if (step.id.empty() || step.id.size() > 128 || (step.kind != "thinking" && step.kind != "completed_step" &&
++                step.kind != "tool_detail" && step.kind != "superseded"))
++            bad_request("Invalid kvmem_gc step id or kind", "kvmem_gc");
++        step.source_begin = integer(row, "source_begin", result.prefix_tokens);
++        step.source_end = integer(row, "source_end", result.prefix_tokens);
++        step.result_begin = integer(row, "result_begin", result.prefix_tokens);
++        step.result_end = integer(row, "result_end", result.prefix_tokens);
++        step.observation_id = integer(row, "observation_id", UINT64_MAX);
++        if (!row.contains("importance") || !row.at("importance").is_number() || !row.contains("cold") || !row.contains("complete"))
++            bad_request("kvmem_gc requires explicit observation and completion", "kvmem_gc");
++        step.importance = row.at("importance").get<double>();
++        if (!std::isfinite(step.importance) || step.importance < 0 || step.importance > 1 ||
++            step.source_begin >= step.source_end || step.result_begin >= step.result_end ||
++            (step.source_begin < step.result_end && step.result_begin < step.source_end))
++            bad_request("Invalid kvmem_gc ranges or importance", "kvmem_gc");
++        step.cold = get_bool(row, "cold", false); step.complete = get_bool(row, "complete", false);
++        result.steps.push_back(std::move(step));
++    }
++    return result;
++}
++
++} // namespace ninfer::serve
+diff --git a/src/serve/historical_gc_evidence.h b/src/serve/historical_gc_evidence.h
+new file mode 100644
+index 0000000..9f3f334
+--- /dev/null
++++ b/src/serve/historical_gc_evidence.h
+@@ -0,0 +1,8 @@
++#pragma once
++#include "ninfer/request.h"
++#include "serve/request_json.h"
++#include <optional>
++
++namespace ninfer::serve {
++std::optional<HistoricalGcEvidenceBatch> parse_historical_gc_evidence(const RequestJson& body);
++}
+diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
+index 571c4e6..40d795f 100644
+--- a/src/serve/http_server.cpp
++++ b/src/serve/http_server.cpp
+@@ -1100,6 +1100,13 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
+         {"cors_proxy_enabled", options_.webui_mcp_proxy},
+     };
+     props["backend"] = "ninfer";
++    props["kvmem_gc"] = {
++        {"policy", options.kvmem.historical_gc_statistical ? "statistical" :
++            options.kvmem.historical_gc_redundancy ? "redundancy" : options.kvmem.historical_gc_lru ? "lru" : "off"},
++        {"min_observations", options.kvmem.historical_gc_min_observations},
++        {"min_cold_observations", options.kvmem.historical_gc_min_cold_observations},
++        {"max_importance", options.kvmem.historical_gc_max_importance},
++        {"block_tokens", 64}, {"ram_only", options.kvmem.disk_bytes == 0}};
+     kvmem::SpeculativeConfig spec;
+     if (options.speculative.backend == SpeculativeBackend::Mtp) spec.algorithm = kvmem::SpeculativeAlgorithm::Mtp;
+     if (options.speculative.backend == SpeculativeBackend::DFlash) spec.algorithm = kvmem::SpeculativeAlgorithm::DFlash;
+diff --git a/src/serve/llamacpp_http.cpp b/src/serve/llamacpp_http.cpp
+index b0e4ed6..837e037 100644
+--- a/src/serve/llamacpp_http.cpp
++++ b/src/serve/llamacpp_http.cpp
+@@ -174,11 +174,24 @@ void HttpServer::handle_detokenize(const httplib::Request& req, httplib::Respons
+ 
+ void HttpServer::handle_apply_template(const httplib::Request& req, httplib::Response& res) const {
+     const RequestJson body          = parse_object_body(req);
++    const bool return_tokens        = optional_bool(body, "return_tokens", false);
+     const OpenAIChatRequest request = parse_chat_completion_request(body, request_limits(options_));
+     const ModelRegistry::Lease lease = lease_host_model(request.model, req);
++    std::vector<ninfer::TokenId> prepared_tokens;
+     const std::string prompt         = lease.service().render_prompt(
+-        request.generation, [&req] { return client_disconnected(req); });
+-    res.set_content(dump(OutJson{{"prompt", prompt}}), "application/json");
++        request.generation, [&req] { return client_disconnected(req); },
++        return_tokens ? &prepared_tokens : nullptr);
++    OutJson output{{"prompt", prompt}};
++    if (return_tokens) {
++        // Preserve the template's trusted-token boundaries. Re-encoding the flattened
++        // text can mistake a literal special-token spelling in message data for framing.
++        OutJson rows = OutJson::array();
++        for (const auto token : prepared_tokens) {
++            rows.push_back(OutJson{{"id", token}, {"piece", piece_json(lease.service().token_bytes(token))}});
++        }
++        output["tokens"] = std::move(rows);
++    }
++    res.set_content(dump(output), "application/json");
+ }
+ 
+ void HttpServer::handle_rerank(const httplib::Request& req, httplib::Response& res) {
+diff --git a/src/serve/openai_chat_request.cpp b/src/serve/openai_chat_request.cpp
+index f11a52a..017e564 100644
+--- a/src/serve/openai_chat_request.cpp
++++ b/src/serve/openai_chat_request.cpp
+@@ -1,5 +1,6 @@
+ #include "serve/structured_output.h"
+ #include "serve/openai_chat.h"
++#include "serve/historical_gc_evidence.h"
+ #include "serve/openai_common.h"
+ #include "serve/request_validation.h"
+ 
+@@ -965,6 +966,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
+             parse_structured_output(body.at("response_format"), true, "response_format");
+     }
+     parse_constrained_decoding_extensions(body, output.generation);
++    output.generation.historical_gc_evidence = parse_historical_gc_evidence(body);
+     // One model is resident, so an omitted, null or empty model means that one: llama.cpp's
+     // WebUI omits it or sends "". The HTTP layer substitutes the served model. A model that is
+     // present but not a string is still a malformed request.
+@@ -1005,6 +1007,9 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
+     output.generation.private_cache_boundary_at_prompt_end =
+         body.contains("prompt_cache_key") && body.at("prompt_cache_key").is_string() &&
+         !body.at("prompt_cache_key").get_ref<const std::string&>().empty();
++    if (output.generation.private_cache_boundary_at_prompt_end) {
++        output.generation.prompt_cache_key = body.at("prompt_cache_key").get<std::string>();
++    }
+     return output;
+ }
+ 
+diff --git a/src/serve/request.h b/src/serve/request.h
+index 9f5705d..daf4689 100644
+--- a/src/serve/request.h
++++ b/src/serve/request.h
+@@ -233,6 +233,9 @@ struct RawPromptPiece {
+ };
+ 
+ struct GenerationRequest {
++    std::optional<ninfer::HistoricalGcEvidenceBatch> historical_gc_evidence;
++    // Explicit Chat conversation identity; a cache boundary alone does not name a session.
++    std::optional<std::string> prompt_cache_key;
+     NgramSessionHints ngram_session;
+     std::vector<ChatTurn> messages;
+     // A raw prompt (llama.cpp's /completion, OpenAI's legacy /v1/completions) instead of messages:
+diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
+index c9d61b4..61e9de4 100644
+--- a/src/serve/serve_options.cpp
++++ b/src/serve/serve_options.cpp
+@@ -107,6 +107,10 @@ std::string serve_usage_text(const char* argv0) {
+            "  --kvmem-query-max-tokens N  cap per-token Query capture to its tail (default 512)\n"
+             "  --kvmem-gen-reserve N         positive append workspace R (default 1024), rounded down to 64\n"
+            "  --kvmem-host-mib N            positive Host native KV payload budget H, MiB (default 16384)\n"
++           "  --kvmem-gc-statistical       proactively retire completed spans with retained-result evidence\n"
++           "  --kvmem-gc-min-observations N  minimum distinct observations (default 3)\n"
++           "  --kvmem-gc-min-cold-observations N  consecutive cold observations (default 3)\n"
++           "  --kvmem-gc-max-importance X  latest importance ceiling (default 0.1)\n"
+            "  --kvmem-gc-lru               retire cold sealed Host pages between decode rounds (default off)\n"
+            "  --kvmem-gc-redundancy        retire similar sealed Host pages, then capacity fallback (experimental)\n"
+            "  --kvmem-sink-tokens N         always-kept prefix; default 0 = one 64-token\n"
+@@ -728,6 +732,25 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+             options.kvmem.verify_transfers = true;
+             continue;
+         }
++        if (arg == "--kvmem-gc-statistical") {
++            options.kvmem.historical_gc_statistical = true;
++            continue;
++        }
++        if (arg == "--kvmem-gc-min-observations") {
++            options.kvmem.historical_gc_min_observations = kvmem::CliOptions::integer(arg, require_value(arg.c_str()), 1);
++            continue;
++        }
++        if (arg == "--kvmem-gc-min-cold-observations") {
++            options.kvmem.historical_gc_min_cold_observations = kvmem::CliOptions::integer(arg, require_value(arg.c_str()), 0);
++            continue;
++        }
++        if (arg == "--kvmem-gc-max-importance") {
++            const std::string text = require_value(arg.c_str());
++            std::size_t used = 0;
++            options.kvmem.historical_gc_max_importance = std::stod(text, &used);
++            if (used != text.size()) throw std::invalid_argument("Invalid GC importance threshold");
++            continue;
++        }
+         if (arg == "--kvmem-gc-lru") {
+             options.kvmem.historical_gc_lru = true;
+             continue;
+@@ -2036,8 +2059,15 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+          !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes) {
+         throw std::invalid_argument("KVMem auxiliary options require --kvmem-budget");
+     }
+-    if (options.kvmem.historical_gc_lru && options.kvmem.historical_gc_redundancy)
++    if (unsigned(options.kvmem.historical_gc_lru) + unsigned(options.kvmem.historical_gc_redundancy) +
++        unsigned(options.kvmem.historical_gc_statistical) > 1)
+         throw std::invalid_argument("choose one NInfer historical GC policy");
++    if (!options.kvmem.historical_gc_min_observations || options.kvmem.historical_gc_min_observations > 65536 ||
++        options.kvmem.historical_gc_min_cold_observations > 65536 ||
++        !(options.kvmem.historical_gc_max_importance >= 0 && options.kvmem.historical_gc_max_importance <= 1))
++        throw std::invalid_argument("Invalid statistical GC observation thresholds");
++    if (options.kvmem.historical_gc_statistical && options.kvmem.disk_bytes)
++        throw std::invalid_argument("Statistical GC currently requires a RAM-only Host archive");
+     if (options.kvmem.historical_gc_redundancy && !options.kvmem.query_meanq_cosine)
+         throw std::invalid_argument("NInfer redundancy GC requires --kvmem-query-scorer meanq-cosine");
+     if (options.kvmem.disk_path.empty() != (options.kvmem.disk_bytes == 0) ||
+diff --git a/src/serve/translate.cpp b/src/serve/translate.cpp
+index 7899fd2..3f49c3c 100644
+--- a/src/serve/translate.cpp
++++ b/src/serve/translate.cpp
+@@ -367,6 +367,7 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
+     input.options.graft                            = semantics.graft;
+     input.options.add_vision_id                    = false;
+     input.options.speculative_drafting             = request.speculative_drafting;
++    input.options.historical_gc_evidence = request.historical_gc_evidence;
+     const std::vector<const ToolDefinition*> tools = effective_tools(request);
+     input.options.tool_jsons.reserve(tools.size());
+     for (std::size_t index = 0; index < tools.size(); ++index) {
+diff --git a/tests/cmake/ProductTests.cmake b/tests/cmake/ProductTests.cmake
+index edb1527..b0ee9ec 100644
+--- a/tests/cmake/ProductTests.cmake
++++ b/tests/cmake/ProductTests.cmake
+@@ -112,3 +112,8 @@ ninfer_add_test(ninfer_http_routes_test
+ ninfer_add_test(ninfer_http_transport_test
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_transport.cpp"
+   LIBRARIES ninfer_serve)
++
++# Pure request-evidence contract; execution/Host lifetime is tested in kvmem.
++ninfer_add_test(ninfer_historical_gc_evidence_test
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_historical_gc_evidence.cpp"
++  LIBRARIES ninfer_serve)
+diff --git a/tests/test_historical_gc_evidence.cpp b/tests/test_historical_gc_evidence.cpp
+new file mode 100644
+index 0000000..3010e0b
+--- /dev/null
++++ b/tests/test_historical_gc_evidence.cpp
+@@ -0,0 +1,34 @@
++#include "serve/historical_gc_evidence.h"
++#include "serve/openai_common.h"
++#include <iostream>
++#include <stdexcept>
++using namespace ninfer::serve;
++using Json = RequestJson;
++int main() {
++    auto require = [](bool value) { if (!value) throw std::runtime_error("GC evidence contract failed"); };
++    Json body = {{"kvmem_gc", {{"prefix_tokens", 512}, {"prefix_sha256", std::string(64, 'a')},
++        {"steps", Json::array({{{"id", "step"}, {"kind", "thinking"}, {"source_begin", 64},
++            {"source_end", 256}, {"result_begin", 320}, {"result_end", 448}, {"observation_id", 5},
++            {"importance", .01}, {"cold", true}, {"complete", true}}})}}}};
++    const auto proof = parse_historical_gc_evidence(body);
++    require(proof && proof->prefix_tokens == 512 && proof->steps.at(0).observation_id == 5);
++    require(!parse_historical_gc_evidence(Json::object()));
++    const auto reject = [&](const Json& value) {
++        try { (void)parse_historical_gc_evidence(value); }
++        catch (const ApiException& e) { require(e.error().status == 400); return; }
++        throw std::runtime_error("Invalid evidence accepted");
++    };
++    for (const auto* key : {"source_end", "observation_id", "result_begin"}) {
++        auto bad = body; bad["kvmem_gc"]["steps"][0][key] = -1; reject(bad);
++    }
++    for (const auto* key : {"cold", "complete", "importance"}) {
++        auto bad = body; bad["kvmem_gc"]["steps"][0][key] = nullptr; reject(bad);
++    }
++    auto bad = body; bad["kvmem_gc"]["steps"][0]["result_begin"] = 128; reject(bad);
++    bad = body; bad["kvmem_gc"]["steps"][0]["source_end"] = 513; reject(bad);
++    bad = body; bad["kvmem_gc"]["steps"][0]["typo"] = true; reject(bad);
++    bad = body; bad["kvmem_gc"]["prefix_sha256"] = "invalid"; reject(bad);
++    bad = body; while (bad["kvmem_gc"]["steps"].size() < 65) bad["kvmem_gc"]["steps"].push_back(body["kvmem_gc"]["steps"][0]);
++    reject(bad);
++    std::cout << "Historical GC evidence contract passed\n";
++}
+diff --git a/tests/test_openai_schema.cpp b/tests/test_openai_schema.cpp
+index c02e3f5..6b35d7d 100644
+--- a/tests/test_openai_schema.cpp
++++ b/tests/test_openai_schema.cpp
+@@ -1718,13 +1718,17 @@ int test_prompt_cache_key_grants_long_anchor() {
+ 
+     Json keyed                = base_request();
+     keyed["prompt_cache_key"] = "pi-session-1";
+-    failures += check(parse(keyed).generation.private_cache_boundary_at_prompt_end,
+-                      "a Chat prompt_cache_key grants a long anchor at the end of the prompt");
++    const auto named = parse(keyed).generation;
++    failures += check(named.private_cache_boundary_at_prompt_end &&
++                          named.prompt_cache_key == "pi-session-1",
++                      "a Chat prompt_cache_key grants an anchor and preserves its session identity");
+     keyed["prompt_cache_key"] = nullptr;
+-    failures += check(!parse(keyed).generation.private_cache_boundary_at_prompt_end,
++    failures += check(!parse(keyed).generation.private_cache_boundary_at_prompt_end &&
++                          !parse(keyed).generation.prompt_cache_key,
+                       "a null prompt_cache_key names no conversation");
+     keyed["prompt_cache_key"] = "";
+-    failures += check(!parse(keyed).generation.private_cache_boundary_at_prompt_end,
++    failures += check(!parse(keyed).generation.private_cache_boundary_at_prompt_end &&
++                          !parse(keyed).generation.prompt_cache_key,
+                       "an empty prompt_cache_key names no conversation");
+ 
+     // A gateway that namespaces keys per user sends more than the API's 64 bytes.
+@@ -1745,6 +1749,41 @@ int test_prompt_cache_key_grants_long_anchor() {
+     return failures;
+ }
+ 
++int test_proactive_gc_evidence() {
++    int failures = 0;
++    Json body = base_request();
++    body["prompt_cache_key"] = "step-proof";
++    body["kvmem_gc"] = {{"prefix_tokens", 512}, {"prefix_sha256", std::string(64, 'a')},
++        {"steps", Json::array({{{"id", "step-1"}, {"kind", "thinking"},
++            {"source_begin", 64}, {"source_end", 256}, {"result_begin", 320}, {"result_end", 448},
++            {"observation_id", 7}, {"importance", 0.05}, {"cold", true}, {"complete", true}}})}};
++    const auto result = parse(body);
++    const auto input = prompt(result.generation);
++    failures += check(result.generation.prompt_cache_key == "step-proof" &&
++        input.options.historical_gc_evidence &&
++        input.options.historical_gc_evidence->prefix_tokens == 512 &&
++        input.options.historical_gc_evidence->steps.at(0).observation_id == 7,
++        "GC evidence was not preserved through protocol translation");
++    for (const auto& field : {"source_end", "observation_id"}) {
++        auto invalid = body;
++        invalid["kvmem_gc"]["steps"][0][field] = -1;
++        failures += check(api_error([&] { (void)parse(invalid); }).status == 400, "negative evidence integer accepted");
++    }
++    for (const Json bad : {Json(nullptr), Json::object(), Json::array(), Json("semantic")}) {
++        auto invalid = body; invalid["kvmem_gc"] = bad;
++        failures += check(api_error([&] { (void)parse(invalid); }).status == 400, "invalid evidence envelope accepted");
++    }
++    auto overlap = body; overlap["kvmem_gc"]["steps"][0]["result_begin"] = 128;
++    failures += check(api_error([&] { (void)parse(overlap); }).status == 400, "source/result overlap accepted");
++    auto typo = body; typo["kvmem_gc"]["steps"][0]["complte"] = true;
++    failures += check(api_error([&] { (void)parse(typo); }).status == 400, "unknown evidence field accepted");
++    auto long_batch = body;
++    while (long_batch["kvmem_gc"]["steps"].size() <= 64)
++        long_batch["kvmem_gc"]["steps"].push_back(body["kvmem_gc"]["steps"][0]);
++    failures += check(api_error([&] { (void)parse(long_batch); }).status == 400, "unbounded evidence batch accepted");
++    return failures;
++}
++
+ int main(int argc, char** argv) {
+     if (argc == 2 && std::string_view(argv[1]) == "--image-detail-only") {
+         const int failures = test_messages_and_media();
+@@ -1752,6 +1791,7 @@ int main(int argc, char** argv) {
+         return failures == 0 ? 0 : 1;
+     }
+     int failures = 0;
++    failures += test_proactive_gc_evidence();
+     failures += test_prompt_cache_key_grants_long_anchor();
+     failures += test_graft_extension();
+     failures += test_thinking_budget_extension();
+diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
+index aba04c6..cd2f35d 100644
+--- a/tests/test_serve_options.cpp
++++ b/tests/test_serve_options.cpp
+@@ -2376,8 +2376,27 @@ int run_serve_option_tests() {
+     return failures == 0 ? 0 : 1;
+ }
+ 
++int test_statistical_gc_options() {
++    const auto selected = parse({"ninfer-serve", "model.ninfer", "--kvmem-budget", "2048",
++        "--kvmem-gen-reserve", "1024", "--kvmem-gc-statistical", "--kvmem-gc-min-observations", "1",
++        "--kvmem-gc-min-cold-observations", "0", "--kvmem-gc-max-importance", "1"});
++    int failures = check(selected.kvmem.historical_gc_statistical && selected.kvmem.historical_gc_enabled() &&
++        selected.kvmem.historical_gc_min_observations == 1 && selected.kvmem.historical_gc_min_cold_observations == 0,
++        "statistical GC profile did not reach engine options");
++    for (const auto& extra : {std::vector<std::string>{"--kvmem-gc-lru"},
++            std::vector<std::string>{"--kvmem-gc-max-importance", "nan"},
++            std::vector<std::string>{"--kvmem-gc-min-observations", "0"}}) {
++        std::vector<std::string> args{"ninfer-serve", "model.ninfer", "--kvmem-budget", "2048", "--kvmem-gc-statistical"};
++        args.insert(args.end(), extra.begin(), extra.end());
++        bool rejected = false;
++        try { (void)parse(args); } catch (const std::invalid_argument&) { rejected = true; }
++        failures += check(rejected, "invalid statistical GC configuration accepted");
++    }
++    return failures;
++}
++
+ int main() {
+-    try { return run_serve_option_tests(); }
++    try { return run_serve_option_tests() + test_statistical_gc_options(); }
+     catch (const std::exception& error) {
+         std::cerr << "SERVE_OPTIONS unexpected exception: " << error.what() << std::endl;
+         return 1;

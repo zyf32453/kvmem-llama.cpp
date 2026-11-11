@@ -56,6 +56,8 @@ public:
         uint64_t partial_resource_releases = 0; // Progress before the complete Host bundle is gone.
         uint64_t boundary_batches = 0;
         uint64_t boundary_committed = 0;
+        uint64_t semantic_committed = 0, capacity_lru_committed = 0;
+        uint64_t semantic_reclaimed = 0, capacity_lru_reclaimed = 0;
     };
     struct BoundaryResult {
         uint64_t started_ns = 0;
@@ -115,6 +117,10 @@ private:
     // Allocated only for opt-in auditing. Exact generations prevent associating
     // a reused slot's release with an earlier proposal/round.
     std::vector<HistoricalKvDeleteIntent> audit_committed_;
+    // Worker-owned, independent of diagnostic logging. A slot's generation
+    // binds physical Ready telemetry to the cause of its actual retirement.
+    struct RetireCause { uint64_t generation = 0; HistoricalKvDeleteReason reason = HistoricalKvDeleteReason::Custom; };
+    std::vector<RetireCause> retire_causes_;
     HistoricalKvSnapshot round_;
     bool round_active_ = false;
     HistoricalKvRepository::RangeObservation observation_;
@@ -141,6 +147,8 @@ private:
     std::atomic<uint64_t> host_released_early_{0};
     std::atomic<uint64_t> partial_resource_releases_{0};
     std::atomic<uint64_t> boundary_batches_{0}, boundary_committed_{0};
+    std::atomic<uint64_t> semantic_committed_{0}, capacity_lru_committed_{0};
+    std::atomic<uint64_t> semantic_reclaimed_{0}, capacity_lru_reclaimed_{0};
     std::atomic<uint32_t> requested_ready_{0};
     bool policy_failed_ = false;
 };

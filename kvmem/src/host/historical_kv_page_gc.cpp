@@ -43,6 +43,9 @@ public:
     bool permits(const HistoricalKvBlockMeta & block) const noexcept override {
         return !state_->protected_page(block.logical_id) && inner_->permits(block);
     }
+    bool permits_intent(const HistoricalKvBlockMeta& block, const HistoricalKvDeleteIntent& intent) const noexcept override {
+        return !state_->protected_page(block.logical_id) && inner_->permits_intent(block, intent);
+    }
     HistoricalKvStepResult step(const HistoricalKvSnapshot & snapshot,
                                 const HistoricalKvPressure & pressure,
                                 HistoricalKvWorkBudget budget,
@@ -115,6 +118,7 @@ HistoricalKvPageGc::HistoricalKvPageGc(Config config, std::unique_ptr<Historical
         config.high_ready > config.slots || !config.poll_ms ||
         (config.physical_storage && !config.physical_page_bytes))
         throw std::invalid_argument("NInfer historical GC page capacity/watermarks");
+    if (config.evidence) config.evidence->reset_bindings();
     committed_.reserve(config.batch_blocks);
     HistoricalKvGc::Config gc;
     gc.mode = HistoricalKvGc::Mode::Delete;
@@ -157,6 +161,7 @@ bool HistoricalKvPageGc::register_page(uint32_t page, uint64_t payload_bytes, ui
     const auto handle = writer->handle();
     slot_to_page_[handle.slot] = page;
     handles_[page] = handle;
+    if (config_.evidence) config_.evidence->bind(page, handle);
     if (!repository_->publish_write(*writer))
         throw std::logic_error("NInfer historical GC page publication failed");
     return true;
@@ -184,7 +189,9 @@ void HistoricalKvPageGc::on_retired(void * context, HistoricalKvHandle handle) n
     const auto page = self.slot_to_page_[handle.slot];
     if (page >= self.handles_.size() ||
         self.handles_[page].generation != handle.generation) std::terminate();
-    self.committed_.push_back({page, handle});
+    const auto witness = self.config_.evidence ? self.config_.evidence->retired(page, handle) :
+        HistoricalKvStepEvidence::RetainedWitness{};
+    self.committed_.push_back({page, handle, witness});
 }
 
 const std::vector<HistoricalKvPageGc::RetiredPage> &

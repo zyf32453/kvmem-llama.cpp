@@ -1,0 +1,13 @@
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index f9735f52c14a5ee15c259ab4597059326b85a3e1..3f3e27eba5ecb5083b241e21fa2940e34824a65f 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1250,7 +1250,7 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         sequence.window.historical_evidence) {
+         const auto mark_start=std::chrono::steady_clock::now();
+         const auto marked=sequence.window.historical_evidence->commit_selection_boundary(
+-            sequence.window.gc_protected, active_pin); // The current active GPU reader may drain later.
++            sequence.window.gc_protected, active_pin, sequence.window.gc_protection_rebuilds);
+         if (marked) {
+             std::fprintf(stderr,"KVMEM_STEP_MARK frontier=%u pages=%zu mark_us=%llu\n",sequence.text_kv_valid,marked,
+                 (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(

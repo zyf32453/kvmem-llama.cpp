@@ -1,0 +1,41 @@
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 408c71fad8b447284b9d5b92b45d08e4b99b426f..99f048ff0004bf7cf6004523b62bcedf0e018068 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1164,7 +1164,10 @@ void ProgramImpl::apply_historical_evidence(SequenceState& sequence, const Prepa
+     if (!prompt.historical_gc_evidence && !window.historical_evidence) return;
+     stage_historical_evidence(sequence,prompt);
+     const auto count = kv_pages_for_tokens(sequence.text_kv_valid);
+-    const bool handoff = (!backend_kv_pages || sequence.mtp_kv_valid == sequence.text_kv_valid) &&
++    // The statistical policy can use this spill to bind its result pages.
++    // Step redundancy already requires bound witnesses before committing a mark.
++    const bool handoff = !kvmem_options.historical_gc_step_redundancy &&
++        (!backend_kv_pages || sequence.mtp_kv_valid == sequence.text_kv_valid) &&
+         std::any_of(window.pages.begin(), window.pages.end(), [&](auto id) {
+             return window.historical_evidence->handoff_candidate(id) &&
+                 id >= kvmem_options.sink_blocks() && id + kvmem_options.recent_blocks() < count;
+@@ -1214,10 +1217,9 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         pending.reset();
+         force_selection = false;
+     }
+-    // A proposed feature score is not yet a retirement. Commit the cheap
+-    // selection mark only between native decode transactions. If its source
+-    // still belongs to the active view, use the existing fenced handoff here
+-    // before another decode/checkpoint can retain that obsolete view.
++    // A selection mark takes effect between native decode transactions.
++    // The current view keeps its read pins until a normal Query or Pressure
++    // reselection publishes a replacement. Only then can Host release proceed.
+     if (kvmem_options.historical_gc_step_redundancy && reason==kvmem::SelectionReason::DecodePressure &&
+         !has_context_transaction() && !pending_transaction_ && !requests[sequence.lane].prefill &&
+         (!backend_kv_pages || sequence.mtp_kv_valid==sequence.text_kv_valid) &&
+@@ -1229,10 +1231,6 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+             std::fprintf(stderr,"KVMEM_STEP_MARK frontier=%u pages=%zu mark_us=%llu\n",sequence.text_kv_valid,marked,
+                 (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+                     std::chrono::steady_clock::now()-mark_start).count());
+-            const bool active=std::any_of(sequence.window.pages.begin(),sequence.window.pages.end(),[&](auto id) {
+-                return sequence.window.historical_evidence->handoff_candidate(id);
+-            });
+-            if (active) { sequence.window.historical_handoff=true;force_selection=true; }
+         }
+     }
+     if (end == begin && !force_selection) { return true; }

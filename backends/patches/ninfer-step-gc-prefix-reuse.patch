@@ -1,0 +1,295 @@
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index 11d09ad..e4bf3ad 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -646,6 +646,9 @@ struct KvmemWindowState {
+     // physically released. A retired logical page must never enter a later
+     // Query or Pressure working set, even while its bytes still have readers.
+     std::vector<std::uint8_t> retired_pages;
++    // A retired source may be omitted from a reusable checkpoint view only
++    // while its exact, approved later witness is still available in that view.
++    std::vector<kvmem::HistoricalKvStepEvidence::RetainedWitness> retired_witnesses;
+     // The bridge is stable while this movable window passes between a live
+     // sequence and retained history. It owns the policy worker, not native KV.
+     std::unique_ptr<kvmem::HistoricalKvPageGc> historical_gc;
+@@ -688,6 +691,7 @@ struct KvmemWindowState {
+     std::uint32_t query_probe_swaps = 0;
+     std::vector<std::uint32_t> query_selected;
+     std::vector<std::uint32_t> query_required;
++    std::vector<std::uint32_t> recall_audit_added;
+     std::uint32_t pending_window_begin = 0, pending_window_end = 0;
+     std::uint64_t pending_io_epoch = 0;
+     std::unique_ptr<KvmemAppendPreparation> pending_append;
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 8a776e1..49c63f6 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -2,11 +2,14 @@
+ #include "models/qwen3_5/program/context.h"
+ #include "models/qwen3_5/program/context_work.h"
+ #include "models/qwen3_5/program/storage/kvmem_transfer_trace.h"
++#include "kvmem/historical_kv_audit.hpp"
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <iterator>
+ #include <thread>
+ 
+ namespace ninfer::models::qwen3_5::detail {
+@@ -26,6 +29,83 @@ bool prefix_audit_enabled() noexcept {
+ std::uint32_t valid_columns(std::uint32_t logical_page, std::uint32_t frontier) {
+     return std::min(page_tokens, frontier - logical_page * page_tokens);
+ }
++
++enum class CheckpointPage { Available, Omit, Missing };
++
++CheckpointPage checkpoint_page(const KvmemWindowState& window, const KvmemPrefixCheckpoint& checkpoint,
++                               std::uint32_t page, std::uint32_t frontier, std::uint32_t recent_blocks) {
++    const auto pages = kv_pages_for_tokens(frontier);
++    if (page >= pages || page >= window.archive.size() || page >= window.host_versions.size())
++        return CheckpointPage::Missing;
++    if (memory_page_selectable(window, page))
++        return window.archive[page] && window.host_versions[page] >= valid_columns(page, frontier)
++            ? CheckpointPage::Available : CheckpointPage::Missing;
++    if (page >= window.retired_witnesses.size() || page >= pages - std::min(pages, std::max(1u, recent_blocks)))
++        return CheckpointPage::Missing;
++    const auto witness = window.retired_witnesses[page];
++    // The append tail (also the MTP bridge row), pre-witness checkpoints, and
++    // checkpoints that lost their retained replacement still require replay.
++    if (!witness.result_end || witness.result_end > frontier || witness.page <= page ||
++        witness.page >= pages || witness.page >= window.archive.size() ||
++        witness.page >= window.host_versions.size() || !memory_page_selectable(window, witness.page) ||
++        !window.archive[witness.page] || window.host_versions[witness.page] != page_tokens ||
++        !std::binary_search(checkpoint.resident_pages.begin(), checkpoint.resident_pages.end(), witness.page))
++        return CheckpointPage::Missing;
++    return CheckpointPage::Omit;
++}
++
++// Re-run only the selector on the same accepted Query scores. The shadow
++// allows verified step retirements and keeps capacity deletions excluded.
++void audit_recall(KvmemWindowState& window, const std::vector<std::uint32_t>& candidates,
++                  const std::vector<double>& scores, std::uint32_t frontier, std::uint32_t budget,
++                  bool applied) {
++    const char* audit = std::getenv("KVMEM_GC_RECALL_AUDIT");
++    if (!audit || std::strcmp(audit, "1") != 0) return;
++    const auto start = std::chrono::steady_clock::now();
++    try {
++        auto shadow_candidates = candidates;
++        auto shadow_scores = scores;
++        for (std::uint32_t page = 0; page < std::min<std::size_t>(kv_pages_for_tokens(frontier),
++                                                               window.retired_witnesses.size()); ++page) {
++            const auto witness = window.retired_witnesses[page];
++            if (!witness.result_end || witness.result_end > frontier || memory_page_selectable(window, page))
++                continue;
++            shadow_candidates.push_back(page);
++            shadow_scores.push_back(window.selector->selection_score(page));
++        }
++        const auto& live = window.query_selected;
++        const auto shadow = shadow_candidates.size() == candidates.size() ? live :
++            window.selector->pick_scored_blocks(shadow_candidates, shadow_scores, window.query_required, budget, true);
++        std::vector<std::uint32_t> added, excluded;
++        std::set_difference(live.begin(), live.end(), shadow.begin(), shadow.end(), std::back_inserter(added));
++        std::set_difference(shadow.begin(), shadow.end(), live.begin(), live.end(), std::back_inserter(excluded));
++        std::size_t duplicates = 0;
++        for (const auto page : excluded) {
++            if (page >= window.retired_witnesses.size()) continue;
++            const auto witness = window.retired_witnesses[page];
++            if (witness.result_end && std::binary_search(shadow.begin(), shadow.end(), witness.page) &&
++                std::binary_search(live.begin(), live.end(), witness.page)) ++duplicates;
++        }
++        std::fprintf(stderr, "KVMEM_RECALL_COMPARE frontier=%u query_tokens=%u budget=%u applied=%u live=%zu shadow=%zu"
++                             " eligible=%zu duplicates_avoided=%zu excluded=%zu added=%zu audit_us=%lld",
++            frontier, window.query_tokens, budget, applied ? 1u : 0u, live.size(), shadow.size(),
++            shadow_candidates.size() - candidates.size(), duplicates, excluded.size(), added.size(),
++            static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
++                std::chrono::steady_clock::now() - start).count()));
++        if (!added.empty()) {
++            std::fprintf(stderr, " added_ids=");
++            for (const auto page : added) std::fprintf(stderr, "%u,", page);
++        }
++        if (!excluded.empty()) {
++            std::fprintf(stderr, " excluded_ids=");
++            for (const auto page : excluded) std::fprintf(stderr, "%u,", page);
++        }
++        std::fputc('\n', stderr);
++        if (applied) window.recall_audit_added = std::move(added);
++    } catch (const std::exception& error) {
++        std::fprintf(stderr, "KVMEM_RECALL_AUDIT failed: %s\n", error.what());
++    }
++}
+ std::shared_ptr<kvmem::HistoricalKvStepEvidence> make_step_evidence(const KvmemOptions& options, uint32_t capacity) {
+     kvmem::HistoricalKvStepEvidence::Config limits;
+     limits.min_observations=options.historical_gc_min_observations;
+@@ -819,6 +899,8 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+             static_cast<unsigned long long>(metrics.committed),
+             static_cast<unsigned long long>(metrics.reclaimed), active, query, replay, io);
+     }
++    if (kvmem_options.historical_gc_step_redundancy && window.retired_witnesses.size() < count)
++        window.retired_witnesses.resize(count);
+     const auto& retired = gc.commit_boundary();
+     std::uint64_t released_bytes = 0;
+     for (const auto& page : retired) {
+@@ -829,6 +911,12 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         if (id >= window.host_versions.size() || bytes > window.payload_bytes)
+             throw std::logic_error("NInfer historical GC Host accounting underflow");
+         window.retired_pages[id] = 1;
++        if (page.witness.result_end && id < window.retired_witnesses.size()) {
++            window.retired_witnesses[id] = page.witness;
++            if (kvmem::historical_kv_audit_enabled())
++                std::fprintf(stderr, "KVMEM_STEP_WITNESS page=%u witness=%u result_end=%u\n",
++                    id, page.witness.page, page.witness.result_end);
++        }
+         auto detached_record = std::move(window.archive[id]);
+         window.host_versions[id] = 0;
+         window.payload_bytes -= bytes;
+@@ -836,13 +924,18 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         gc.acknowledge_host_release(page, std::move(detached_record), release_for_prefill);
+     }
+     if (!retired.empty()) {
+-        // A checkpoint requires every page in its captured view. Revoking all
+-        // aliases before the next selection preserves exact restore validation
+-        // while allowing optional old views to yield capacity to execution.
++        // Keep the evaluated prefix and StateImage immutable. A verified step
++        // retirement may project the old view around the retired page; other
++        // missing required pages still invalidate all aliases.
+         const auto valid_checkpoint = [&](const KvmemCheckpointRecord& record) {
+             if (!record.data) return false;
+-            for (const auto id : record.data->resident_pages)
+-                if (!memory_page_selectable(window, static_cast<uint32_t>(id))) return false;
++            const auto& checkpoint = *record.data;
++            const auto frontier = static_cast<std::uint32_t>(checkpoint.prefix.size());
++            for (const auto id : checkpoint.resident_pages)
++                if (!memory_page_selectable(window, static_cast<uint32_t>(id)) &&
++                    checkpoint_page(window, checkpoint, static_cast<uint32_t>(id), frontier,
++                                    kvmem_options.recent_blocks()) != CheckpointPage::Omit)
++                    return false;
+             return true;
+         };
+         size_t invalidated = 0;
+@@ -1494,6 +1587,24 @@ void ProgramImpl::capture_memory_endpoint(SequenceState& sequence, const Request
+     if (!kvmem_window_tokens || !request.allow_memory_reuse || !sequence.window.statistics ||
+         request.lifecycle != Lifecycle::Finishable) return;
+     try {
++        auto& added = sequence.window.recall_audit_added;
++        if (!added.empty()) {
++            const auto& feedback = sequence.window.feedback.snapshot();
++            double mass = 0;
++            std::size_t attended = 0;
++            for (const auto page : added) {
++                const auto position = static_cast<std::uint64_t>(page) * page_tokens;
++                const auto found = std::lower_bound(feedback.pending_output.begin(), feedback.pending_output.end(),
++                    position, [](const auto& item, std::uint64_t key) { return item.first < key; });
++                if (found == feedback.pending_output.end() || found->first != position) continue;
++                mass += found->second;
++                attended += found->second > 0;
++            }
++            std::fprintf(stderr, "KVMEM_RECALL_OUTPUT additions=%zu attended=%zu samples=%llu mean_mass=%.9g\n",
++                added.size(), attended, static_cast<unsigned long long>(feedback.output_samples),
++                feedback.output_samples ? mass / feedback.output_samples : 0.0);
++            added.clear();
++        }
+         sequence.window.graph.reserve_extra(sequence.window.feedback.snapshot().bytes());
+         sequence.window.feedback.finish_output();
+         sequence.window.graph.include_feedback(sequence.window.feedback.snapshot().bytes());
+@@ -1617,6 +1728,8 @@ bool ProgramImpl::rewind_memory_query(SequenceState& sequence) {
+     std::sort(next.begin(),next.end());
+     next.erase(std::unique(next.begin(),next.end()),next.end());
+     const bool unchanged=window.query_probe_swaps==window.swaps && next==window.pages;
++    audit_recall(window, candidates, scores, frontier, kvmem_options.selected_tokens / page_tokens,
++                 admission.admitted && !unchanged);
+     if(!admission.admitted || unchanged) {
+         window.query_replayed=true;
+         window.query_selected.clear();window.query_required.clear();
+@@ -1661,11 +1774,20 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+         throw std::logic_error("KVMem checkpoint lost Host prefix");
+     // A sparse history need only retain the pages the checkpoint actually
+     // restores. Later Query selection is restricted to still-live pages.
++    std::size_t omitted = 0;
+     for (const auto id : checkpoint.resident_pages) {
+-        if (id >= pages || !memory_page_selectable(window,id) ||
+-            !window.archive[id] || window.host_versions[id] < valid_columns(id, frontier)) {
++        const auto availability = checkpoint_page(window, checkpoint, static_cast<uint32_t>(id),
++                                                  frontier, kvmem_options.recent_blocks());
++        if (availability == CheckpointPage::Missing) {
+             throw std::logic_error("KVMem checkpoint has an incomplete native prefix");
+         }
++        omitted += availability == CheckpointPage::Omit;
++    }
++    std::vector<std::uint64_t> projected_pages;
++    if (omitted) {
++        projected_pages.reserve(checkpoint.resident_pages.size() - omitted);
++        for (const auto id : checkpoint.resident_pages)
++            if (memory_page_selectable(window, static_cast<std::uint32_t>(id))) projected_pages.push_back(id);
+     }
+     if(checkpoint.graph.accepted_through!=frontier || checkpoint.graph.block_tokens!=page_tokens)
+         throw std::logic_error("KVMem checkpoint graph has a different accepted prefix");
+@@ -1707,6 +1829,7 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+     window.archive.resize(pages);
+     window.host_versions.resize(pages);
+     window.retired_pages.resize(pages);
++    window.retired_witnesses.resize(std::min<std::size_t>(window.retired_witnesses.size(), pages));
+     window.payload_bytes = 0;
+     for (const auto& record : window.archive) window.payload_bytes += record.size();
+     if (frontier % page_tokens) window.host_versions.back() = frontier % page_tokens;
+@@ -1745,9 +1868,10 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+     if (preserve_view || !window.query_tokens || window.query_tokens!=window.query_end-window.query_begin) {
+         auto restored = std::make_shared<WindowMemoryBackend>(*this, sequence, frontier, resident_native);
+         kvmem::MemorySession session(restored);
+-        // A checkpoint includes already appended reserve rows. Restore its exact
+-        // view within B+R, then ordinary append pressure restores the B/R split.
+-        session.prepare(restored->stamp(), checkpoint.resident_pages, checkpoint.resident_pages,
++        // Restore captured rows within B+R, omitting only verified retirements.
++        // The evaluated prefix is identical; subsequent attention uses this view.
++        const auto& restored_pages = omitted ? projected_pages : checkpoint.resident_pages;
++        session.prepare(restored->stamp(), restored_pages, restored_pages,
+             {kvmem_window_tokens, 0, kvmem_window_tokens, memory_retained_budget});
+         for (;;) {
+             const auto epoch = memory_io ? memory_io->completion_epoch() : 0;
+@@ -1756,6 +1880,9 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+                 memory_io->wait_for_completion(epoch, std::chrono::milliseconds(1));
+         }
+         session.publish();
++        if (omitted && kvmem::historical_kv_audit_enabled())
++            std::fprintf(stderr, "KVMEM_PREFIX_PROJECT frontier=%u omitted=%zu resident=%zu\n",
++                frontier, omitted, restored_pages.size());
+     } else {
+         prepare_window(sequence, frontier, frontier, true, allow_pending,kvmem::SelectionReason::Query);
+     }
+@@ -1812,8 +1939,8 @@ std::optional<KvmemHistoryMatch> ProgramImpl::memory_restorable_history(const Pr
+                 history->host_versions.size() >= pages;
+             for (const auto page : checkpoint.resident_pages) {
+                 if (!complete) break;
+-                complete = page < pages && memory_page_selectable(*history,page) &&
+-                    history->archive[page] && history->host_versions[page] >= valid_columns(page, frontier);
++                complete = checkpoint_page(*history, checkpoint, static_cast<std::uint32_t>(page),
++                                           frontier, kvmem_options.recent_blocks()) != CheckpointPage::Missing;
+             }
+             if (!complete) { ++incomplete; return false; }
+             if (frontier >= prompt.token_ids.size() ||
+@@ -1945,6 +2072,7 @@ bool ProgramImpl::prepare_memory_materialization(MaterializationTransaction& tra
+         auto& work = *prepared->work;
+         const auto& checkpoint = *memory_checkpoint(history, match->kind);
+         for (const auto id : checkpoint.resident_pages) {
++            if (!memory_page_selectable(history, static_cast<std::uint32_t>(id))) continue;
+             work.ids.push_back(static_cast<std::uint32_t>(id));
+             work.sources.push_back(history.archive.at(id).source());
+         }
+@@ -2014,6 +2142,7 @@ bool ProgramImpl::restore_memory_history(SequenceState& sequence, RequestControl
+     window.query_capture = false;
+     window.query_replay_active = false;
+     window.query_selected.clear();window.query_required.clear();
++    window.recall_audit_added.clear();
+     const auto query = memory_query_span(staged.prompt);
+     window.query_begin = static_cast<std::uint32_t>(query.begin);
+     window.query_end = static_cast<std::uint32_t>(query.begin + query.count);
+@@ -2254,6 +2383,7 @@ void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestCo
+     window.archive.resize(pages);
+     window.host_versions.resize(pages);
+     window.retired_pages.resize(pages);
++    window.retired_witnesses.resize(std::min<std::size_t>(window.retired_witnesses.size(), pages));
+     window.payload_bytes = 0;
+     for (const auto& record : window.archive) window.payload_bytes += record.size();
+     std::optional<std::size_t> destination;

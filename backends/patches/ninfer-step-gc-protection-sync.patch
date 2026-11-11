@@ -1,0 +1,256 @@
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index d7649e1544645ca40d31757e11558d8f7c895c52..d7056877c2a52cda4d71745ae36ea9fd8ca1ab0e 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -658,6 +658,14 @@ struct KvmemWindowState {
+     std::shared_ptr<kvmem::HistoricalKvThinkingRanges> historical_thinking;
+     std::uint64_t historical_think_start = UINT64_MAX;
+     std::vector<std::uint8_t> gc_protected;
++    struct GcProtectionKey {
++        std::size_t archive_pages, active_pages;
++        std::uint32_t valid_pages, complete_pages, swaps;
++        std::uint64_t result_revision;
++        bool operator==(const GcProtectionKey&) const = default;
++    };
++    std::optional<GcProtectionKey> gc_protection_key;
++    std::uint64_t gc_protection_checks = 0, gc_protection_rebuilds = 0;
+     kvmem::MemoryStamp stamp;
+     std::uint64_t payload_bytes = 0;
+     std::uint64_t spilled_bytes = 0, restored_bytes = 0;
+@@ -2151,7 +2159,9 @@ private:
+                         bool force_selection = false, bool allow_pending = false,
+                         kvmem::SelectionReason reason = kvmem::SelectionReason::PrefillPressure);
+     void archive_memory_window(SequenceState& sequence);
+-    void progress_historical_gc(SequenceState& sequence, bool release_for_prefill);
++    void sync_historical_gc_protections(SequenceState& sequence, bool reuse_unchanged);
++    void progress_historical_gc(SequenceState& sequence, bool release_for_prefill,
++                                bool reuse_protections = false);
+     void stage_historical_evidence(SequenceState& sequence, const PreparedPromptData& prompt);
+     void apply_historical_evidence(SequenceState& sequence, const PreparedPromptData& prompt);
+     qwen3_5::TokenSpan memory_query_span(const PreparedPromptData& prompt) const {
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 99f048ff0004bf7cf6004523b62bcedf0e018068..a8c1a5492df17b94da5bcd6da5f5465f5793f837 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -18,6 +18,8 @@ namespace ninfer::models::qwen3_5::detail {
+ namespace {
+ constexpr std::uint32_t page_tokens = 64;
+ constexpr std::size_t transfer_staging_limit = 64ULL << 20;
++constexpr uint8_t sink_pin = 1, recent_pin = 2, active_pin = 4,
++    query_pin = 8, replay_pin = 16, media_pin = 32, io_pin = 64, witness_pin = 128;
+ std::atomic<std::uint64_t> next_window_session{1};
+ bool incremental_window_enabled() noexcept {
+     static const bool enabled = [] {
+@@ -482,6 +484,8 @@ public:
+ 
+     void publish_host() {
+         auto& seq = backend.sequence;
++        // A spill can seal a record without advancing the accepted frontier.
++        seq.window.gc_protection_key.reset();
+         for (std::size_t id = 0; id < pending.size(); ++id) {
+             if (pending[id]) { seq.window.archive[id] = std::move(pending[id]); }
+         }
+@@ -918,12 +922,82 @@ bool ProgramImpl::prepare_memory_append(SequenceState& sequence, std::uint32_t b
+     return prepare_memory_append(sequence, begin, end, false, allow_gc_wait, prefetch_only);
+ }
+ 
+-void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_for_prefill) {
++void ProgramImpl::sync_historical_gc_protections(SequenceState& sequence, bool reuse_unchanged) {
++    auto& window = sequence.window;
++    auto& gc = *window.historical_gc;
++    const auto count = static_cast<std::uint32_t>(window.archive.size());
++    const auto valid_pages = std::min(count, kv_pages_for_tokens(sequence.text_kv_valid));
++    const bool cacheable = reuse_unchanged && !requests[sequence.lane].prefill &&
++        !window.pending_window && !window.pending_append;
++    const KvmemWindowState::GcProtectionKey key{
++        count, window.pages.size(), valid_pages, sequence.text_kv_valid / page_tokens, window.swaps,
++        window.historical_evidence ? window.historical_evidence->result_protection_revision() : 0};
++    ++window.gc_protection_checks;
++    if (cacheable && window.gc_protection_key == key) return;
++
++    window.gc_protection_key.reset();
++    ++window.gc_protection_rebuilds;
++    if (window.retired_pages.size() < count) window.retired_pages.resize(count);
++    if (window.gc_protected.size() < count) window.gc_protected.resize(count);
++    std::fill(window.gc_protected.begin(), window.gc_protected.end(), 0);
++    const auto protect = [&](std::uint32_t id, uint8_t reason) {
++        if (id < count) window.gc_protected[id] |= reason;
++    };
++    for (std::uint32_t id = 0; id < std::min(count, kvmem_options.sink_blocks()); ++id) protect(id, sink_pin);
++    // The archive can contain preallocated lookahead pages. Recent protection
++    // follows the accepted KV frontier, not the last allocated archive slot.
++    const auto recent = std::min(valid_pages, kvmem_options.recent_blocks());
++    for (std::uint32_t id = valid_pages - recent; id < valid_pages; ++id) protect(id, recent_pin);
++    for (const auto id : window.media_pages) protect(id, media_pin);
++    if (window.historical_evidence)
++        window.historical_evidence->mark_result_pages(window.gc_protected, witness_pin);
++    for (const auto id : window.pages) protect(id, active_pin);
++    if (requests[sequence.lane].prefill) {
++        for (const auto id : window.query_selected) protect(id, query_pin);
++        for (const auto id : window.query_required) protect(id, query_pin);
++        // This checkpoint is an execution dependency only until Query replay
++        // finishes. Other checkpoints are optional reuse opportunities: their
++        // metadata is revoked below if GC retires a required Host page.
++        if (window.query_capture && (!window.query_replayed || window.query_replay_active))
++            if (const auto* checkpoint = memory_checkpoint(window, KvmemCheckpointKind::Base))
++                for (const auto id : checkpoint->resident_pages) protect(id, replay_pin);
++    }
++    if (window.pending_window)
++        std::fill(window.gc_protected.begin(), window.gc_protected.end(), io_pin);
++    if (window.pending_append && window.pending_append->work)
++        for (const auto id : window.pending_append->work->ids) protect(id, io_pin);
++    for (std::uint32_t id = 0; id < count; ++id) {
++        if (!memory_page_selectable(window, id)) continue;
++        if (id < valid_pages && id < window.host_versions.size() &&
++            window.host_versions[id] == page_tokens && window.archive[id] &&
++            (!kvmem_options.disk_bytes || !window.archive[id].mutable_resident()) && !gc.contains(id)) {
++            if (window.historical_features && !window.historical_features->has_page(id)) {
++                const auto* statistics = window.statistics.get();
++                if (!statistics || statistics->n_tokens(id) != page_tokens)
++                    throw std::logic_error("NInfer redundancy GC requires sealed Mean-K page statistics");
++                const auto& shape = statistics->config();
++                std::vector<float> descriptor(std::size_t(shape.n_layer) * shape.n_embd_k);
++                for (uint32_t layer = 0; layer < shape.n_layer; ++layer)
++                    statistics->mean_k(id, layer, descriptor.data() + std::size_t(layer) * shape.n_embd_k);
++                window.historical_features->publish_page(id, descriptor);
++            }
++            if (!gc.register_page(id, window.archive[id].size(), uint64_t(id) + 1))
++                throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,
++                    "NInfer historical GC cannot register a sealed Host page");
++        }
++        if (gc.contains(id)) gc.protect_page(id, window.gc_protected[id] != 0);
++    }
++    if (cacheable) window.gc_protection_key = key;
++}
++
++void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_for_prefill,
++                                        bool reuse_protections) {
+     if (!kvmem_options.historical_gc_enabled()) return;
+     auto& window = sequence.window;
+     const auto stride = text_host_kv_page_stride + backend_host_kv_page_stride;
+     if (!stride) throw std::logic_error("NInfer historical GC has no native Host page layout");
+     if (!window.historical_gc) {
++        window.gc_protection_key.reset();
+         const auto logical_pages = kv_pages_for_tokens(capacity);
+         const auto slots = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+             logical_pages, memory_retained_budget / stride));
+@@ -986,61 +1060,9 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         }
+         window.historical_gc->start();
+     }
++    sync_historical_gc_protections(sequence, reuse_protections);
+     auto& gc = *window.historical_gc;
+     const auto count = static_cast<std::uint32_t>(window.archive.size());
+-    if (window.retired_pages.size() < count) window.retired_pages.resize(count);
+-    if (window.gc_protected.size() < count) window.gc_protected.resize(count);
+-    std::fill(window.gc_protected.begin(), window.gc_protected.end(), 0);
+-    constexpr uint8_t sink_pin = 1, recent_pin = 2, active_pin = 4,
+-        query_pin = 8, replay_pin = 16, media_pin = 32, io_pin = 64;
+-    const auto protect = [&](std::uint32_t id, uint8_t reason) {
+-        if (id < count) window.gc_protected[id] |= reason;
+-    };
+-    for (std::uint32_t id = 0; id < std::min(count, kvmem_options.sink_blocks()); ++id) protect(id, sink_pin);
+-    // The archive can contain preallocated lookahead pages. Recent protection
+-    // follows the accepted KV frontier, not the last allocated archive slot.
+-    const auto valid_pages = std::min(count, kv_pages_for_tokens(sequence.text_kv_valid));
+-    const auto recent = std::min(valid_pages, kvmem_options.recent_blocks());
+-    for (std::uint32_t id = valid_pages - recent; id < valid_pages; ++id) protect(id, recent_pin);
+-    for (const auto id : window.media_pages) protect(id, media_pin);
+-    if (window.historical_evidence)
+-        window.historical_evidence->mark_result_pages(window.gc_protected,128);
+-    for (const auto id : window.pages) protect(id, active_pin);
+-    if (requests[sequence.lane].prefill) {
+-        for (const auto id : window.query_selected) protect(id, query_pin);
+-        for (const auto id : window.query_required) protect(id, query_pin);
+-        // This checkpoint is an execution dependency only until Query replay
+-        // finishes. Other checkpoints are optional reuse opportunities: their
+-        // metadata is revoked below if GC retires a required Host page.
+-        if (window.query_capture && (!window.query_replayed || window.query_replay_active))
+-            if (const auto* checkpoint = memory_checkpoint(window, KvmemCheckpointKind::Base))
+-                for (const auto id : checkpoint->resident_pages) protect(id, replay_pin);
+-    }
+-    if (window.pending_window)
+-        std::fill(window.gc_protected.begin(), window.gc_protected.end(), io_pin);
+-    if (window.pending_append && window.pending_append->work)
+-        for (const auto id : window.pending_append->work->ids) protect(id, io_pin);
+-    for (std::uint32_t id = 0; id < count; ++id) {
+-        if (!memory_page_selectable(window, id)) continue;
+-        if (id < valid_pages && id < window.host_versions.size() &&
+-            window.host_versions[id] == page_tokens && window.archive[id] &&
+-            (!kvmem_options.disk_bytes || !window.archive[id].mutable_resident()) && !gc.contains(id)) {
+-            if (window.historical_features && !window.historical_features->has_page(id)) {
+-                const auto* statistics = window.statistics.get();
+-                if (!statistics || statistics->n_tokens(id) != page_tokens)
+-                    throw std::logic_error("NInfer redundancy GC requires sealed Mean-K page statistics");
+-                const auto& shape = statistics->config();
+-                std::vector<float> descriptor(std::size_t(shape.n_layer) * shape.n_embd_k);
+-                for (uint32_t layer = 0; layer < shape.n_layer; ++layer)
+-                    statistics->mean_k(id, layer, descriptor.data() + std::size_t(layer) * shape.n_embd_k);
+-                window.historical_features->publish_page(id, descriptor);
+-            }
+-            if (!gc.register_page(id, window.archive[id].size(), uint64_t(id) + 1))
+-                throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded,
+-                    "NInfer historical GC cannot register a sealed Host page");
+-        }
+-        if (gc.contains(id)) gc.protect_page(id, window.gc_protected[id] != 0);
+-    }
+     if (kvmem_options.verify_transfers) {
+         uint32_t native = 0, sealed = 0, registered = 0, eligible = 0;
+         uint32_t active = 0, query = 0, replay = 0, io = 0;
+@@ -1182,11 +1204,12 @@ void ProgramImpl::apply_historical_evidence(SequenceState& sequence, const Prepa
+     progress_historical_gc(sequence, false);
+     if (prompt.historical_gc_evidence || handoff) {
+         const auto stats=window.historical_evidence->stats();
+-        std::fprintf(stderr, "KVMEM_STEP_EVIDENCE prefix=%u steps=%zu handoff=%d view_pages=%zu tracked=%zu completed=%llu evicted_evidence=%llu ignored_retired_updates=%llu\n",
++        std::fprintf(stderr, "KVMEM_STEP_EVIDENCE prefix=%u steps=%zu handoff=%d view_pages=%zu tracked=%zu completed=%llu evicted_evidence=%llu ignored_retired_updates=%llu gc_checks=%llu gc_rebuilds=%llu\n",
+             prompt.historical_gc_evidence ? prompt.historical_gc_evidence->prefix_tokens : 0,
+             prompt.historical_gc_evidence ? prompt.historical_gc_evidence->steps.size() : 0,
+             int(handoff), window.pages.size(), stats.tracked, (unsigned long long)stats.completed,
+-            (unsigned long long)stats.evicted_evidence, (unsigned long long)stats.ignored_retired_updates);
++            (unsigned long long)stats.evicted_evidence, (unsigned long long)stats.ignored_retired_updates,
++            (unsigned long long)window.gc_protection_checks, (unsigned long long)window.gc_protection_rebuilds);
+     }
+ }
+ 
+@@ -1198,7 +1221,7 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         throw std::logic_error("KVMem append exceeds logical frontier or reserve");
+     }
+     const bool prefill_boundary = reason != kvmem::SelectionReason::DecodePressure;
+-    progress_historical_gc(sequence, prefill_boundary);
++    progress_historical_gc(sequence, prefill_boundary, !prefill_boundary && !force_selection && end != begin);
+     auto& pending = sequence.window.pending_window;
+     if (pending) {
+         if (sequence.window.pending_window_begin != begin ||
+@@ -1226,7 +1249,7 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         sequence.window.historical_evidence) {
+         const auto mark_start=std::chrono::steady_clock::now();
+         const auto marked=sequence.window.historical_evidence->commit_selection_boundary(
+-            sequence.window.gc_protected,4); // The current active GPU reader may drain later.
++            sequence.window.gc_protected, active_pin); // The current active GPU reader may drain later.
+         if (marked) {
+             std::fprintf(stderr,"KVMEM_STEP_MARK frontier=%u pages=%zu mark_us=%llu\n",sequence.text_kv_valid,marked,
+                 (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+@@ -2020,6 +2043,7 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+     // Restoring the same accepted prefix only moves its owner. Keep the stable GC
+     // object and its bindings so pending physical releases can finish off-thread.
+     // A real rewind still revokes suffix generations before any record is reused.
++    window.gc_protection_key.reset();
+     if (!keep_statistical_gc) {
+         window.historical_gc.reset();
+         if (window.historical_evidence) window.historical_evidence->truncate_to(frontier);
+@@ -2409,6 +2433,7 @@ bool ProgramImpl::restore_memory_history(SequenceState& sequence, RequestControl
+         sequence.mtp_kv_valid = *frontier;
+         commit_sequence_kv(sequence, *frontier, *frontier);
+         window.host_versions.at(last / page_tokens) = 0;
++        window.gc_protection_key.reset();
+         // Same-boundary query replay can restore before another view switch.
+         archive_memory_window(sequence);
+     }
+@@ -2573,6 +2598,7 @@ void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestCo
+     // An unchanged statistical history can be moved into the retained directory
+     // without stopping its worker. Physical release is independent of decoding.
+     // Keep the old LRU/redundancy lifecycle and all true-rewind invalidation.
++    window.gc_protection_key.reset();
+     if (!kvmem_options.historical_gc_statistical || frontier != sequence.text_kv_valid ||
+             frontier != window.statistics_frontier) {
+         window.historical_gc.reset();

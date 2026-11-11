@@ -512,6 +512,23 @@ void AttentionFeedback::observe_prefill(uint64_t begin, uint64_t end, uint32_t a
     state_.prefill_end = end;
 }
 
+std::vector<uint32_t> low_scoring_cold_pages(std::vector<QueryTrimPage> optional, size_t limit) {
+    const auto quartile = optional.size() / 4;
+    if (!quartile || !limit) return {};
+    std::sort(optional.begin(), optional.end(), [](const QueryTrimPage& a, const QueryTrimPage& b) {
+        return a.score != b.score ? a.score < b.score : a.id < b.id;
+    });
+    const auto cutoff = optional[quartile].score;
+    std::vector<uint32_t> skipped;
+    skipped.reserve(std::min(limit, quartile));
+    for (const auto& page : optional) {
+        if (page.score >= cutoff || skipped.size() == limit) break;
+        if (page.cold) skipped.push_back(page.id);
+    }
+    std::sort(skipped.begin(), skipped.end());
+    return skipped;
+}
+
 std::vector<double> AttentionFeedback::pressure_scores(const std::vector<uint64_t>& candidates, double decay) const {
     decay_check(decay);
     std::vector<double> result; result.reserve(candidates.size());

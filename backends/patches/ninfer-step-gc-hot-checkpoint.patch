@@ -1,0 +1,147 @@
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index d7056877c2a52cda4d71745ae36ea9fd8ca1ab0e..3ce60968e611f9ce6315621f35541d7e1c4cf91a 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -666,6 +666,8 @@ struct KvmemWindowState {
+     };
+     std::optional<GcProtectionKey> gc_protection_key;
+     std::uint64_t gc_protection_checks = 0, gc_protection_rebuilds = 0;
++    std::weak_ptr<KvmemPrefixCheckpoint> gc_recent_checkpoint_hit;
++    std::uint64_t gc_checkpoint_hit_revision = 0;
+     kvmem::MemoryStamp stamp;
+     std::uint64_t payload_bytes = 0;
+     std::uint64_t spilled_bytes = 0, restored_bytes = 0;
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 3f3e27eba5ecb5083b241e21fa2940e34824a65f..86c24a57e78abb92d6dbc84979925168d8f11b23 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -67,32 +67,57 @@ std::uint32_t valid_columns(std::uint32_t logical_page, std::uint32_t frontier)
+ 
+ enum class CheckpointPage { Available, Omit, Missing };
+ 
+-CheckpointPage checkpoint_page(const KvmemWindowState& window, const KvmemPrefixCheckpoint& checkpoint,
+-                               std::uint32_t page, std::uint32_t frontier, std::uint32_t recent_blocks) {
++bool checkpoint_can_omit(const KvmemWindowState& window, const KvmemPrefixCheckpoint& checkpoint,
++                         std::uint32_t page, kvmem::HistoricalKvStepEvidence::RetainedWitness witness,
++                         std::uint32_t frontier, std::uint32_t recent_blocks) noexcept {
+     const auto pages = kv_pages_for_tokens(frontier);
+-    if (page >= pages || page >= window.archive.size() || page >= window.host_versions.size())
+-        return CheckpointPage::Missing;
+-    if (memory_page_selectable(window, page))
+-        return window.archive[page] && window.host_versions[page] >= valid_columns(page, frontier)
+-            ? CheckpointPage::Available : CheckpointPage::Missing;
+-    if (page >= window.retired_witnesses.size() || page >= pages - std::min(pages, std::max(1u, recent_blocks)))
+-        return CheckpointPage::Missing;
+-    const auto witness = window.retired_witnesses[page];
+     // The append tail (also the MTP bridge row), pre-witness checkpoints, and
+     // checkpoints that lost their retained replacement still require replay.
+     const auto witness_end = std::uint64_t(witness.page) + witness.page_count;
+-    if (!witness.result_end || witness.result_end > frontier || witness.page <= page ||
++    if (page >= pages - std::min(pages, std::max(1u, recent_blocks)) ||
++        !witness.result_end || witness.result_end > frontier || witness.page <= page ||
+         !witness.page_count || witness_end > pages || witness_end > window.archive.size() ||
+         witness_end > window.host_versions.size())
+-        return CheckpointPage::Missing;
++        return false;
+     for (auto id = witness.page; id < witness_end; ++id) {
+         if (!memory_page_selectable(window, id) || !window.archive[id] || window.host_versions[id] != page_tokens ||
+             !std::binary_search(checkpoint.resident_pages.begin(), checkpoint.resident_pages.end(), id))
+-            return CheckpointPage::Missing;
++            return false;
+     }
+-    return CheckpointPage::Omit;
++    return true;
+ }
+ 
++CheckpointPage checkpoint_page(const KvmemWindowState& window, const KvmemPrefixCheckpoint& checkpoint,
++                               std::uint32_t page, std::uint32_t frontier, std::uint32_t recent_blocks) {
++    const auto pages = kv_pages_for_tokens(frontier);
++    if (page >= pages || page >= window.archive.size() || page >= window.host_versions.size())
++        return CheckpointPage::Missing;
++    if (memory_page_selectable(window, page))
++        return window.archive[page] && window.host_versions[page] >= valid_columns(page, frontier)
++            ? CheckpointPage::Available : CheckpointPage::Missing;
++    if (page < window.retired_witnesses.size() && checkpoint_can_omit(window, checkpoint, page,
++            window.retired_witnesses[page], frontier, recent_blocks)) return CheckpointPage::Omit;
++    return CheckpointPage::Missing;
++}
++
++struct HotCheckpointGuard {
++    const KvmemWindowState& window;
++    const KvmemPrefixCheckpoint* checkpoint;
++    std::uint32_t recent_blocks;
++    std::uint32_t vetoed = 0;
++
++    static bool permits(void* context, std::uint32_t page,
++                        kvmem::HistoricalKvStepEvidence::RetainedWitness witness) noexcept {
++        auto& guard = *static_cast<HotCheckpointGuard*>(context);
++        const auto& saved = *guard.checkpoint;
++        if (!std::binary_search(saved.resident_pages.begin(), saved.resident_pages.end(), page) ||
++            checkpoint_can_omit(guard.window, saved, page, witness,
++                                static_cast<std::uint32_t>(saved.prefix.size()), guard.recent_blocks)) return true;
++        ++guard.vetoed;
++        return false;
++    }
++};
++
+ // Re-run only the selector on the same accepted Query scores. The shadow
+ // allows verified step retirements and keeps capacity deletions excluded.
+ void audit_recall(KvmemWindowState& window, const std::vector<std::uint32_t>& candidates,
+@@ -1119,6 +1144,7 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+         // Keep the evaluated prefix and StateImage immutable. A verified step
+         // retirement may project the old view around the retired page; other
+         // missing required pages still invalidate all aliases.
++        const bool audit = kvmem::historical_kv_audit_enabled();
+         const auto valid_checkpoint = [&](const KvmemCheckpointRecord& record) {
+             if (!record.data) return false;
+             const auto& checkpoint = *record.data;
+@@ -1126,8 +1152,11 @@ void ProgramImpl::progress_historical_gc(SequenceState& sequence, bool release_f
+             for (const auto id : checkpoint.resident_pages)
+                 if (!memory_page_selectable(window, static_cast<uint32_t>(id)) &&
+                     checkpoint_page(window, checkpoint, static_cast<uint32_t>(id), frontier,
+-                                    kvmem_options.recent_blocks()) != CheckpointPage::Omit)
++                                    kvmem_options.recent_blocks()) != CheckpointPage::Omit) {
++                    if (audit) std::fprintf(stderr, "KVMEM_STEP_CHECKPOINT_INVALIDATED checkpoint=%u missing_page=%llu\n",
++                        frontier, static_cast<unsigned long long>(id));
+                     return false;
++                }
+             return true;
+         };
+         size_t invalidated = 0;
+@@ -1248,9 +1277,20 @@ bool ProgramImpl::prepare_window(SequenceState& sequence, std::uint32_t begin, s
+         !has_context_transaction() && !pending_transaction_ && !requests[sequence.lane].prefill &&
+         (!backend_kv_pages || sequence.mtp_kv_valid==sequence.text_kv_valid) &&
+         sequence.window.historical_evidence) {
++        auto& window = sequence.window;
++        const auto checkpoint = window.gc_recent_checkpoint_hit.lock();
++        // A weak reference prices the most recent actual hit. Optional state
++        // can still be evicted and capacity LRU retains its existing authority.
++        const bool protect_checkpoint = checkpoint && checkpoint->prefix.size() >= std::max(2048u, prefill_chunk);
++        HotCheckpointGuard checkpoint_guard{window, checkpoint.get(), kvmem_options.recent_blocks()};
++        const kvmem::HistoricalKvStepEvidence::SelectionGuard guard{
++            window.gc_checkpoint_hit_revision, &checkpoint_guard, &HotCheckpointGuard::permits};
+         const auto mark_start=std::chrono::steady_clock::now();
+-        const auto marked=sequence.window.historical_evidence->commit_selection_boundary(
+-            sequence.window.gc_protected, active_pin, sequence.window.gc_protection_rebuilds);
++        const auto marked=window.historical_evidence->commit_selection_boundary(
++            window.gc_protected, active_pin, window.gc_protection_rebuilds, protect_checkpoint ? &guard : nullptr);
++        if (checkpoint_guard.vetoed && kvmem::historical_kv_audit_enabled())
++            std::fprintf(stderr, "KVMEM_STEP_CHECKPOINT_VETO frontier=%u checkpoint=%zu pages=%u\n",
++                sequence.text_kv_valid, checkpoint->prefix.size(), checkpoint_guard.vetoed);
+         if (marked) {
+             std::fprintf(stderr,"KVMEM_STEP_MARK frontier=%u pages=%zu mark_us=%llu\n",sequence.text_kv_valid,marked,
+                 (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+@@ -2439,6 +2479,13 @@ bool ProgramImpl::restore_memory_history(SequenceState& sequence, RequestControl
+         archive_memory_window(sequence);
+     }
+     window.query_probe_swaps=window.swaps;
++    if (kvmem_options.historical_gc_step_redundancy) {
++        window.gc_recent_checkpoint_hit = checkpoint;
++        window.gc_checkpoint_hit_revision = memory_history_hits + 1;
++        if (kvmem::historical_kv_audit_enabled())
++            std::fprintf(stderr, "KVMEM_STEP_CHECKPOINT_HIT cached=%u suffix=%zu kind=%u\n", *frontier,
++                staged.prompt.token_ids.size() - *frontier, static_cast<unsigned>(match->kind));
++    }
+     if (*frontier == memory_checkpoint_frontier(sequence, staged.prompt_tokens, true))
+         window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data = std::move(checkpoint);
+     else

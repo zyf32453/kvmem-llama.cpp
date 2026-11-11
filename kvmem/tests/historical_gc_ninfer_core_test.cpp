@@ -5,9 +5,11 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -32,6 +34,217 @@ public:
 };
 
 } // namespace
+
+static void proactive_step_evidence_lifecycle() {
+    using namespace kvmem;
+    // Semantic eligibility alone may request a fenced native handoff. Actual
+    // retirement additionally needs exact current source and result bindings.
+    HistoricalKvStepEvidence::Config artifact_limits;
+    artifact_limits.min_observations=1; artifact_limits.min_cold_observations=0;
+    artifact_limits.max_importance=1;
+    HistoricalKvStepEvidence unbound(32,64,artifact_limits);
+    HistoricalKvStepEvidence::Update artifact{"file","tool_detail",65,320,384,512,1,1,false,true};
+    unbound.publish({artifact},640);
+    require(unbound.handoff_candidate(2) && !unbound.eligible(2));
+    std::vector<uint8_t> flags(10,1);
+    unbound.mark_result_pages(flags,128);
+    for(uint32_t i=0;i<flags.size();++i) require(flags[i]==(i==6 || i==7 ? 129 : 1));
+    std::vector<uint8_t> partial_flags(7,2);
+    unbound.mark_result_pages(partial_flags,128);
+    require(partial_flags[5]==2 && partial_flags[6]==130);
+    unbound.bind(2,{1,2,1}); unbound.bind(6,{1,6,1});
+    require(!unbound.eligible(2)); // Incomplete retained result cannot witness deletion.
+    require(unbound.permits_selection(2));
+    unbound.bind(7,{1,7,1});
+    require(unbound.eligible(2));
+    // Selection observes the completed mark before any worker tick/retirement.
+    require(!unbound.permits_selection(2) && unbound.permits_selection(2,true));
+    HistoricalKvBlockMeta old;
+    old.logical_id=2; old.handle={1,2,1};
+    require(unbound.revision(old)!=0);
+    unbound.bind(2,{1,2,2});
+    require(unbound.revision(old)==0); // Same page ID is not the same KV generation.
+    unbound.retired(2,{1,2,2});
+    require(!unbound.permits_selection(2,true)); // Mandatory cannot revive retired KV.
+    auto evidence = std::make_shared<HistoricalKvStepEvidence>(32,64,HistoricalKvStepEvidence::Config{});
+    HostKvStorage storage(32*64);
+    HistoricalKvPageGc::Config config;
+    config.slots = config.logical_pages = 32;
+    config.low_ready = 2; config.high_ready = 4;
+    config.sink_tokens = config.recent_tokens = 64;
+    config.evidence = evidence; config.physical_storage = storage; config.physical_page_bytes = 64;
+    HistoricalKvPageGc gc(config,std::make_unique<HistoricalKvStatisticalPolicy>(evidence));
+    std::vector<HostKvRecord> records(10);
+    for(uint32_t i=0;i<10;++i) {
+        records[i]=storage.allocate(64); records[i].seal();
+        require(gc.register_page(i,64,i+1)); gc.protect_page(i,i==0 || i==9);
+    }
+    auto reader=records[2].lease();
+    for(int i=0;i<16;++i)gc.manual_tick();
+    require(gc.stats().proposed==0); // No evidence never means cold.
+    HistoricalKvStepEvidence::Update u{"step-1","thinking",65,320,384,512,0,.01,true,false};
+    for(uint64_t i=0;i<3;++i) {u.observation_id=i;evidence->publish({u},640);}
+    for(int i=0;i<16;++i)gc.manual_tick();
+    require(gc.stats().proposed==0); // Cold observations without completion do not retire.
+    u.observation_id=3;u.complete=true;evidence->publish({u},640);
+    require(!evidence->eligible(1) && evidence->eligible(2) && evidence->result_page(6));
+    for(int i=0;i<32 && !gc.stats().proposed;++i)gc.manual_tick();
+    require(gc.stats().proposed==3); // 22 free > high=4: genuinely proactive.
+    // A later eligible revision still invalidates the old queued decisions.
+    u.observation_id=4;evidence->publish({u},640);
+    require(gc.commit_boundary().empty());
+    auto duplicate=u;duplicate.importance=.5;
+    bool rejected=false;
+    try {evidence->publish({duplicate},640);}catch(const std::invalid_argument&){rejected=true;}
+    require(rejected);
+    for(int i=0;i<64 && !gc.stats().committed;++i) {
+        gc.manual_tick();
+        for(const auto& page:gc.commit_boundary())gc.acknowledge_host_release(page,std::move(records[page.page]),true);
+    }
+    require(gc.stats().committed==3);
+    for(int i=0;i<32;++i)gc.manual_tick();
+    require(gc.stats().reclaimed==2); // A real reader delays exactly one payload.
+    reader={};for(int i=0;i<32;++i)gc.manual_tick();
+    require(gc.stats().reclaimed==3 && gc.is_live(6) && gc.is_live(7));
+    require(gc.is_live(1) && gc.is_live(5)); // Mixed boundary and unclassified content survive.
+    require(evidence->stats().tracked==0 && evidence->stats().completed==1);
+    require(!evidence->result_page(6)); // Completed evidence no longer pins a witness.
+    flags.assign(10,1); evidence->mark_result_pages(flags,128);
+    for(const auto flag:flags) require(flag==1);
+    rejected=false;
+    auto bad=u;bad.observation_id=5;bad.source_end=448;
+    try {evidence->publish({bad},640);}catch(const std::invalid_argument&){rejected=true;}
+    require(rejected);
+    evidence->publish({u},640); // Replayed completed metadata is a no-op.
+    require(evidence->stats().tracked==0 && !evidence->eligible(2));
+    evidence->truncate_to(400); // Removed/partial result invalidates all associated eligibility.
+    require(!evidence->eligible(2) && !evidence->result_page(6));
+}
+
+static void proactive_long_step_chain() {
+    using namespace kvmem;
+    HistoricalKvStepEvidence::Config limits;
+    limits.min_observations=1; limits.min_cold_observations=0; limits.max_importance=1;
+    auto evidence=std::make_shared<HistoricalKvStepEvidence>(256,64,limits);
+    HostKvStorage storage(8*64);
+    HistoricalKvPageGc::Config config;
+    config.slots=8; config.logical_pages=256; config.low_ready=1; config.high_ready=2;
+    config.evidence=evidence; config.physical_storage=storage; config.physical_page_bytes=64;
+    HistoricalKvPageGc gc(config,std::make_unique<HistoricalKvStatisticalPolicy>(evidence));
+    std::vector<HostKvRecord> records(121);
+    records[0]=storage.allocate(64);records[0].seal();
+    require(gc.register_page(0,64,1));gc.protect_page(0,false);
+    for(uint32_t step=0;step<120;++step) {
+        const auto witness=step+1;
+        records[witness]=storage.allocate(64);records[witness].seal();
+        require(gc.register_page(witness,64,witness+1));gc.protect_page(witness,false);
+        HistoricalKvStepEvidence::Update u{"step-"+std::to_string(step),"completed_step",
+            step*64,(step+1)*64,witness*64,(witness+1)*64,1,1,false,true};
+        evidence->publish({u},(witness+1)*64);
+        require(evidence->selection_excluded(step));
+        require(!evidence->selection_excluded(witness));
+        for(int tick=0;tick<128 && gc.stats().reclaimed<step+1;++tick) {
+            gc.manual_tick();
+            for(const auto& page:gc.commit_boundary())
+                gc.acknowledge_host_release(page,std::move(records[page.page]),true);
+        }
+        require(gc.stats().committed==step+1 && gc.stats().reclaimed==step+1);
+        require(evidence->stats().tracked==0 && evidence->stats().completed==step+1);
+        require(gc.is_live(witness) && !evidence->result_page(witness));
+    }
+    HistoricalKvStepEvidence::Update old{"step-0","completed_step",0,64,64,128,1,1,false,true};
+    evidence->publish({old},121*64);
+    require(evidence->stats().tracked==0 && evidence->selection_excluded(0));
+    require(evidence->stats().ignored_retired_updates==1);
+    // A genuine rewind starts a new suffix; old tombstones cannot poison it.
+    evidence->truncate_to(0);
+    require(!evidence->selection_excluded(0));
+    evidence->bind(0,{2,0,1});
+}
+
+static void proactive_bounded_evidence_admission() {
+    using namespace kvmem;
+    HistoricalKvStepEvidence::Config limits;
+    limits.min_observations=1;limits.min_cold_observations=0;limits.max_importance=1;limits.max_steps=1;
+    auto evidence=std::make_shared<HistoricalKvStepEvidence>(16,64,limits);
+    for(uint32_t id=0;id<8;++id)evidence->bind(id,{1,id,1});
+    HistoricalKvStepEvidence::Update first{"first","thinking",0,64,64,128,1,1,false,true};
+    evidence->publish({first},512);
+    HistoricalKvStatisticalPolicy policy(evidence);
+    HistoricalKvBlockMeta block;
+    block.logical_id=0;block.handle={1,0,1};block.life=HistoricalKvLife::Live;block.sealed=true;
+    HistoricalKvSnapshot snapshot; snapshot.incarnation=1;snapshot.round_id=1;snapshot.blocks.push_back(block);
+    HistoricalKvDecisionBuffer decisions(8);
+    policy.step(snapshot,{},HistoricalKvWorkBudget{},decisions);
+    require(decisions.values().size()==1);
+    HistoricalKvStepEvidence::Update second{"second","thinking",128,192,192,256,1,1,false,true};
+    evidence->publish({second},512); // Full metadata is advisory; inference need not fail.
+    require(evidence->stats().tracked==1 && evidence->stats().evicted_evidence==1);
+    require(!policy.permits_intent(block,decisions.values()[0]));
+    require(!evidence->selection_excluded(0) && evidence->selection_excluded(2));
+    auto invalid=first;invalid.id="invalid";invalid.importance=2;
+    bool rejected=false;
+    try {evidence->publish({first,invalid},512);}catch(const std::invalid_argument&){rejected=true;}
+    require(rejected && evidence->stats().evicted_evidence==1 && evidence->selection_excluded(2));
+    limits.source_floor_tokens=64;
+    HistoricalKvStepEvidence sink(16,64,limits);
+    sink.publish({first},512);
+    require(sink.stats().tracked==0 && !sink.handoff_candidate(0));
+}
+
+static void proactive_real_background_worker() {
+    using namespace kvmem;
+    // Unlike the deterministic lifecycle tests, the request owner never calls
+    // manual_tick here. Only the real background worker scans and reclaims.
+    HistoricalKvStepEvidence::Config limits;
+    limits.min_observations=1; limits.min_cold_observations=0; limits.max_importance=1;
+    auto evidence=std::make_shared<HistoricalKvStepEvidence>(128,64,limits);
+    HostKvStorage storage(8*64);
+    HistoricalKvPageGc::Config config;
+    config.slots=8; config.logical_pages=128; config.low_ready=1; config.high_ready=2;
+    config.poll_ms=2; config.evidence=evidence;
+    config.physical_storage=storage; config.physical_page_bytes=64;
+    HistoricalKvPageGc gc(config,std::make_unique<HistoricalKvStatisticalPolicy>(evidence));
+    std::vector<HostKvRecord> records(49);
+    records[0]=storage.allocate(64); records[0].seal();
+    require(gc.register_page(0,64,1)); gc.protect_page(0,false);
+    gc.start();
+    const auto deadline_after=[] {return std::chrono::steady_clock::now()+std::chrono::seconds(3);};
+    for(uint32_t step=0;step<48;++step) {
+        const auto witness=step+1;
+        records[witness]=storage.allocate(64); records[witness].seal();
+        require(gc.register_page(witness,64,witness+1)); gc.protect_page(witness,false);
+        auto reader=step%3==0 ? records[step].lease() : HostKvLease{};
+        HistoricalKvStepEvidence::Update u{"async-"+std::to_string(step),"completed_step",
+            step*64,(step+1)*64,witness*64,(witness+1)*64,1,1,false,true};
+        evidence->publish({u},(witness+1)*64);
+        require(!evidence->permits_selection(step));
+        bool committed=false;
+        const auto until_commit=deadline_after();
+        while(!committed && std::chrono::steady_clock::now()<until_commit) {
+            for(const auto& page:gc.commit_boundary()) {
+                require(page.page==step && page.page!=witness);
+                require(!evidence->permits_selection(step,true));
+                // Move ownership only; payload destruction stays on worker.
+                gc.acknowledge_host_release(page,std::move(records[page.page]));
+                committed=true;
+            }
+            if(!committed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        require(committed && gc.is_live(witness));
+        require(evidence->stats().tracked==0 && evidence->stats().completed==step+1);
+        // Logical retirement is already effective while a real Host reader
+        // still retains the bytes. Releasing it enables asynchronous reuse.
+        if(step%3==0) require(storage.charged_bytes()==128);
+        reader={};
+        const auto until_reclaim=deadline_after();
+        while(gc.stats().reclaimed<step+1 && std::chrono::steady_clock::now()<until_reclaim)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        require(gc.stats().reclaimed==step+1 && storage.charged_bytes()==64);
+    }
+    const auto stats=gc.stats();
+    require(stats.worker_failures==0 && stats.policy_failures==0 && stats.boundary_committed==48);
+}
 
 static void attainable_watermark_hysteresis() {
     using Gc = kvmem::HistoricalKvPageGc;
@@ -402,6 +615,10 @@ static void native_unsealed_pages_drive_pressure() {
 }
 
 int main() {
+    proactive_step_evidence_lifecycle();
+    proactive_long_step_chain();
+    proactive_bounded_evidence_admission();
+    proactive_real_background_worker();
     attainable_watermark_hysteresis();
     native_unsealed_pages_drive_pressure();
     native_page_feature_snapshot();

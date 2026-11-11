@@ -1,0 +1,153 @@
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 86c24a57e78abb92d6dbc84979925168d8f11b23..898b2b108a51585a006bb11a50d4ec0cdc3dc506 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -37,6 +37,14 @@ bool window_reference_check_enabled() noexcept {
+     return enabled;
+ }
+ 
++bool query_tail_trim_enabled() noexcept {
++    static const bool enabled = [] {
++        const char* flag = std::getenv("KVMEM_QUERY_TAIL_TRIM");
++        return flag && std::strcmp(flag, "1") == 0;
++    }();
++    return enabled;
++}
++
+ void append_accepted_kv_bytes(std::vector<std::uint8_t>& bytes, const std::byte* record,
+                               const HostKVPageLayout& layout, std::uint32_t columns) {
+     for (const auto& plane : layout.planes) {
+@@ -118,11 +126,37 @@ struct HotCheckpointGuard {
+     }
+ };
+ 
++std::vector<std::uint32_t> trim_query_window(KvmemWindowState& window, std::uint32_t frontier,
++                                            std::uint32_t budget) {
++    const auto pages = kv_pages_for_tokens(frontier);
++    std::vector<std::uint8_t> witnesses(pages);
++    if (window.historical_evidence) window.historical_evidence->mark_result_pages(witnesses, witness_pin);
++    for (const auto& witness : window.retired_witnesses) {
++        if (!witness.result_end || witness.result_end > frontier) continue;
++        const auto end = std::min<std::uint64_t>(pages, std::uint64_t(witness.page) + witness.page_count);
++        for (auto id = witness.page; id < end; ++id) witnesses[id] = witness_pin;
++    }
++    std::vector<kvmem::QueryTrimPage> optional;
++    optional.reserve(window.query_selected.size());
++    for (const auto id : window.query_selected) {
++        if (witnesses[id] || !window.statistics->has_block(id) ||
++            std::binary_search(window.query_required.begin(), window.query_required.end(), id)) continue;
++        const bool cold = !std::binary_search(window.pages.begin(), window.pages.end(), id);
++        optional.push_back({id, window.selector->selection_score(id), cold});
++    }
++    const auto skipped = kvmem::low_scoring_cold_pages(std::move(optional), budget / 8);
++    auto& selected = window.query_selected;
++    selected.erase(std::remove_if(selected.begin(), selected.end(), [&](std::uint32_t id) {
++        return std::binary_search(skipped.begin(), skipped.end(), id);
++    }), selected.end());
++    return skipped;
++}
++
+ // Re-run only the selector on the same accepted Query scores. The shadow
+ // allows verified step retirements and keeps capacity deletions excluded.
+ void audit_recall(KvmemWindowState& window, const std::vector<std::uint32_t>& candidates,
+                   const std::vector<double>& scores, std::uint32_t frontier, std::uint32_t budget,
+-                  bool applied) {
++                  const std::vector<std::uint32_t>& skipped, bool applied) {
+     const char* audit = std::getenv("KVMEM_GC_RECALL_AUDIT");
+     if (!audit || std::strcmp(audit, "1") != 0) return;
+     const auto start = std::chrono::steady_clock::now();
+@@ -138,8 +172,11 @@ void audit_recall(KvmemWindowState& window, const std::vector<std::uint32_t>& ca
+             shadow_scores.push_back(window.selector->selection_score(page));
+         }
+         const auto& live = window.query_selected;
+-        const auto shadow = shadow_candidates.size() == candidates.size() ? live :
++        auto shadow = shadow_candidates.size() == candidates.size() ? live :
+             window.selector->pick_scored_blocks(shadow_candidates, shadow_scores, window.query_required, budget, true);
++        if (!skipped.empty()) shadow.erase(std::remove_if(shadow.begin(), shadow.end(), [&](std::uint32_t id) {
++            return std::binary_search(skipped.begin(), skipped.end(), id);
++        }), shadow.end());
+         std::vector<std::uint32_t> added, excluded;
+         std::set_difference(live.begin(), live.end(), shadow.begin(), shadow.end(), std::back_inserter(added));
+         std::set_difference(shadow.begin(), shadow.end(), live.begin(), live.end(), std::back_inserter(excluded));
+@@ -1976,25 +2013,39 @@ bool ProgramImpl::rewind_memory_query(SequenceState& sequence) {
+         std::find(window.query_required.begin(),window.query_required.end(),id)!=window.query_required.end())) {
+         candidates.push_back(id);scores.push_back(window.selector->selection_score(id));
+     }
+-    window.query_selected=window.selector->pick_scored_blocks(candidates,scores,window.query_required,
+-        kvmem_options.selected_tokens/page_tokens,true);
++    const auto budget = kvmem_options.selected_tokens / page_tokens;
++    window.query_selected=window.selector->pick_scored_blocks(candidates,scores,window.query_required,budget,true);
++    const auto admission=kvmem::query_replay_plan({window.query_begin,window.query_end},frontier,
++        sequence.text_kv_valid,kvmem_options.query_replay_max_tokens,page_tokens,
++        window.query_selected.size(),kvmem_window_tokens/page_tokens,
++        backend_kv_pages ? std::max(draft_window,ngram_draft_window)+draft_window : 0);
++    const auto same_view = [&] {
++        auto next = window.query_selected;
++        for (auto id = frontier / page_tokens; id < kv_pages_for_tokens(sequence.text_kv_valid); ++id)
++            next.push_back(id);
++        std::sort(next.begin(), next.end());
++        next.erase(std::unique(next.begin(), next.end()), next.end());
++        return window.query_probe_swaps == window.swaps && next == window.pages;
++    };
++    bool unchanged = same_view();
++    std::vector<std::uint32_t> skipped;
++    // Shrink an already admitted, changing sparse view. In particular, a
++    // naturally reused view must not be reloaded just to drop cold pages.
++    if (query_tail_trim_enabled() && admission.admitted && !unchanged && pages > budget &&
++        window.query_selected.size() == budget) {
++        skipped = trim_query_window(window, frontier, budget);
++        if (!skipped.empty()) unchanged = same_view();
++        if (KvmemTransferTrace::enabled())
++            std::fprintf(stderr, "KVMEM_QUERY_TAIL_TRIM frontier=%u budget_pages=%u selected_pages=%zu "
++                "omitted_cold=%zu applied=%d\n", frontier, budget, window.query_selected.size(),
++                skipped.size(), int(!unchanged));
++    }
+ #ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
+     std::fprintf(stderr,"KVMEM_QUERY_TEST phase=selected lane=%u rows=%u pages=",sequence.lane,window.query_tokens);
+     for (auto page:window.query_selected) std::fprintf(stderr,"%u,",page);
+     std::fprintf(stderr,"\n");
+ #endif
+-    const auto admission=kvmem::query_replay_plan({window.query_begin,window.query_end},frontier,
+-        sequence.text_kv_valid,kvmem_options.query_replay_max_tokens,page_tokens,
+-        window.query_selected.size(),kvmem_window_tokens/page_tokens,
+-        backend_kv_pages ? std::max(draft_window,ngram_draft_window)+draft_window : 0);
+-    auto next=window.query_selected;
+-    for(auto id=frontier/page_tokens;id<kv_pages_for_tokens(sequence.text_kv_valid);++id)
+-        next.push_back(id);
+-    std::sort(next.begin(),next.end());
+-    next.erase(std::unique(next.begin(),next.end()),next.end());
+-    const bool unchanged=window.query_probe_swaps==window.swaps && next==window.pages;
+-    audit_recall(window, candidates, scores, frontier, kvmem_options.selected_tokens / page_tokens,
+-                 admission.admitted && !unchanged);
++    audit_recall(window, candidates, scores, frontier, budget, skipped, admission.admitted && !unchanged);
+     if(!admission.admitted || unchanged) {
+         window.query_replayed=true;
+         window.query_selected.clear();window.query_required.clear();
+diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
+index afbeb33d0c4f9c293b9458252729b62107d92cc8..722f7a0508f30ae511a576af6331c64c43e5ea7e 100644
+--- a/src/runtime/engine/engine_core.h
++++ b/src/runtime/engine/engine_core.h
+@@ -33,6 +33,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstdio>
++#include <cstdlib>
+ #include <deque>
+ #include <functional>
+ #include <exception>
+@@ -1186,6 +1187,15 @@ private:
+         if (!request->admitted_at || !request->first_token) {
+             throw std::logic_error("committed output has no observed admission boundary");
+         }
++        static const bool trace_rounds = [] {
++            const char* flag = std::getenv("KVMEM_DECODE_ROUND_TRACE");
++            return flag && flag[0] == '1' && flag[1] == '\0';
++        }();
++        if (trace_rounds && request->last_token) {
++            std::fprintf(stderr, "KVMEM_DECODE_ROUND request=%llu tokens=%u elapsed_ns=%llu\n",
++                static_cast<unsigned long long>(request->id), accepted_tokens,
++                static_cast<unsigned long long>(elapsed_ns(*request->last_token, now)));
++        }
+         request->last_token = now;
+         if (!request->observation.live_timings) { return std::nullopt; }
+         if (request->generated.size() > std::numeric_limits<std::uint32_t>::max()) {

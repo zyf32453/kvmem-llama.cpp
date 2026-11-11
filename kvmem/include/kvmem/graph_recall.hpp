@@ -27,6 +27,16 @@ QueryScoreFrame query_score_frame(uint64_t accepted_through, uint32_t block_toke
     uint32_t budget_blocks, uint32_t sink_blocks, uint32_t recent_blocks,
     const std::vector<uint32_t>& fixed_blocks);
 
+struct QueryTrimPage {
+    uint32_t id;
+    double score;
+    bool cold;
+};
+
+// Optional, scored pages in an already chosen Query view. Skip only incoming
+// pages strictly below that view's lower quartile, with no backfill.
+std::vector<uint32_t> low_scoring_cold_pages(std::vector<QueryTrimPage> optional, size_t limit);
+
 // Post-normalization, pre-RoPE Q, layer/token/head/channel order. Rows beyond
 // layer_rows[layer] are absent (e.g. recurrent layers), never zero-valued samples.
 struct PageQueryView {

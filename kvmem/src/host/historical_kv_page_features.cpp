@@ -25,16 +25,20 @@ void HistoricalKvPageFeatures::publish_page(uint32_t page, const std::vector<flo
     std::lock_guard<std::mutex> lock(mu_);
     if (!pages_[page].empty()) throw std::logic_error("historical page descriptor republished");
     pages_[page] = descriptor;
+    observation_revision_.fetch_add(1, std::memory_order_release);
 }
 
 void HistoricalKvPageFeatures::publish_question_scores(const std::vector<double> & scores, bool new_question) {
     for (double value : scores)
         if (!std::isfinite(value)) throw std::invalid_argument("nonfinite historical Query score");
     std::lock_guard<std::mutex> lock(mu_);
+    const auto previously_scored = question_scores_.size();
     question_scores_ = scores;
     if (new_question) {
         std::fill(output_peaks_.begin(), output_peaks_.end(), -std::numeric_limits<double>::infinity());
         question_epoch_.fetch_add(1, std::memory_order_release);
+    } else if (scores.size() > previously_scored) {
+        observation_revision_.fetch_add(1, std::memory_order_release);
     }
 }
 
@@ -42,7 +46,17 @@ void HistoricalKvPageFeatures::publish_output_attention(uint32_t page, double ma
     if (page >= pages_.size() || !std::isfinite(mass) || mass < 0)
         throw std::invalid_argument("invalid historical output attention mass");
     std::lock_guard<std::mutex> lock(mu_);
+    if (page >= question_scores_.size() && !std::isfinite(output_peaks_[page]))
+        observation_revision_.fetch_add(1, std::memory_order_release);
     output_peaks_[page] = std::max(output_peaks_[page], mass);
+}
+
+bool HistoricalKvPageFeatures::any_observed(const std::vector<uint32_t>& pages) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto id : pages)
+        if (id < pages_.size() && pages_[id].size() == dimensions_ &&
+            (id < question_scores_.size() || std::isfinite(output_peaks_[id]))) return true;
+    return false;
 }
 
 void HistoricalKvPageFeatures::clear_question() {
@@ -81,6 +95,18 @@ bool HistoricalKvPageFeatures::read(const HistoricalKvBlockMeta & meta,
     if (pages_[page].size() != dimensions_) return false;
     std::copy(pages_[page].begin(), pages_[page].end(), descriptor);
     importance = std::isfinite(frozen_importance_[page]) ? frozen_importance_[page] : 0.0;
+    return true;
+}
+
+bool HistoricalKvPageFeatures::read_observed(const HistoricalKvBlockMeta & meta,
+                                            float * descriptor, double & importance) {
+    if (!descriptor || meta.logical_id >= pages_.size()) return false;
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto page = static_cast<size_t>(meta.logical_id);
+    if (pages_[page].size() != dimensions_ || page >= frozen_importance_.size() ||
+        !std::isfinite(frozen_importance_[page])) return false;
+    std::copy(pages_[page].begin(), pages_[page].end(), descriptor);
+    importance = frozen_importance_[page];
     return true;
 }
 

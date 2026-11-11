@@ -11,6 +11,7 @@ import subprocess
 import time
 import urllib.request
 from pathlib import Path
+from terminus_response_format import terminus_response_format
 
 TASKS = ("cobol-modernization", "constraints-scheduling")
 
@@ -63,7 +64,7 @@ def server(args, policy, name):
            "/models/Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3.ninfer",
            "--model-id", "qwen38-ninfer-gc-mtp", "--host", "0.0.0.0", "--port", str(args.port),
            "--kvmem", "--kvmem-budget", str(active), "--kvmem-gen-reserve", "16384",
-           "--kvmem-host-mib", str(host), "--kvmem-sink-tokens", "1024", "--kvmem-recent-tokens", "64",
+           "--kvmem-host-mib", str(host), "--kvmem-sink-tokens", str(args.sink_tokens), "--kvmem-recent-tokens", "64",
            "--max-context", "262144", "--kvmem-query-scorer", "meanq-cosine", "--kvmem-score-agg", "max",
            "--no-kvmem-lrfu", "--kvmem-graph-alpha", "0", "--kvmem-query-max-tokens", "8192",
            "--kvmem-query-replay-max-tokens", "8192", "--kv-dtype", "rk4v4", "--max-concurrency", "1",
@@ -71,6 +72,8 @@ def server(args, policy, name):
            "--spec", "mtp", "--draft-tokens", "4", "--lm-head-draft", "--device-profile", "off"]
     if policy != "off":
         cmd += [f"--kvmem-gc-{policy}"]
+    if args.structured_output:
+        cmd += ["--structured-output"]
     return cmd
 
 
@@ -88,7 +91,17 @@ def main():
                    default=["off", "lru", "redundancy"])
     p.add_argument("--tasks", nargs="+", choices=TASKS, default=list(TASKS))
     p.add_argument("--port", type=int, default=18098)
+    p.add_argument("--structured-output", action="store_true",
+                   help="Enforce the Terminus-2 JSON envelope natively; applies to every Agent policy")
+    p.add_argument("--sink-tokens", type=int,
+                   help="Protected prefix, multiple of 64; with structured output, measure the native initial prompt first")
     args = p.parse_args()
+    if args.structured_output and args.sink_tokens is None:
+        p.error("--structured-output requires --sink-tokens covering the native prepared initial prompt (including schema)")
+    if args.sink_tokens is None:
+        args.sink_tokens = 1024
+    if args.sink_tokens < 64 or args.sink_tokens % 64:
+        p.error("--sink-tokens must be a positive multiple of 64")
     if args.mode == "prepare":
         if not args.dataset:
             p.error("prepare requires --dataset")
@@ -101,9 +114,10 @@ def main():
          policies=args.policies, sampling_temperature=.6, seed=1000, output_tokens=16384,
          thinking_tokens=4096, gen_reserve=16384, active_tokens=98304 if args.profile == "teacher" else 8192,
          historical_tokens=262144 if args.profile == "teacher" else 65536,
-         sink_tokens=1024, recent_tokens=64, block_tokens=64, mtp_drafts=4,
+         sink_tokens=args.sink_tokens, recent_tokens=64, block_tokens=64, mtp_drafts=4,
          agent_timeout_seconds=7200, verifier_timeout="official unchanged", harness_summarization=False,
          fresh_model_and_host_per_trial=True,
+         structured_output=args.structured_output,
          task_sources=json.loads((args.task_root / "source-audit.json").read_text())))
     results = []
     for task in args.tasks:
@@ -121,6 +135,8 @@ def main():
                     store_all_messages=True, model_info=dict(max_input_tokens=245760, max_output_tokens=16384,
                         input_cost_per_token=0, output_cost_per_token=0),
                     llm_call_kwargs=dict(max_tokens=16384, temperature=.6, seed=1000)))
+            if args.structured_output and policy != "oracle":
+                agent["kwargs"]["llm_call_kwargs"]["response_format"] = terminus_response_format()
             config = dict(job_name="job", jobs_dir=str(case / "jobs"), n_concurrent_trials=1,
                           n_attempts=1, environment=dict(type="docker", force_build=True),
                           agents=[agent], tasks=[dict(path=str(args.task_root / task))])

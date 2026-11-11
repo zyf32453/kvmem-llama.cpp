@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "da9b40270159e0ee792d7d738aff47545f8336a9",
+    "patched_tree": "bb7f1118cfb5ca73cc0b64f6264e3628931b5766",
     "patches": [
       {
         "id": "kvmem",
@@ -310,6 +310,156 @@
         ],
         "after_tree": "da9b40270159e0ee792d7d738aff47545f8336a9",
         "source": "Use actual append chunks for free-space hysteresis and cap the target after the protected native active view"
+      },
+      {
+        "id": "proactive-step-gc",
+        "path": "backends/patches/ninfer-proactive-step-gc.patch",
+        "sha256": "88deb3644c57ed4fa8c9fe1d134141ffa531bb786288b81f06e5cc7361b202fb",
+        "requires": [
+          "historical-gc-watermarks"
+        ],
+        "after_tree": "f92ea0f4c720e9597c4b395d018539ae6a95a2ff",
+        "source": "Completed-span/retained-result evidence adapted from kvmem/kvmem-vllm@a0240f7c; NInfer native handoff and typed chat extension"
+      },
+      {
+        "id": "inline-step-gc",
+        "path": "backends/patches/ninfer-inline-step-gc.patch",
+        "sha256": "e8ae60c23597a15f7b4a43f06b9035f688c9fbe1293ee682207048f00413ef39",
+        "requires": [
+          "proactive-step-gc"
+        ],
+        "after_tree": "ce2a03c85d2be7390565a838078e46bd20af30d6",
+        "source": "Completed thinking scopes against existing Terminus analysis; native Mean-K/importance gate, pressure LRU accounting, safe pre-control reuse anchor, no auxiliary inference"
+      },
+      {
+        "id": "step-gc-prefix-reuse",
+        "path": "backends/patches/ninfer-step-gc-prefix-reuse.patch",
+        "sha256": "9e8f5bec8616adf35d1b260f789e805b04ad13509684f5421b22f9738af12ae2",
+        "requires": [
+          "inline-step-gc"
+        ],
+        "after_tree": "3b71c86c9fafbf389dfac161a983339810758e7a",
+        "source": "Reuse exact evaluated prefixes with sparse checkpoint views when an approved retired page still has its later witness; audit same-Query recall replacements"
+      },
+      {
+        "id": "incremental-window",
+        "path": "backends/patches/ninfer-incremental-window.patch",
+        "sha256": "4d53ffd8212079dd600ee02e4b5f6d92577bfed4e59f71e6cc041aaa327503ba",
+        "requires": [
+          "step-gc-prefix-reuse"
+        ],
+        "after_tree": "e99859210ed09fb4f9d6546390f672f0d0f5fb08",
+        "source": "Rebind complete accepted GPU pages on a live single-GPU reselection and reload only missing pages; keep full restore as fallback"
+      },
+      {
+        "id": "literal-witness",
+        "path": "backends/patches/ninfer-literal-witness.patch",
+        "sha256": "6a8e6f79c1a55fc6090ce5596bbce085cd43b02d17b543c148902a7959d85d27",
+        "requires": [
+          "incremental-window"
+        ],
+        "after_tree": "093405460823d1e1278a4014c946a39b700adac8",
+        "source": "Filter proactive thinking-page proposals using literal context from verified prompt tokens"
+      },
+      {
+        "id": "semantic-query-recall",
+        "path": "backends/patches/ninfer-semantic-query-recall.patch",
+        "sha256": "e8e9c2d6600457a36dbfcb68f36ac1bea6dfd36b4faafed5fd2f5539435a61c5",
+        "requires": [
+          "literal-witness"
+        ],
+        "after_tree": "c6f9a1b6d59ae0fe3072061f21f1d2f99a3f2f99",
+        "source": "Skip the Query probe when verified proactive retirements account for all missing rows and the compact prompt fits"
+      },
+      {
+        "id": "duplicate-feedback",
+        "path": "backends/patches/ninfer-duplicate-feedback.patch",
+        "sha256": "89984f7f2f8b7ea72560fb1030c888a35da50d49d6ede3cb78f0bb2af1580ce2",
+        "requires": [
+          "semantic-query-recall"
+        ],
+        "after_tree": "acb1e202fe6afad97503ef1fcb6fedc03f62d75b",
+        "source": "Retire verbatim tool-feedback pages using verified token spans and multi-page witnesses"
+      },
+      {
+        "id": "step-gc-natural-window",
+        "path": "backends/patches/ninfer-step-gc-natural-window.patch",
+        "sha256": "6689bd2d55b4d6031570b617db3ace252f834494b11bb9852df472046c11fa7e",
+        "requires": [
+          "duplicate-feedback"
+        ],
+        "after_tree": "7fc6b95f51042887561f036d0ccaf9e10837fa8c",
+        "source": "Exclude marked pages at natural reselection and release Host storage after their readers drain"
+      },
+      {
+        "id": "step-gc-protection-sync",
+        "path": "backends/patches/ninfer-step-gc-protection-sync.patch",
+        "sha256": "da38a0db5d38f222b840a8a28d7bd2e6f56c42d9fd96b06035b245f65580bf04",
+        "requires": [
+          "step-gc-natural-window"
+        ],
+        "after_tree": "3801108d551c126b13acf20e451b60c24dccd161",
+        "source": "Reuse GC page protections on decode rounds with the same page frontier, view and witness revision"
+      },
+      {
+        "id": "step-gc-native-observe",
+        "path": "backends/patches/ninfer-step-gc-native-observe.patch",
+        "sha256": "48d9198618bb2074be146eb750f3afaa10c49e94fd09bcf45f9f056201e4a613",
+        "requires": [
+          "step-gc-protection-sync"
+        ],
+        "after_tree": "31677636ae560faeadd39508f4d999d0e8afa797",
+        "source": "Expose a native evidence evaluation arm without changing recall, witness pins or capacity LRU"
+      },
+      {
+        "id": "step-gc-witness-commit",
+        "path": "backends/patches/ninfer-step-gc-witness-commit.patch",
+        "sha256": "afc9d1cb3c89276c388821b2660f17736d3cbfd078cd3d64ed98d6f091cbb1df",
+        "requires": [
+          "step-gc-native-observe"
+        ],
+        "after_tree": "b92b648e534aed16ef20ef93a398d6186f0a0b61",
+        "source": "Retry blocked semantic GC groups only when their protection snapshot changes"
+      },
+      {
+        "id": "step-gc-hot-checkpoint",
+        "path": "backends/patches/ninfer-step-gc-hot-checkpoint.patch",
+        "sha256": "f0b865cad09f8a14dff3f9417435e89f86d0c00174d37afcc24634d2f04fa97f",
+        "requires": [
+          "step-gc-witness-commit"
+        ],
+        "after_tree": "84d6d035aa1de92b375c3681bba2b6d69dba1706",
+        "source": "Price the most recently restored checkpoint before marking a semantic victim"
+      },
+      {
+        "id": "query-tail-trim",
+        "path": "backends/patches/ninfer-query-tail-trim.patch",
+        "sha256": "53a75ae19990c8133b9faa39d66000127aaa7ab0b6e47766cd365bf09483f0c7",
+        "requires": [
+          "step-gc-hot-checkpoint"
+        ],
+        "after_tree": "414ab9c2168ed9dc9486cfae45a54ef6e88da4ec",
+        "source": "Trim a bounded low-ranked cold tail at an admitted Query replay and trace committed decode rounds"
+      },
+      {
+        "id": "tool-card-template-token-ids",
+        "path": "backends/patches/ninfer-tool-card-template-token-ids.patch",
+        "sha256": "620215947b00dc77a9cb8e40c0c0ec99feb6ad7b3a208c1c4a9f1f65111f6999",
+        "requires": [
+          "query-tail-trim"
+        ],
+        "after_tree": "06575c062eb17ad1bafa7cca9f5bae330521b33b",
+        "source": "Return exact prepared token IDs without text pieces for tool-card prefix proof"
+      },
+      {
+        "id": "step-gc-restore-projection",
+        "path": "backends/patches/ninfer-step-gc-restore-projection.patch",
+        "sha256": "d894b37c690df2916b118d9593c6a2424f4ab8768e9e1955989634127a2efc51",
+        "requires": [
+          "tool-card-template-token-ids"
+        ],
+        "after_tree": "bb7f1118cfb5ca73cc0b64f6264e3628931b5766",
+        "source": "Exclude approved marked sources during an existing checkpoint restore while retaining complete witness coverage, state and tail protection"
       }
     ]
   },

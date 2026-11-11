@@ -15,6 +15,8 @@ inline bool historical_kv_audit_enabled() noexcept {
 inline const char * historical_kv_audit_reason(HistoricalKvDeleteReason reason) noexcept {
     switch (reason) {
     case HistoricalKvDeleteReason::Lru: return "lru";
+    case HistoricalKvDeleteReason::Semantic: return "semantic";
+    case HistoricalKvDeleteReason::CapacityLru: return "capacity_lru";
     case HistoricalKvDeleteReason::Custom: return "custom";
     case HistoricalKvDeleteReason::Redundancy: return "redundancy";
     }

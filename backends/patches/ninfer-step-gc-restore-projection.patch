@@ -1,0 +1,70 @@
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 898b2b108a51585a006bb11a50d4ec0cdc3dc506..f3004f82f3925667a3d19d75c2550cc98714596f 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -100,9 +100,17 @@ CheckpointPage checkpoint_page(const KvmemWindowState& window, const KvmemPrefix
+     const auto pages = kv_pages_for_tokens(frontier);
+     if (page >= pages || page >= window.archive.size() || page >= window.host_versions.size())
+         return CheckpointPage::Missing;
+-    if (memory_page_selectable(window, page))
+-        return window.archive[page] && window.host_versions[page] >= valid_columns(page, frontier)
+-            ? CheckpointPage::Available : CheckpointPage::Missing;
++    if (memory_page_selectable(window, page)) {
++        if (!window.archive[page] || window.host_versions[page] < valid_columns(page, frontier))
++            return CheckpointPage::Missing;
++        // Restoring the next request already replaces the old native reader.
++        // Do not reload an owner-marked source merely because that reader kept
++        // its Host record pinned. Preserve old checkpoints without the witness.
++        if (window.historical_evidence && checkpoint_can_omit(window, checkpoint, page,
++                window.historical_evidence->selection_witness(page), frontier, recent_blocks))
++            return CheckpointPage::Omit;
++        return CheckpointPage::Available;
++    }
+     if (page < window.retired_witnesses.size() && checkpoint_can_omit(window, checkpoint, page,
+             window.retired_witnesses[page], frontier, recent_blocks)) return CheckpointPage::Omit;
+     return CheckpointPage::Missing;
+@@ -2091,19 +2099,23 @@ void ProgramImpl::restore_memory_prefix(SequenceState& sequence, const KvmemPref
+     // A sparse history need only retain the pages the checkpoint actually
+     // restores. Later Query selection is restricted to still-live pages.
+     std::size_t omitted = 0;
+-    for (const auto id : checkpoint.resident_pages) {
++    std::vector<std::uint64_t> projected_pages;
++    for (auto it = checkpoint.resident_pages.begin(); it != checkpoint.resident_pages.end(); ++it) {
++        const auto id = *it;
+         const auto availability = checkpoint_page(window, checkpoint, static_cast<uint32_t>(id),
+                                                   frontier, kvmem_options.recent_blocks());
+         if (availability == CheckpointPage::Missing) {
+             throw std::logic_error("KVMem checkpoint has an incomplete native prefix");
+         }
+-        omitted += availability == CheckpointPage::Omit;
+-    }
+-    std::vector<std::uint64_t> projected_pages;
+-    if (omitted) {
+-        projected_pages.reserve(checkpoint.resident_pages.size() - omitted);
+-        for (const auto id : checkpoint.resident_pages)
+-            if (memory_page_selectable(window, static_cast<std::uint32_t>(id))) projected_pages.push_back(id);
++        if (availability == CheckpointPage::Omit) {
++            if (!omitted) {
++                projected_pages.reserve(checkpoint.resident_pages.size() - 1);
++                projected_pages.insert(projected_pages.end(), checkpoint.resident_pages.begin(), it);
++            }
++            ++omitted;
++        } else if (omitted) {
++            projected_pages.push_back(id);
++        }
+     }
+     if(checkpoint.graph.accepted_through!=frontier || checkpoint.graph.block_tokens!=page_tokens)
+         throw std::logic_error("KVMem checkpoint graph has a different accepted prefix");
+@@ -2389,7 +2401,11 @@ bool ProgramImpl::prepare_memory_materialization(MaterializationTransaction& tra
+         auto& work = *prepared->work;
+         const auto& checkpoint = *memory_checkpoint(history, match->kind);
+         for (const auto id : checkpoint.resident_pages) {
+-            if (!memory_page_selectable(history, static_cast<std::uint32_t>(id))) continue;
++            const auto availability = checkpoint_page(history, checkpoint, static_cast<std::uint32_t>(id),
++                                                       match->frontier, kvmem_options.recent_blocks());
++            if (availability == CheckpointPage::Missing)
++                throw std::logic_error("prepared history lost a required checkpoint page");
++            if (availability == CheckpointPage::Omit) continue;
+             work.ids.push_back(static_cast<std::uint32_t>(id));
+             work.sources.push_back(history.archive.at(id).source());
+         }

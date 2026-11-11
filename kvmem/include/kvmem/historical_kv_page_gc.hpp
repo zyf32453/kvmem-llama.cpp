@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kvmem/historical_kv_gc.hpp"
+#include "kvmem/historical_kv_semantic.hpp"
 #include "kvmem/host_kv_storage.hpp"
 
 #include <atomic>
@@ -19,6 +20,7 @@ namespace kvmem {
 class HistoricalKvPageGc final {
 public:
     struct Config {
+        std::shared_ptr<HistoricalKvStepEvidence> evidence;
         uint32_t slots = 0;
         uint32_t logical_pages = 0;
         uint32_t page_tokens = 64;
@@ -47,6 +49,7 @@ public:
     struct RetiredPage {
         uint32_t page = 0;
         HistoricalKvHandle handle{};
+        HistoricalKvStepEvidence::RetainedWitness witness{};
     };
 
     explicit HistoricalKvPageGc(Config config);

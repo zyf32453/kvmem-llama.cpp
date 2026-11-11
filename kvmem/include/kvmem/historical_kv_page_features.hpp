@@ -19,10 +19,17 @@ public:
     size_t dimensions() const noexcept override { return dimensions_; }
     bool begin_round(uint64_t incarnation) override;
     bool read(const HistoricalKvBlockMeta & meta, float * descriptor, double & importance) override;
+    // A proactive deletion must distinguish an unobserved page from a measured
+    // zero. Pressure policies retain their existing read() convention.
+    bool read_observed(const HistoricalKvBlockMeta &, float *, double &);
     bool refresh_before_rank() const noexcept override { return true; }
     uint64_t question_epoch() const noexcept override {
         return question_epoch_.load(std::memory_order_acquire);
     }
+    uint64_t observation_revision() const noexcept {
+        return observation_revision_.load(std::memory_order_acquire);
+    }
+    bool any_observed(const std::vector<uint32_t>& pages) const;
 
     bool has_page(uint32_t page) const;
     // A sealed page is published once. Rewriting an ID requires truncate_to()
@@ -47,6 +54,7 @@ private:
     // mutate this frozen view, even during a multi-tick comparison round.
     std::vector<double> frozen_importance_;
     std::atomic<uint64_t> question_epoch_{1};
+    std::atomic<uint64_t> observation_revision_{0};
 };
 
 } // namespace kvmem

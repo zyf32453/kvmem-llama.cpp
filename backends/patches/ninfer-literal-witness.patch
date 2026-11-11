@@ -1,0 +1,82 @@
+diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
+index f5f605261b6070e9ae0a7b7b1e488441b0e77070..7be831a448e094b42d4783584c4fe5eab6fa2b89 100644
+--- a/src/models/qwen3_5/frontend/frontend.cpp
++++ b/src/models/qwen3_5/frontend/frontend.cpp
+@@ -1,5 +1,7 @@
+ #include "models/qwen3_5/frontend/frontend.h"
+ 
++#include "core/paged_kv_cache.h"
++#include "kvmem/historical_kv_semantic.hpp"
+ #include "models/qwen3_5/frontend/resources.h"
+ #include "models/qwen3_5/frontend/digest.h"
+ #include "models/qwen3_5/frontend/prepared_prompt.h"
+@@ -1545,9 +1547,36 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+         }
+         if (fi::sha256_hex(fi::sha256(bytes)) != proof.prefix_sha256)
+             throw RequestError(RequestErrorKind::InvalidGcEvidence, "GC evidence prefix token digest mismatch");
+-        for (const auto& step : proof.steps)
++        result.historical_gc_witness_masks.resize(proof.steps.size());
++        constexpr auto page_tokens = static_cast<std::size_t>(kPagedKVPageSize);
++        const auto first_page = [](std::uint32_t token) {
++            return (std::size_t(token) + page_tokens - 1) / page_tokens;
++        };
++        for (std::size_t index = 0; index < proof.steps.size(); ++index) {
++            const auto& step = proof.steps[index];
+             if (step.source_end > proof.prefix_tokens || step.result_end > proof.prefix_tokens)
+                 throw RequestError(RequestErrorKind::InvalidGcEvidence, "GC evidence exceeds its verified prefix");
++            if (step.kind != "thinking") continue;
++            const auto source_begin = first_page(step.source_begin);
++            const auto source_end = step.source_end / page_tokens;
++            const auto result_begin = first_page(step.result_begin);
++            const auto result_end = step.result_end / page_tokens;
++            if (source_end <= source_begin || result_end <= result_begin ||
++                source_end - source_begin > kvmem::historical_kv_max_source_pages ||
++                result_end - result_begin > kvmem::historical_kv_max_witness_pages) continue;
++            const std::vector<TokenId> source(result.token_ids.begin() + source_begin * page_tokens,
++                result.token_ids.begin() + source_end * page_tokens);
++            const std::vector<TokenId> witnesses(result.token_ids.begin() + result_begin * page_tokens,
++                result.token_ids.begin() + result_end * page_tokens);
++            std::vector<std::uint8_t> digits;
++            digits.reserve(source.size());
++            for (const auto token : source) {
++                const auto piece = impl_->tokenizer->decode_token_bytes(token, false);
++                digits.push_back(piece.find_first_of("0123456789") != std::string_view::npos);
++            }
++            result.historical_gc_witness_masks[index] =
++                kvmem::historical_kv_literal_witnesses(source, digits, witnesses, page_tokens);
++        }
+     }
+     result.prepare.seconds = std::chrono::duration<double>(Clock::now() - start).count();
+     return PreparedPrompt(std::move(prepared));
+diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
+index b22e87fbc8cf72d811bce769005f4b6745503d2e..80d7b93e4f6c04c92c2e4bc539d81f920b9acc9b 100644
+--- a/src/models/qwen3_5/frontend/prepared_prompt.h
++++ b/src/models/qwen3_5/frontend/prepared_prompt.h
+@@ -153,6 +153,7 @@ struct PreparedTapHints {
+ 
+ struct PreparedPromptData {
+     std::optional<HistoricalGcEvidenceBatch> historical_gc_evidence;
++    std::vector<std::vector<std::uint8_t>> historical_gc_witness_masks;
+     // Proposal-only sources, never part of target tokens, positions or cache identity.
+     std::vector<std::vector<TokenId>> ngram_sources;
+     std::vector<TokenId> ngram_boundaries;
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 23ae428dc3fa76834769c36172d4b745646d5f69..aa638c8b45772fcfa1e548765ee9e38a35a7838b 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1125,9 +1125,14 @@ void ProgramImpl::stage_historical_evidence(SequenceState& sequence, const Prepa
+     if (prompt.historical_gc_evidence) {
+         const auto& proof = *prompt.historical_gc_evidence;
+         std::vector<kvmem::HistoricalKvStepEvidence::Update> updates;
+-        for (const auto& step : proof.steps)
++        updates.reserve(proof.steps.size());
++        for (size_t index = 0; index < proof.steps.size(); ++index) {
++            const auto& step = proof.steps[index];
+             updates.push_back({step.id, step.kind, step.source_begin, step.source_end, step.result_begin,
+                 step.result_end, step.observation_id, step.importance, step.cold, step.complete});
++            if (kvmem_options.historical_gc_step_redundancy)
++                updates.back().witness_masks = prompt.historical_gc_witness_masks.at(index);
++        }
+         try { window.historical_evidence->publish(updates, proof.prefix_tokens); }
+         catch (const std::invalid_argument& e) { throw RequestError(RequestErrorKind::InvalidGcEvidence, e.what()); }
+     }
