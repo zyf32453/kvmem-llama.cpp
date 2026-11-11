@@ -1,0 +1,364 @@
+{
+  "experiment": "terminal-bench-r14-pressure-active16k-host64k-20261112",
+  "source": {
+    "repository_commit": "ee0fa7f898a1da1e53653b11d97878ed199c5c26",
+    "ninfer_prepared_tree": "bb7f1118cfb5ca73cc0b64f6264e3628931b5766",
+    "ninfer_binary_sha256": "7b66deb00aad36b5546bc0ce7635700c802bc602e8a1b7c19b3ff0c536aaedac",
+    "runner_sha256": "8b180a541ab6bbe851f748d5158e3aee554e0d8e64b3bd4bf87a5aef0b8117f5",
+    "python_sha256": {
+      "agent_phase_capture.py": "899bbdc43937436bb61b5dacad87ec6e4b0f6c3b3f56551bf93387f09b422d8f",
+      "agent_phase_profile.py": "576f9ac607b3cd1ab0d289ec1389d8cda5dfc0e6aac109f303670c33694831bd",
+      "analyze_ninfer_gc_thinking_summary.py": "c3c7b3b64b695f2798050ca6cb4a2d1053df9dbcdc7a95c2ef696309cf4c848d",
+      "audit_ninfer_gc_tool_cards.py": "c73bb0f318c38c32aeb3837fdf55352ca08fec5d026eb1c2b411791ca6a36074",
+      "benchmark_ninfer_gc_producer.py": "ba862b875d84d578c678d5ff8ff8c2e0ff6d35119a630559c01dfe6a8d66322a",
+      "calibrate_ninfer_gc_tool_cards.py": "7ff5c106422546cc5e20d0bc2919f5bcd3d8fc0cf6685764da3c0f0197133ed6",
+      "check_ninfer_gc_step_boundary.py": "7d3776fa434d40917ecf45ac8ef0ee8c0777ab9683cca523cdeeac10299f6104",
+      "check_ninfer_gc_summary_continuation.py": "daadf7688157db40727cb77babd534ad2f8b83397e0d6ef99806dade6867f551",
+      "check_ninfer_gc_terminus_adapter.py": "aa7456dd7824546f891bb28933efd42275ec10b4730ccfc3fe072fb0299434de",
+      "check_ninfer_gc_tool_cards_native.py": "6a060ce6fa25f4ebe4212bfad0f03dcb39dfabd32ee88c3e78bd17f90f23745c",
+      "ninfer_gc_acceptance.py": "985b42f529e5a6c2a89e202a7ee738da32bcf5336dd53dfb628bb60d4f9dfe82",
+      "ninfer_gc_agent_bridge.py": "2ef237e0e4982dc652acd5d9a24d61fad4e4f335f0c5ebdc86c79c71066ab6e7",
+      "ninfer_gc_harbor.py": "3578a36d8f19b6205ccebf66da4bcc01db96edbb215fc2378f8cc2ca13a16f61",
+      "ninfer_gc_inline_summary.py": "3727dbc10089ce1ad1e76a722f6412a98b9dffc2d87d31eb92e646a1060fb743",
+      "ninfer_gc_latency.py": "d492cc68e771f7ef618d47202ae4f9a34c8abdb379b85839a21fe3db7c5b4d3b",
+      "ninfer_gc_proactive_probe.py": "1dfe656931122c8fcabff49058f80965ac9494bdf923318343bf9a15fbb214d5",
+      "ninfer_gc_step.py": "5d3bafac739bf3dd17b1c498962bee8e9e2256c9af889ebb0fa791f922543905",
+      "ninfer_gc_step_controller.py": "944290b33c9620020bd06623a6f3a116b342d4e3b837a7459a5e1b79c183cafe",
+      "ninfer_gc_terminal.py": "ae36331ca3ab1ada80fe11cf05717dce5a46912343e1c86cfd4871674f3f69f7",
+      "ninfer_gc_terminus_agent.py": "25209704602ccb4e5913d444bf0581af9dde17c6960b8adc55e789d73c863687",
+      "ninfer_gc_thinking_summary.py": "55f81c2b8e1c71cf98a2c1d6b6caf5f3230791bb0d236ca03f838761d825d215",
+      "ninfer_gc_tool_cards.py": "75d2ac94bde935c37c8d1830bca5e1e1409e04ed2ab94d45e424e47bd2b90622",
+      "terminus_response_format.py": "fcfc2e8356204145c79910f2b76f25ec35d409f239389d7993556873da453225",
+      "test_agent_phase_profile.py": "3214aaec3ae7a14b2937b490ff7c6d07f767b9eabc0f6bf4692ab94056b4988d",
+      "test_ninfer_gc_agent_bridge.py": "53b7b42f0ac36e3cabdb3b04b7b3d1b9ca6ea529fe0129e8b45494c1a8306c00",
+      "test_ninfer_gc_inline_summary.py": "027c0cf41cec5f5e12bfd2a6b964a20bcaf8aa3c60b935ad0aadbbf166d81bf3",
+      "test_ninfer_gc_proactive_probe.py": "19740bf8cfba23dc81905ac6ef4fbd4258107d5b870ac08456795610040c2936",
+      "test_ninfer_gc_step.py": "42edf1456e7b9e8687404a7b4df4fb77571064c3bf02a352954f7eb0beb32da9",
+      "test_ninfer_gc_terminal.py": "d7fdd067d790b698ae82373c21db3b5359247ee389431f73c884c3c2bbf3a7bf",
+      "test_ninfer_gc_thinking_summary.py": "bb5ff72a89a16f13ee217c019f51e1c03d1fa42ee934c5b1ac4a03ef4fac8f16",
+      "test_ninfer_gc_tool_cards.py": "07b9454f7abd0de25de720616fe8a4dde74a6dc9c2542440391285f8afee7f49"
+    },
+    "restore_projection_files_sha256": {
+      "backends/ninfer/src/models/qwen3_5/program/storage/kvmem_window.cpp": "6a5831421857f14b372adcdb86fb512b34cd8dcfca119ceee84b2ab70987c4e4",
+      "kvmem/include/kvmem/historical_kv_semantic.hpp": "5f5ef7a7c84999a8a3e61e6926ea9f1732e48f9a760f3476e24dc77990b27b4c",
+      "kvmem/src/host/historical_kv_semantic.cpp": "241ee8b63dedca365532631614d73a98247bb1e547dbfeb96258e0d957c77449",
+      "kvmem/tests/historical_gc_step_redundancy_test.cpp": "3211ad35ed110aeb91679681d6cd62ea2a0c15045060269a7a594bdc8f093ede",
+      "backends/versions.json": "399ba1d5046665115f6d9a13ea4fc472ea411e37d860fcd285e9c6638032c022",
+      "backends/patches/ninfer-step-gc-restore-projection.patch": "d894b37c690df2916b118d9593c6a2424f4ab8768e9e1955989634127a2efc51"
+    },
+    "repository_comparison": {
+      "files_checked": 36,
+      "byte_identical": 27,
+      "line_endings_or_final_blank_lines_only": [
+        "scripts/check_ninfer_gc_step_boundary.py",
+        "scripts/check_ninfer_gc_summary_continuation.py",
+        "scripts/check_ninfer_gc_terminus_adapter.py",
+        "scripts/ninfer_gc_acceptance.py",
+        "scripts/ninfer_gc_step_controller.py",
+        "scripts/test_ninfer_gc_inline_summary.py",
+        "scripts/test_ninfer_gc_thinking_summary.py",
+        "kvmem/include/kvmem/historical_kv_semantic.hpp",
+        "kvmem/src/host/historical_kv_semantic.cpp"
+      ],
+      "matching_native_patch_hashes": 40
+    }
+  },
+  "configuration": {
+    "active_tokens": 16384,
+    "gen_tokens": 16384,
+    "device_window_tokens": 32768,
+    "host_mib": 1190,
+    "host_capacity_tokens": 65536,
+    "host_page_bytes": 1218560,
+    "block_tokens": 64,
+    "mtp_drafts": 4,
+    "logical_context_tokens": 262144,
+    "agent_timeout": 14400,
+    "host_and_model_reset_per_arm": true,
+    "query_tail_trim": true,
+    "capacity_lru": true,
+    "tool_cards_enabled": false,
+    "model": "Qwen3.8-27B-GSQ-RCO-IQ3_S-ninfer-v3",
+    "gpu": "NVIDIA GeForce RTX 3080 Ti Laptop GPU (16GB)",
+    "harness": "Harbor 0.25 / Terminus-2",
+    "common_native_args": [
+      "--kvmem",
+      "--kvmem-budget",
+      "16384",
+      "--kvmem-gen-reserve",
+      "16384",
+      "--kvmem-host-mib",
+      "1190",
+      "--kvmem-sink-tokens",
+      "2048",
+      "--kvmem-recent-tokens",
+      "64",
+      "--max-context",
+      "262144",
+      "--kvmem-query-scorer",
+      "meanq-cosine",
+      "--kvmem-score-agg",
+      "max",
+      "--no-kvmem-lrfu",
+      "--kvmem-graph-alpha",
+      "0",
+      "--kvmem-query-max-tokens",
+      "8192",
+      "--kvmem-query-replay-max-tokens",
+      "8192",
+      "--kv-dtype",
+      "rk4v4",
+      "--max-concurrency",
+      "1",
+      "--prefill-chunk",
+      "512",
+      "--default-max-tokens",
+      "16384",
+      "--default-thinking-budget",
+      "4096",
+      "--spec",
+      "mtp",
+      "--draft-tokens",
+      "4",
+      "--ngram-draft-tokens",
+      "0",
+      "--lm-head-draft",
+      "--device-profile",
+      "off",
+      "--structured-output",
+      "--kvmem-gc-step-redundancy",
+      "--kvmem-gc-min-observations",
+      "1",
+      "--kvmem-gc-min-cold-observations",
+      "0",
+      "--kvmem-gc-max-importance",
+      "1"
+    ],
+    "model_call_parameters": {
+      "max_tokens": 16384,
+      "temperature": 0.6,
+      "seed": 1000,
+      "top_p": 0.95,
+      "extra_body": {
+        "top_k": 20,
+        "min_p": 0,
+        "thinking_budget": 4096
+      }
+    },
+    "trace_environment": {
+      "KVMEM_GC_AUDIT": 1,
+      "KVMEM_CAPACITY_WAIT_TRACE": 1,
+      "KVMEM_TRANSFER_TRACE": 1,
+      "KVMEM_QUERY_REPLAY_TRACE": 1,
+      "KVMEM_DECODE_ROUND_TRACE": 1,
+      "KVMEM_QUERY_TAIL_TRIM": 1
+    }
+  },
+  "task_pins": [
+    {
+      "task": "llm-inference-batching-scheduler",
+      "task_checksum": "105e4211dce5a4538df129f60d4aaef26f3632c98144fdd588ddca72f0962c27",
+      "image_id": "sha256:ad0b55819d626b311687cad620b1fc7ff34ed543774dcd49940cfa89f00b3cc7",
+      "trial_order": [
+        "proactive-off",
+        "proactive-only"
+      ]
+    },
+    {
+      "task": "torch-pipeline-parallelism",
+      "task_checksum": "b713f23990c43e4c3df40d4ab339d55530315dd783fd2782c84e79933b123b21",
+      "image_id": "sha256:dddaf4ddae45a1cdbaa036deb7f218796bdf9bf13cf73a997b70daf964b90c65",
+      "trial_order": [
+        "proactive-only",
+        "proactive-off"
+      ]
+    }
+  ],
+  "attempts": [
+    {
+      "task": "llm-inference-batching-scheduler",
+      "arm": "proactive-off",
+      "controller_mode": "off",
+      "duplicate_feedback": false,
+      "official_reward": 1,
+      "official_trial_seconds": 968.222197,
+      "official_result_archive_member": "12-llm-inference-batching-scheduler-proactive-off/jobs/job/llm-inference-batching-scheduler__BvoJmB8/result.json",
+      "official_result_sha256": "dedde209f3b7dcb1ea5362ad90b72d8bcde339edcc465851e0d4204b9913f2ad",
+      "pytest_counts": {
+        "passed": 6
+      },
+      "harbor_exception_type": null,
+      "stages_seconds": {
+        "environment_setup": 1.925964,
+        "agent_setup": 18.868902,
+        "agent_execution": 925.907349,
+        "verifier": 10.157912
+      },
+      "http_statuses": {
+        "200": 13
+      },
+      "model_http_seconds": 778.1978743588552,
+      "output_tokens": 36185,
+      "peak_prompt_plus_completion_tokens": 72255,
+      "host_capacity_pressure_observed": true,
+      "capacity_wait_events": 0,
+      "reusable_host_handles": {
+        "proactive": 0,
+        "capacity_lru": 161
+      },
+      "sampled_min_host_free_bytes": 56053760,
+      "projected_prefix_restores": 0,
+      "decode_round_p95_ms": 87.576938,
+      "decode_tokens_per_second": 53.74632002527524,
+      "mtp_acceptance_fraction": 0.6881419234360411,
+      "h2d_payload_bytes": 6713047040,
+      "d2h_payload_bytes": 1915576320,
+      "native_peak_rss_kib": 6030200
+    },
+    {
+      "task": "llm-inference-batching-scheduler",
+      "arm": "proactive-only",
+      "controller_mode": "reclaim",
+      "duplicate_feedback": true,
+      "official_reward": null,
+      "official_trial_seconds": 4939.039943,
+      "official_result_archive_member": "12-llm-inference-batching-scheduler-proactive-only/jobs/job/llm-inference-batching-scheduler__HA9k3uB/result.json",
+      "official_result_sha256": "18fa8a8dc0595e9d77d9e1dea5c50f7369413aa3d15f5d595aa583b180f75d07",
+      "pytest_counts": null,
+      "harbor_exception_type": "ContextLengthExceededError",
+      "stages_seconds": {
+        "environment_setup": 1.997239,
+        "agent_setup": 16.694982,
+        "agent_execution": 4909.089818,
+        "verifier": null
+      },
+      "http_statuses": {
+        "200": 95,
+        "400": 1
+      },
+      "model_http_seconds": 3838.1107059066417,
+      "output_tokens": 162353,
+      "peak_prompt_plus_completion_tokens": 262145,
+      "host_capacity_pressure_observed": true,
+      "capacity_wait_events": 0,
+      "reusable_host_handles": {
+        "proactive": 166,
+        "capacity_lru": 2954
+      },
+      "sampled_min_host_free_bytes": 51179520,
+      "projected_prefix_restores": 11,
+      "decode_round_p95_ms": 87.004559,
+      "decode_tokens_per_second": 48.48892859993021,
+      "mtp_acceptance_fraction": 0.634402332361516,
+      "h2d_payload_bytes": 55067944960,
+      "d2h_payload_bytes": 7411281920,
+      "native_peak_rss_kib": 8731084
+    },
+    {
+      "task": "torch-pipeline-parallelism",
+      "arm": "proactive-only",
+      "controller_mode": "reclaim",
+      "duplicate_feedback": true,
+      "official_reward": 0,
+      "official_trial_seconds": 1327.221883,
+      "official_result_archive_member": "15-torch-pipeline-parallelism-proactive-only/jobs/job/torch-pipeline-parallelism__Q58Lckq/result.json",
+      "official_result_sha256": "b3f746dbf9f34a07b2677a8472b56136dd14189fce09a9320679a859064e6d40",
+      "pytest_counts": {
+        "failed": 2,
+        "passed": 2
+      },
+      "harbor_exception_type": null,
+      "stages_seconds": {
+        "environment_setup": 1.957382,
+        "agent_setup": 20.230719,
+        "agent_execution": 1133.065093,
+        "verifier": 159.727456
+      },
+      "http_statuses": {
+        "200": 18
+      },
+      "model_http_seconds": 657.9868210100103,
+      "output_tokens": 32231,
+      "peak_prompt_plus_completion_tokens": 55378,
+      "host_capacity_pressure_observed": false,
+      "capacity_wait_events": 0,
+      "reusable_host_handles": {
+        "proactive": 0,
+        "capacity_lru": 0
+      },
+      "sampled_min_host_free_bytes": 192532480,
+      "projected_prefix_restores": 0,
+      "decode_round_p95_ms": 81.000451,
+      "decode_tokens_per_second": 54.47609693291724,
+      "mtp_acceptance_fraction": 0.6323432704953967,
+      "h2d_payload_bytes": 7539230720,
+      "d2h_payload_bytes": 1370880000,
+      "native_peak_rss_kib": 6287096
+    },
+    {
+      "task": "torch-pipeline-parallelism",
+      "arm": "proactive-off",
+      "controller_mode": "off",
+      "duplicate_feedback": false,
+      "official_reward": 0,
+      "official_trial_seconds": 1025.848276,
+      "official_result_archive_member": "15-torch-pipeline-parallelism-proactive-off/jobs/job/torch-pipeline-parallelism__ZJA9Jbf/result.json",
+      "official_result_sha256": "4e484b02a5ef2c3809119f91577c1939ee296ce6cfdc51c590781183bb6307fb",
+      "pytest_counts": {
+        "failed": 2,
+        "passed": 2
+      },
+      "harbor_exception_type": null,
+      "stages_seconds": {
+        "environment_setup": 1.968489,
+        "agent_setup": 16.795878,
+        "agent_execution": 879.238733,
+        "verifier": 115.295976
+      },
+      "http_statuses": {
+        "200": 14
+      },
+      "model_http_seconds": 516.899598671007,
+      "output_tokens": 24694,
+      "peak_prompt_plus_completion_tokens": 41647,
+      "host_capacity_pressure_observed": false,
+      "capacity_wait_events": 0,
+      "reusable_host_handles": {
+        "proactive": 0,
+        "capacity_lru": 0
+      },
+      "sampled_min_host_free_bytes": 454522880,
+      "projected_prefix_restores": 0,
+      "decode_round_p95_ms": 83.622639,
+      "decode_tokens_per_second": 52.5760870035291,
+      "mtp_acceptance_fraction": 0.6142742020251568,
+      "h2d_payload_bytes": 4583004160,
+      "d2h_payload_bytes": 1015060480,
+      "native_peak_rss_kib": 5905544
+    }
+  ],
+  "trajectory_observations": {
+    "first_different_request": {
+      "llm-inference-batching-scheduler": 4,
+      "torch-pipeline-parallelism": 2
+    },
+    "batching_first_proactive_mark": {
+      "first_mark": "KVMEM_STEP_MARK frontier=77152 pages=4 mark_us=15",
+      "prior_completed_requests": 18,
+      "prior_http_seconds": 1050.2235477168579,
+      "prior_output_tokens": 42323,
+      "off_entire_trial_seconds": 968.222197,
+      "native_info_request": 19
+    }
+  },
+  "evidence_archive": {
+    "filename": "terminal-bench-r14-pressure-evidence.zip",
+    "zip_bytes": 23365906,
+    "zip_sha256": "f5c3d8f138e20341129cc118f160b85bce9b0eddd112e5bbc78caa363fca4ef9",
+    "manifest_members_checked": 1024,
+    "all_hashes_match": true,
+    "official_attempts_checked": 4,
+    "retention": "Local benchmark archive. This JSON contains the shareable metrics and source fingerprints."
+  },
+  "interpretation": "One attempt per task and arm. A null reward records an unscored attempt. No pair completed with a passing reward in both arms. Trajectory differences limit causal attribution."
+}
